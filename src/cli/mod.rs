@@ -1,12 +1,11 @@
 //! CLI surface (clap definitions + dispatcher).
 //!
-//! Every subcommand is a stub in Unit 1; concrete handlers land alongside
-//! the unit that owns the underlying behaviour. The dispatcher is sync
-//! because Unit 1 has no async work — Unit 2's daemon client will switch
-//! it to async via an internal helper, with `main` already on the tokio
-//! runtime.
+//! The dispatcher is `async` because Unit 2's daemon client speaks Tokio.
+//! Subcommands not yet implemented remain as `unimplemented!` so callers
+//! see the wiring is in place without claiming work that isn't done.
 
 pub mod cli_args;
+pub mod daemon;
 
 use anyhow::Result;
 
@@ -21,18 +20,11 @@ pub use cli_args::{
 
 /// Dispatch the parsed CLI to its handler. The `config` argument carries
 /// the merged user-config (loaded with the `--config` override already
-/// applied) so handlers don't have to re-resolve the file path. Unit 1
-/// leaves the actual per-command behaviour as `unimplemented!` placeholders
-/// so callers can see the wiring is in place — `cargo build` succeeds and
-/// the help text is complete — without claiming work that isn't done yet.
-pub fn dispatch(cli: Cli, _config: LoadedConfig) -> Result<()> {
+/// applied) so handlers don't have to re-resolve the file path.
+pub async fn dispatch(cli: Cli, _config: LoadedConfig) -> Result<()> {
   match cli.command {
     None => unimplemented!("TUI entry — Unit 6"),
-    Some(Command::Daemon(DaemonAction::Start { .. })) => {
-      unimplemented!("daemon start — Unit 2")
-    }
-    Some(Command::Daemon(DaemonAction::Stop)) => unimplemented!("daemon stop — Unit 2"),
-    Some(Command::Daemon(DaemonAction::Status)) => unimplemented!("daemon status — Unit 2"),
+    Some(Command::Daemon(action)) => daemon::handle(action).await,
     Some(Command::List(_)) => unimplemented!("list — Unit 8"),
     Some(Command::Start(_)) => unimplemented!("start — Unit 8"),
     Some(Command::Stop(_)) => unimplemented!("stop — Unit 8"),

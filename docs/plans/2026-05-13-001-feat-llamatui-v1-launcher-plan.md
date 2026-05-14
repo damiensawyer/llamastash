@@ -238,7 +238,7 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 
 ---
 
-- [ ] **Unit 2: Daemon process, Unix socket IPC, peercred auth, single-instance lock**
+- [x] **Unit 2: Daemon process, Unix socket IPC, peercred auth, single-instance lock**
 
 **Goal:** A `llamatui daemon start` subcommand that opens a `0600` Unix socket, accepts JSON-RPC requests with peercred verification, rejects non-owner peers, writes a PID lockfile, and exits cleanly on `llamatui daemon stop` or SIGINT. No model methods yet — only `ping`, `version`, and `shutdown` so the protocol is exercisable.
 
