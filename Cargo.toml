@@ -23,6 +23,12 @@ exclude = [
 
 [dependencies]
 anyhow = "1.0"
+# `wayland-data-control` activates arboard's native Wayland backend
+# alongside the default X11/XWayland one. Both ship together so a
+# single binary works across compositors without recompilation.
+arboard = { version = "3", default-features = false, features = [
+  "wayland-data-control",
+] }
 blake3 = { version = "1", default-features = false, features = ["std"] }
 clap = { version = "4.6", default-features = false, features = [
   "help",

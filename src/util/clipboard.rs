@@ -1,13 +1,19 @@
 //! Cross-platform clipboard write helper used by the TUI's yank
 //! commands (R30).
 //!
-//! v1 strategy: shell out to whichever of `wl-copy`, `xclip`,
-//! `xsel`, or `pbcopy` (macOS) is available, in that priority. We
-//! deliberately avoid `arboard` for v1 to keep the build dep-light;
-//! the shell-out fallback also doesn't require an X/Wayland display
-//! at compile time. If every tool is missing the call returns
-//! `ClipboardError::NoBackend`; the TUI surfaces a transient toast
-//! that prints the URL inline so the user can copy by hand.
+//! Strategy, per the plan:
+//! 1. Native first — `arboard` ships X11/XWayland by default and a
+//!    Wayland-data-control backend behind a feature flag. It
+//!    handles clipboard ownership, MIME negotiation, and macOS /
+//!    Windows out of the box.
+//! 2. Shell-out fallback — when `arboard` returns an error (e.g.
+//!    headless container, exotic Wayland compositor without
+//!    `wlr-data-control`, missing display server), we attempt
+//!    `wl-copy` / `xclip` / `xsel` (Linux) or `pbcopy` (macOS).
+//! 3. If every path fails, return [`ClipboardError::NoBackend`]
+//!    with the list we tried; the TUI surfaces it as a transient
+//!    toast that prints the URL inline so the user can copy it
+//!    manually.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -15,14 +21,11 @@ use std::process::{Command, Stdio};
 /// Outcome of a clipboard write.
 #[derive(Debug)]
 pub enum ClipboardError {
-  /// None of the supported helper binaries are on `$PATH`.
-  NoBackend { tried: Vec<&'static str> },
-  /// The backend was found but failed (non-zero exit / IO error).
-  /// `backend` names which one was attempted.
-  BackendFailed {
-    backend: &'static str,
-    error: String,
-  },
+  /// Neither the native backend nor any shell-out helper worked.
+  NoBackend { tried: Vec<String> },
+  /// A backend was found but failed (non-zero exit / IO error /
+  /// arboard error). `backend` names which one was attempted.
+  BackendFailed { backend: String, error: String },
 }
 
 impl std::fmt::Display for ClipboardError {
@@ -43,41 +46,63 @@ impl std::fmt::Display for ClipboardError {
 impl std::error::Error for ClipboardError {}
 
 /// Copy `text` into the system clipboard. Returns the name of the
-/// backend that succeeded so the caller can mention it in a toast.
+/// backend that succeeded (e.g. `arboard`, `wl-copy`) so the
+/// caller can mention it in a toast.
 pub fn write(text: &str) -> Result<&'static str, ClipboardError> {
-  write_with(text, &default_backends())
-}
+  let mut tried: Vec<String> = Vec::new();
 
-/// Backend candidate list in priority order. Wayland-first because
-/// modern Linux desktops are usually Wayland; X tools work in
-/// XWayland too but `wl-copy` is the native path. `pbcopy` only
-/// matters on macOS.
-fn default_backends() -> Vec<&'static str> {
-  if cfg!(target_os = "macos") {
-    vec!["pbcopy"]
-  } else {
-    vec!["wl-copy", "xclip", "xsel"]
+  // 1. Native arboard. We construct + use the clipboard inside
+  // this function; on X11 arboard documents that the clipboard
+  // contents may vanish when the owning process exits, so callers
+  // that need long-lived contents must keep a `Clipboard` alive
+  // (TUI's yank-and-show-toast workflow doesn't need that — the
+  // user pastes within seconds).
+  match arboard::Clipboard::new() {
+    Ok(mut cb) => match cb.set_text(text.to_string()) {
+      Ok(()) => return Ok("arboard"),
+      Err(e) => {
+        tried.push(format!("arboard ({e})"));
+        log::debug!("arboard set_text failed: {e}; trying shell-out");
+      }
+    },
+    Err(e) => {
+      tried.push(format!("arboard ({e})"));
+      log::debug!("arboard init failed: {e}; trying shell-out");
+    }
   }
-}
 
-fn write_with(text: &str, backends: &[&'static str]) -> Result<&'static str, ClipboardError> {
-  let mut tried: Vec<&'static str> = Vec::new();
-  for backend in backends {
+  // 2. Shell-out fallback. This is the path that catches
+  // headless / exotic-compositor setups where arboard can't
+  // attach. Try in priority order; first success wins.
+  for backend in shell_fallback_backends() {
     if which_on_path(backend).is_none() {
-      tried.push(backend);
+      tried.push((*backend).to_string());
       continue;
     }
     match write_via(backend, text) {
       Ok(()) => return Ok(backend),
       Err(e) => {
         return Err(ClipboardError::BackendFailed {
-          backend,
+          backend: (*backend).to_string(),
           error: e.to_string(),
-        })
+        });
       }
     }
   }
+
   Err(ClipboardError::NoBackend { tried })
+}
+
+/// Shell-out backends in priority order. Wayland-first because
+/// modern Linux desktops are usually Wayland; X tools work in
+/// XWayland too but `wl-copy` is the native path. `pbcopy` only
+/// matters on macOS.
+fn shell_fallback_backends() -> Vec<&'static str> {
+  if cfg!(target_os = "macos") {
+    vec!["pbcopy"]
+  } else {
+    vec!["wl-copy", "xclip", "xsel"]
+  }
 }
 
 fn write_via(backend: &str, text: &str) -> std::io::Result<()> {
@@ -142,30 +167,30 @@ mod tests {
   use super::*;
 
   #[test]
-  fn no_backend_error_lists_what_was_tried() {
-    let err = write_with("hello", &["nonexistent-clipboard-binary-9f3a"]).unwrap_err();
-    match err {
-      ClipboardError::NoBackend { tried } => {
-        assert_eq!(tried, vec!["nonexistent-clipboard-binary-9f3a"]);
-      }
-      other => panic!("expected NoBackend, got {other:?}"),
-    }
-  }
-
-  #[test]
   fn no_backend_message_is_actionable() {
     let err = ClipboardError::NoBackend {
-      tried: vec!["wl-copy", "xclip"],
+      tried: vec!["arboard (init failed)".into(), "wl-copy".into()],
     };
     let msg = err.to_string();
     assert!(msg.contains("Copy manually"));
+    assert!(msg.contains("arboard"));
     assert!(msg.contains("wl-copy"));
-    assert!(msg.contains("xclip"));
   }
 
   #[test]
-  fn default_backends_pick_correct_set_per_platform() {
-    let backends = default_backends();
+  fn backend_failed_message_names_backend_and_error() {
+    let err = ClipboardError::BackendFailed {
+      backend: "wl-copy".into(),
+      error: "exited Some(1): No display".into(),
+    };
+    let msg = err.to_string();
+    assert!(msg.starts_with("wl-copy clipboard write failed:"));
+    assert!(msg.contains("No display"));
+  }
+
+  #[test]
+  fn shell_fallback_backends_pick_correct_set_per_platform() {
+    let backends = shell_fallback_backends();
     if cfg!(target_os = "macos") {
       assert_eq!(backends, vec!["pbcopy"]);
     } else {
@@ -175,13 +200,18 @@ mod tests {
     }
   }
 
+  /// Exercise the shell-out path directly via a tool we know is on
+  /// $PATH on every dev box. Bypasses the arboard probe (which
+  /// returns success on headed systems and would shadow the
+  /// fallback we want to test).
   #[test]
-  fn write_with_uses_first_backend_that_exists() {
-    // `cat` is on PATH on every dev box and copies stdin to
-    // stdout. We don't actually verify the clipboard contents (the
-    // test box has no real clipboard); we just check `write_with`
-    // returns success when *some* backend works.
-    let backend = write_with("hello", &["cat"]).expect("cat backend works");
-    assert_eq!(backend, "cat");
+  fn write_via_succeeds_with_a_real_binary() {
+    write_via("cat", "hello").expect("cat should accept stdin and exit 0");
+  }
+
+  #[test]
+  fn which_on_path_finds_cat_but_not_a_made_up_name() {
+    assert!(which_on_path("cat").is_some());
+    assert!(which_on_path("nonexistent-tool-9f3a-llamatui").is_none());
   }
 }
