@@ -10,9 +10,11 @@ pub mod discovery_task;
 pub mod lockfile;
 pub mod peercred;
 pub mod ports;
+pub mod probe;
 pub mod server;
 pub mod shutdown;
 pub mod state_store;
+pub mod supervisor;
 
 use std::{
   fs,

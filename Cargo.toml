@@ -75,6 +75,20 @@ name = "llamatui"
 path = "src/main.rs"
 bench = false
 
+# Test-only fake `llama-server` exposed under a feature flag so it
+# never ships in `cargo install`-built artefacts. Integration tests
+# spawn this via `CARGO_BIN_EXE_fake_llama_server`.
+[[bin]]
+name = "fake_llama_server"
+path = "tests/fixtures/fake_llama_server.rs"
+required-features = ["test-fixtures"]
+bench = false
+test = false
+doc = false
+
+[features]
+test-fixtures = []
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
