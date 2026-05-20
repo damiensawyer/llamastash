@@ -369,3 +369,151 @@ arrives post-release.
   source-failure policy in `build_snapshot` (publish only if every
   source returned data) covers this — the bundled snapshot stays
   live until the next successful run.
+
+## Post-plan refinements (2026-05-20)
+
+After the seven planned units shipped, an audit comparing
+`llamastash init --only models --json` against
+`whichllm --json --top 10` revealed the recommendations had drifted —
+the top-3 surfaced two-generation-old Qwen 2.5 picks on a 64 GB box
+where whichllm picked Qwen3-30B-A3B / gemma-4-31B-it / gpt-oss-120b.
+Five follow-up commits landed to close most of the gap while keeping
+the architecture (snapshot + Rust runtime, no Python at user runtime)
+intact:
+
+1. **`refactor(snapshot): delegate benchmark scoring to whichllm`**
+   (`2dc70ff`) — collapsed 623 lines of vendored adapters
+   (`open_llm_leaderboard.py`, `aider.py`) into one
+   `whichllm_combined.py` that calls
+   `whichllm.models.benchmark.fetch_benchmark_scores()`. Inherits all
+   six upstream sources (OLLB v2, Chatbot Arena, LiveBench, AA Index,
+   Aider, Vision) + layered current-over-frozen merge + lineage
+   recency demotion. Fixes the root cause: we'd shipped only 2/6 of
+   whichllm's score pipeline and the 40.0/no-source floor swallowed
+   every modern release.
+2. **`feat(init): richer hardware banner`** (`247f848`) — extended
+   `HardwareSnapshot` with `cpu_brand`, `cpu_cores`,
+   `cpu_features` (AVX2 / AVX-512 / FMA / NEON / SVE),
+   `disk_free_bytes`; reworked the "detected: …" line into three
+   grouped segments (`gpu:` / `cpu:` / `sys:`).
+3. **`feat(init): top-10 recommendations under --json, lift picker
+   to top-10`** (`0f89edd`) — bumped `DEFAULT_TOP_N` 5 → 10 to match
+   whichllm's default and added an `InitSummary.recommendations`
+   field so `init --only models --json` works as a listing surface
+   without triggering downloads. Lets maintainers diff our output
+   against `whichllm --json --top 10` directly via `jq`.
+4. **`feat(snapshot): emit one snapshot row per preferred quant`**
+   (`58ee985`) — hf-discovery now produces one row per available
+   preferred quant per model (Q3_K_M / Q4_K_S / Q4_K_M / Q5_K_M /
+   Q6_K / Q8_0) instead of just Q4_K_M. Snapshot budget changed from
+   "100 rows" to "all preferred quants of the top 250 unique source
+   models" (~1500 rows, ~840 KiB). Per-quant quality discounts +
+   speed multipliers added to the regen so the composite ranker can
+   distinguish quants within a family. Recommender output dedup
+   keeps user-facing top-N as one row per `source_hf_id` (best-fit
+   quant wins).
+5. **`feat(snapshot): match whichllm catalog + ranking on this
+   hardware`** (`c80d638`) — three coupled changes:
+   - **Variant synthesis for official-org repos.** Ported whichllm's
+     `_synthesize_variants_for_official_repo`: when an official-org
+     candidate (Qwen / google / meta-llama / openai / zai-org / …)
+     ships only safetensors, synthesize Q3-Q8 GGUF rows with file
+     sizes estimated from `params × bytes_per_weight`. Brings
+     `Qwen/Qwen3.6-27B`, `google/gemma-4-31B-it`, GLM-4.5-Air,
+     Qwen3-Next-80B-A3B-Instruct, Llama-4-Scout into the catalog
+     (community converters reliably publish GGUFs within days of
+     official release).
+   - **VRAM estimator port.** Replaced `weights × 1.20 + weights ×
+     0.15 × ctx_scale` with whichllm's
+     `weights + KV(3.5 MB/B/K) + activation(400 MB + 0.08 B/param +
+     150 MB/4K)`. Old formula treated the entire weights file as
+     activation overhead, overshooting MoE peaks 5-10× and gating
+     gpt-oss-120b / GLM-4.5-Air off the recommender's list.
+   - **Score tuning.** Recommender weights rebalanced to
+     `bench=0.65, tok_per_second=0.05, param_quality=0.25,
+     recency=0.05` so quality dominates as it does in whichllm.
+     `params_quality_curve` anchor 14B → 80B keeps rewarding bigger
+     models past 14B. Per-quant quality discounts moved to
+     whichllm's `QUANT_QUALITY_PENALTY` table verbatim. Profile
+     filter (drop coder / math / vision specializations when no
+     `--task` is set) ported from
+     `_matches_profile("general")`.
+
+### Result vs whichllm on a 64 GB shared-VRAM box (AMD Strix Halo)
+
+After the refinements, 7 of whichllm's top-10 models appear in our
+top-10, with three quants matching exactly:
+
+| # | whichllm | llamastash | Same model? | Same quant? |
+|---|---|---|:-:|:-:|
+| 1 | Qwen3-Next-80B-A3B-Instruct Q5_K_M | Qwen3.6-27B Q8_0 | — | — |
+| 2 | Qwen3.6-27B Q3_K_M | gemma-4-31B-it Q8_0 | — | — |
+| 3 | gpt-oss-120b Q3_K_M | Qwen3-Next-80B-A3B-Instruct Q5_K_M | ✓ | ✓ |
+| 4 | Qwen3-30B-A3B Q6_K | gpt-oss-120b Q3_K_M | ✓ | ✓ |
+| 5 | gemma-4-26B-A4B-it Q6_K | Qwen3-30B-A3B Q6_K | ✓ | ✓ |
+| 6 | gemma-4-31B-it Q5_K_M | QwQ-32B Q8_0 | — | — |
+| 7 | gpt-oss-20b Q6_K | Qwen3-Next-80B-A3B-Thinking Q5_K_M | — | — |
+| 8 | GLM-4.7-Flash Q6_K | GLM-4.7-Flash Q8_0 | ✓ | — |
+| 9 | GLM-4.5-Air Q4_K_M | DeepSeek-R1-Distill-Qwen-32B Q8_0 | — | — |
+| 10 | Llama-4-Scout-17B-16E Q4_K_M | GLM-4.5-Air Q3_K_M | ✓ | — |
+
+(Up from 4/10 model match and 0/10 quant match before the
+refinements.)
+
+### Remaining gap (deliberately not closed)
+
+- **Family selection / lineage demotion.** Our extras (QwQ-32B,
+  Qwen3-Next-80B-A3B-Thinking, DeepSeek-R1-Distill-Qwen-32B) are
+  "reasoning / thinking / distill" variants that whichllm's
+  `_generation_bonus` and family-grouping logic de-prioritize.
+  Porting that subsystem is ~500 lines of `engine/ranker.py` and
+  `models/grouper.py`; deferred because the extras are still
+  *reasonable* picks for the user's box (just not the ones
+  whichllm would surface).
+- **Composite vs additive scoring.** whichllm's `_compute_quality_
+  score` is an additive sum of bench × source_weight + size_score +
+  speed_score + pop_score + source_bonus + gen_bonus +
+  derivative_penalty (range ~0-100). Ours stays a weighted-average
+  composite (range 0-1). The shape mismatch is why our quant picks
+  skew larger (Q8 vs whichllm's Q5/Q6) even though the model
+  rankings now mostly align. Porting the additive shape would
+  require restructuring `composite_score` plus several upstream
+  data fields we don't currently carry (popularity, generation
+  index per family).
+- **Per-host download fallback for synthetic rows.** Synthetic
+  variants point at the source repo (which ships safetensors, not
+  GGUF). `init --recommended` will fail to download them today. A
+  follow-up would have the download flow try
+  `bartowski/{name}-GGUF`, `unsloth/{name}-GGUF`,
+  `lmstudio-community/{name}-GGUF` as fallback publishers when the
+  source repo doesn't have the file.
+
+### Files touched (post-plan)
+
+- `scripts/benchmark_sources/whichllm_combined.py` (new)
+- `scripts/benchmark_sources/whichllm.py` (attribution shim docstring)
+- `scripts/benchmark_sources/hf_discovery.py` (multi-quant emission,
+  variant synthesis, source_hf_id rule for official orgs, per-quant
+  speed / quality mults, expanded preferred-quants list)
+- `scripts/benchmark_sources/hf_discovery_test.py` (updated for
+  multi-row returns)
+- `scripts/benchmark_sources/README.md` (rewritten)
+- `scripts/benchmark_sources/aider.py` (deleted, -299 lines)
+- `scripts/benchmark_sources/open_llm_leaderboard.py` (deleted, -324
+  lines)
+- `scripts/regenerate-benchmark-snapshot.py` (collapsed scoring,
+  per-quant mults applied in `_compose_model_entry`,
+  `SNAPSHOT_MODEL_LIMIT` 100 → 250)
+- `src/init/detection.rs` (new CPU/disk fields on `HardwareSnapshot`)
+- `src/init/prompts.rs` (three-line banner)
+- `src/init/recommender.rs` (whichllm-aligned `estimate_peak_bytes`,
+  `params_quality_curve` anchor 14B → 80B, `profile_admits` filter,
+  output dedup by `source_hf_id`, `DEFAULT_TOP_N` 5 → 10)
+- `src/init/wizard.rs` (`recommendations` field on `InitSummary`,
+  JSON-mode no-download branch in `run_models_step`)
+- `tests/recommender_corpus.rs` (MoE-aware `prefer_moe=false` predicate)
+- `src/init/smoke.rs`, test helpers across `src/init/{doctor,install,
+  smoke}.rs` (defaults for new `HardwareSnapshot` fields)
+- `data/benchmark-snapshot.json` (regenerated multi-quant, recommender
+  weights updated)
+- `Cargo.toml` (`sysinfo` `disk` feature)

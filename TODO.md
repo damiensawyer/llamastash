@@ -12,19 +12,21 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 
 ## v2-GA blockers (must clear before v2 GA, not v2 launch)
 
-- [ ] **In progress**: ~~Remeasure per-backend VRAM overhead band on real CUDA / HIP / Vulkan / Metal hardware — [`docs/spikes/2026-05-19-vram-overhead-band.md`](docs/spikes/2026-05-19-vram-overhead-band.md) `todo:` frontmatter.~~ Harness ready: [`scripts/measure-overhead-band.sh`](scripts/measure-overhead-band.sh) + runbook at [`docs/runbooks/measure-vram-overhead-band.md`](docs/runbooks/measure-vram-overhead-band.md) - Changing catalog of defaults etc [docs/plans/2026-05-19-004-feat-live-hf-snapshot-discovery-plan.md](docs/plans/2026-05-19-004-feat-live-hf-snapshot-discovery-plan.md)
+- [ ] **In progress**: ~~Remeasure per-backend VRAM overhead band on real CUDA / HIP / Vulkan / Metal hardware — [`docs/spikes/2026-05-19-vram-overhead-band.md`](docs/spikes/2026-05-19-vram-overhead-band.md) `todo:` frontmatter.~~ Harness ready: [`scripts/measure-overhead-band.sh`](scripts/measure-overhead-band.sh) + runbook at [`docs/runbooks/measure-vram-overhead-band.md`](docs/runbooks/measure-vram-overhead-band.md). Changing catalog of defaults shipped via [`docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md`](docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md).
+- [ ] **Deferred (post-c80d638)**: Port whichllm's family-selection / lineage-demotion / generation-bonus logic so `init --only models --json` output matches `whichllm --json --top 10` byte-for-byte. Today 7/10 picks and 3/10 quants match — see [Post-plan refinements §Remaining gap](docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md#remaining-gap-deliberately-not-closed) in plan 2026-05-20-001.
+- [ ] **Deferred (post-c80d638)**: Download-flow fallback for synthetic GGUF rows — when the catalog row's `gguf_publisher == "synthetic"` (official-org safetensors-only repo), try trusted converters (`bartowski/{name}-GGUF`, `unsloth/{name}-GGUF`, `lmstudio-community/{name}-GGUF`) before failing the download. Without this, `init --recommended` on a synthesized pick (e.g. Qwen3.6-27B) errors when the official repo doesn't ship GGUFs.
 
 ## v1+ release blockers
 
 - [x] **In progress**: init should show progress and text descriptions of what its doing (like installing llama.cpp via brew, Installed llama.cpp, downloading models, download complete, etc.) instead of just a blinking line.
 - [x] **In progress**: Init install method doesnt offer custom path as option.
-- [ ] Models downloaded from HF has cryptic names; we should rename them to something human friendly and show that in the UI instead of the HF ID.
 - [ ] if `--llama-server` is passed, add it as fallback in config file and use it when llama-server is not on path.
-- [ ] Better/colorful/formatted CLI output for commands.
-- [ ] best-model (find nicer alias) command. reuse init and just download the best model for current setup/hardware
+- [ ] **In progress** : Better/colorful/formatted CLI output for commands (daemon, list, status, presets, doctor etc)
+- [ ] best-model (find nicer alias) command. reuse `init --models` and just download the best model for current setup/hardware
 - [ ] `R:restart` daemon hotkey.
-- [ ] **Need brainstorm/plan**: Built in architecture defaults for all popular architectures, a default for all others. Advanced modal - replace free-text editor with typed key/value fields like settings; Its should be populated with architecture defaults for the model. keys = advanced options for the model, values = last settings or architecture default; pre-populate from the model's last params or architecture defaults and let users edit before launch. Requires a refactor of the advanced modal to support dynamic fields. Consider showing this inline in settings pane instead of a modal dialog, unless you think thats not good idea. Also provide a free text fields where user can enter arbitrary extra params that we won't show in the UI, for power users who want to use features we don't yet support in the UI.
-- [ ] **Need brainstorm/plan**: HuggingFace pull TUI dialog with search / sort / pagination (origin: R46, [`docs/plans/2026-05-13-001-feat-llamatui-v1-launcher-plan.md`](docs/plans/2026-05-13-001-feat-llamatui-v1-launcher-plan.md)).
+- [ ] **In progress**: Built in architecture defaults for all popular architectures, a default for all others. Advanced modal - replace free-text editor with typed key/value fields like settings; Its should be populated with architecture defaults for the model. keys = advanced options for the model, values = last settings or architecture default; pre-populate from the model's last params or architecture defaults and let users edit before launch. Requires a refactor of the advanced modal to support dynamic fields. Consider showing this inline in settings pane instead of a modal dialog, unless you think thats not good idea. Also provide a free text fields where user can enter arbitrary extra params that we won't show in the UI, for power users who want to use features we don't yet support in the UI.
+- [ ] **In progress**: HuggingFace pull TUI dialog with search / sort / pagination (origin: R46, [`docs/plans/2026-05-13-001-feat-llamatui-v1-launcher-plan.md`](docs/plans/2026-05-13-001-feat-llamatui-v1-launcher-plan.md)).
+  - [ ] **In progress**: Models downloaded from HF has cryptic names; we should rename them to something human friendly and show that in the UI instead of the HF ID.
 - [ ] **Need brainstorm/plan**: Proxy router that maps a single endpoint to running models by model name. If the model isn't running, start it; if launch fails, fall back to a running model when one is available; otherwise error. Keep it OpenCode / π compatible so agents and tools can hit one URL.
 - [x] ~~**Need brainstorm/plan**: Test strategy for Nvidia / AMD / Apple GPU support (origin: R34).~~ Shipped 2026-05-20 via [`docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md`](docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md).
 - [ ] `Hardware UAT report` GitHub issue template — deferred until first contributor wants to file one (origin §Acceptance checklist). Recreate the `uat-caught` label if it's ever deleted: `gh label create uat-caught --color B60205 --description "Release PR where UAT caught a regression that would otherwise have shipped"`.
@@ -74,6 +76,34 @@ All 4 units shipped — verified 2026-05-19 against the tree:
 `BUNDLED_ID_TO_SOURCE_HF_ID` join + `_refresh_bundled_models` merge
 (Unit 4). `scripts/requirements.txt` + updated `NOTICE` + adapter
 README accompany the work.
+
+Superseded 2026-05-20 by [`2026-05-20-001`](docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md):
+the Open LLM Leaderboard + Aider adapters were collapsed into a single
+`whichllm_combined.py` that delegates to
+`whichllm.models.benchmark.fetch_benchmark_scores()` (all six upstream
+sources + layered merge + lineage demotion). Net `-623` lines vendored.
+
+### ~~live HF Hub snapshot discovery — [`docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md`](docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md)~~
+
+All 7 units shipped 2026-05-20 plus post-plan refinements:
+`scripts/benchmark_sources/hf_discovery.py` (Unit 3) wraps
+`whichllm.models.fetcher.fetch_models()` with allowlist filter +
+multi-quant emission + official-org variant synthesis;
+`data/{task-hints,gguf-publisher-allowlist}.yaml` (Unit 4);
+schema fields on `ModelEntry` (Unit 1); whichllm-aligned
+`estimate_peak_bytes` (Unit 2); predicate-based corpus in
+`tests/recommender_corpus.rs` (Unit 5); 2 MiB snapshot ceiling
+(Unit 6); HF_TOKEN + lockstep version check in CI (Unit 7).
+
+Follow-up commits `2dc70ff` (whichllm-combined scoring), `247f848`
+(richer hardware banner), `0f89edd` (`--only models --json` listing,
+top-N 5 → 10), `58ee985` (per-quant rows), `c80d638` (variant
+synthesis + VRAM estimator port + ranking tuned to whichllm) closed
+the gap so `init --only models --json` now produces 7/10 model
+matches and 3/10 quant matches vs `whichllm --json --top 10` on a
+64 GB shared-VRAM host. Remaining gap (family selection, additive
+score shape, synthetic-row download fallback) tracked above in
+v2-GA blockers.
 
 ### ~~init wizard / doctor / pull — [`docs/plans/2026-05-18-001-feat-init-wizard-doctor-pull-plan.md`](docs/plans/2026-05-18-001-feat-init-wizard-doctor-pull-plan.md)~~
 
