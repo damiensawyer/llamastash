@@ -162,6 +162,17 @@ bench = false
 test = false
 doc = false
 
+# Local-only git hooks installed at first `cargo test` (or any
+# build that resolves dev-dependencies). The hook bodies live in
+# `.cargo-husky/hooks/`; pre-commit reformats + lints and pre-push
+# additionally runs the full test suite so wedged commits never
+# leave the laptop. `user-hooks` makes cargo-husky install our
+# scripts verbatim instead of its built-in defaults.
+[dev-dependencies.cargo-husky]
+version = "1"
+default-features = false
+features = ["user-hooks"]
+
 [features]
 test-fixtures = []
 # Maintainer-only "user acceptance test" subcommand. Gates the

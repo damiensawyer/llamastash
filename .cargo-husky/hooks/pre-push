@@ -1,0 +1,14 @@
+#!/bin/sh
+
+set -e
+
+echo "Running pre-push hook:"
+
+echo "Executing: cargo fmt --all -- --check"
+cargo fmt --all -- --check
+
+echo "Executing: make lint"
+make lint
+
+echo "Executing: cargo test --features test-fixtures"
+cargo test --features test-fixtures
