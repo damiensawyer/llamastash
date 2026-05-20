@@ -248,14 +248,14 @@ jobs:
         run: |
           set -euo pipefail
           gh release upload "$RELEASE_TAG" --clobber \
-            dist/llamastash-${RELEASE_VERSION}-${{ matrix.target }}.tar.gz \
-            dist/llamastash-${RELEASE_VERSION}-${{ matrix.target }}.tar.gz.sha256
+            "dist/llamastash-${RELEASE_VERSION}-${{ matrix.target }}.tar.gz" \
+            "dist/llamastash-${RELEASE_VERSION}-${{ matrix.target }}.tar.gz.sha256"
 
       - name: stash sha sidecar for downstream jobs
         shell: bash
         run: |
           mkdir -p sha-stash
-          cp dist/llamastash-${RELEASE_VERSION}-${{ matrix.target }}.tar.gz.sha256 sha-stash/
+          cp "dist/llamastash-${RELEASE_VERSION}-${{ matrix.target }}.tar.gz.sha256" sha-stash/
       - uses: actions/upload-artifact@v4
         with:
           name: sha-${{ matrix.target }}
