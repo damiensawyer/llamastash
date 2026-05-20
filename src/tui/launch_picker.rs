@@ -9,6 +9,7 @@
 //! open edit); Backspace resets the focused row.
 
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 
 use crate::config::TypedKnobs;
 use crate::launch::flag_aliases::{KnobField, KV_CACHE_TYPES};
@@ -83,15 +84,23 @@ pub enum PickerField {
   Extras,
 }
 
+/// Lazily-built navigation order — `Ctx`, `Reasoning`, every knob in
+/// `knob_specs()` order, `Extras`. Built once on first access so
+/// per-keypress navigation does no allocation.
+static ALL_FIELDS: LazyLock<Box<[PickerField]>> = LazyLock::new(|| {
+  let mut v: Vec<PickerField> = vec![PickerField::Ctx, PickerField::Reasoning];
+  for spec in crate::launch::flag_aliases::knob_specs() {
+    v.push(PickerField::Knob(spec.field));
+  }
+  v.push(PickerField::Extras);
+  v.into_boxed_slice()
+});
+
 impl PickerField {
-  /// All rows in render / navigation order.
-  pub fn all() -> Vec<PickerField> {
-    let mut v = vec![PickerField::Ctx, PickerField::Reasoning];
-    for spec in crate::launch::flag_aliases::knob_specs() {
-      v.push(PickerField::Knob(spec.field));
-    }
-    v.push(PickerField::Extras);
-    v
+  /// All rows in render / navigation order. Returns a static slice so
+  /// `next_field` / `prev_field` don't allocate on each keypress.
+  pub fn all() -> &'static [PickerField] {
+    &ALL_FIELDS
   }
 }
 
@@ -287,11 +296,16 @@ impl LaunchPickerState {
   }
 
   fn cycle_enum(&mut self, field: KnobField, forward: bool) {
-    let current = self.user_value_str(field).map(str::to_string);
-    let presets: Vec<String> = KV_CACHE_TYPES.iter().map(|s| s.to_string()).collect();
-    let presets_ref: Vec<&str> = presets.iter().map(String::as_str).collect();
-    let next = cycle_through(current.as_deref(), &presets_ref, forward).map(str::to_string);
-    self.set_user_str(field, next);
+    // Find the current user-set value inside the `&'static [&'static str]`
+    // catalog so cycle_through's `T = &'static str` lifetime detaches
+    // from `&self` — that lets us call `set_user_str(&mut self, ...)`
+    // immediately after without dragging a borrow. Avoids the prior
+    // `Vec<String>` + `Vec<&str>` allocation pair on every keypress.
+    let current: Option<&'static str> = self
+      .user_value_str(field)
+      .and_then(|s| KV_CACHE_TYPES.iter().copied().find(|t| *t == s));
+    let next = cycle_through(current, KV_CACHE_TYPES, forward);
+    self.set_user_str(field, next.map(|s| s.to_string()));
   }
 
   fn cycle_bool(&mut self, field: KnobField, forward: bool) {

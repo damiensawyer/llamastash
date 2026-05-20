@@ -153,6 +153,18 @@ fn handle_key(app: &mut App, key: KeyEvent, writer: Option<&mpsc::Sender<WriterC
     }
     return;
   }
+  // An open Settings inline edit owns input. All keys route to the
+  // editor (so `Esc` cancels the edit, `e` inserts a literal `e`,
+  // arrows do nothing rather than firing global actions, etc.) — only
+  // `Enter` falls through so `Action::Submit` can run its
+  // commit-then-launch flow in one place.
+  if app.focus == Focus::RightPane
+    && settings_inline_edit_open(app)
+    && !matches!(key.code, KeyCode::Enter)
+  {
+    handle_settings_inline_edit(app, key);
+    return;
+  }
   // Resolve the bound action first; if a focus doesn't have a binding
   // for this keypress *and* it's a text-input focus, fall through to
   // the per-focus character handler so alphanumerics extend the
@@ -257,6 +269,22 @@ fn commit_inline_edit(app: &mut App) -> bool {
     return false;
   };
   let buffer = picker.inline_edit.buffer.trim().to_string();
+  // Empty buffer == "reset this row to inherit from the resolver
+  // chain" — the same semantics as Backspace on the row, just reached
+  // through `e → delete → Enter` instead of a single keypress. We
+  // clear *all* user-override slots for the field rather than only
+  // the one matching the row's type so the row falls back cleanly
+  // regardless of which slot the user had populated.
+  if buffer.is_empty() {
+    if let PickerField::Knob(k) = field {
+      picker.set_user_u32(k, None);
+      picker.set_user_f32(k, None);
+      picker.set_user_str(k, None);
+      picker.set_user_bool(k, None);
+    }
+    picker.inline_edit.close();
+    return true;
+  }
   let result: Result<(), String> = match field {
     PickerField::Knob(k) => match k {
       KnobField::NGpuLayers
