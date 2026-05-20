@@ -109,6 +109,11 @@ pub enum Action {
   /// Kill the daemon entirely (after a confirmation popup). Bound
   /// to `Q` (Shift+q) in the model list focus.
   KillDaemon,
+  /// Restart the daemon (after a confirmation popup): shut the
+  /// current daemon down and re-spawn a fresh one with the same
+  /// options. Bound to `Ctrl+R` in the model list focus so the
+  /// `Shift+R` mnemonic stays free for the Rerank tab alias.
+  RestartDaemon,
   /// Jump focus to the Logs tab in the right pane. No-op (with a
   /// toast) when the focused model isn't running, since Logs is
   /// only reachable for live launches.
@@ -187,6 +192,13 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::Quit,
     label: "q",
     description: "quit",
+  },
+  Binding {
+    key: KeyCode::Char('r'),
+    mods: KeyModifiers::CONTROL,
+    action: Action::RestartDaemon,
+    label: "Ctrl+R",
+    description: "restart daemon",
   },
   Binding {
     key: KeyCode::Char('Q'),
@@ -408,7 +420,9 @@ const LIST_BINDINGS: &[Binding] = &[
   // R / E mirror C: a model only ever exposes one of
   // Chat/Embed/Rerank at a time, so all three keys map to the same
   // "jump to mode tab" action. Lets a user with muscle memory for
-  // "press E for embed" land on the right tab without thinking.
+  // "press R for rerank" or "press E for embed" land on the right
+  // tab without thinking. The daemon-restart hotkey lives on Ctrl+R
+  // so this mnemonic stays free.
   Binding {
     key: KeyCode::Char('R'),
     mods: KeyModifiers::SHIFT,
@@ -677,12 +691,20 @@ const RIGHT_PANE_BINDINGS: &[Binding] = &[
   },
   // R / E aliases for C — mirrors LIST_BINDINGS so the user can
   // press the mnemonic for Rerank / Embed from the right pane too.
+  // Daemon restart is on Ctrl+R (handled in LIST_BINDINGS).
   Binding {
     key: KeyCode::Char('R'),
     mods: KeyModifiers::SHIFT,
     action: Action::FocusChatTab,
     label: "R",
     description: "chat/embed/rerank",
+  },
+  Binding {
+    key: KeyCode::Char('r'),
+    mods: KeyModifiers::CONTROL,
+    action: Action::RestartDaemon,
+    label: "Ctrl+R",
+    description: "restart daemon",
   },
   Binding {
     key: KeyCode::Char('E'),
@@ -1064,6 +1086,7 @@ impl Action {
     ("enter_edit", Action::EnterEdit),
     ("exit_edit", Action::ExitEdit),
     ("kill_daemon", Action::KillDaemon),
+    ("restart_daemon", Action::RestartDaemon),
     ("focus_logs_tab", Action::FocusLogsTab),
     ("focus_chat_tab", Action::FocusChatTab),
     ("focus_settings_tab", Action::FocusSettingsTab),

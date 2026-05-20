@@ -4,10 +4,16 @@ All notable changes to llamastash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Added
+
+- **`Ctrl+R:restart daemon` TUI hotkey.** A new global keybinding shuts the daemon down and re-spawns a fresh one with the same options the parent dispatcher resolved at startup — `--model-path`, `--no-scan`, and `--llama-server` all survive the restart. Triggers the same confirmation popup as `Q:kill daemon` and sits one slot to its left in the title-row hint strip. Bound to `Ctrl+R` so the `Shift+R` mnemonic stays free for the Rerank tab alias (alongside `C` / `E`).
+- **`llamastash recommend` shortcut.** New top-level subcommand that wraps `init --only models` so users can pick the best-fit GGUF for their hardware without walking through the full first-run wizard. Shows the interactive top-10 picker by default; pass `--model recommended` to short-circuit to the top entry without prompting. Honors the same `--json` / `--offline` / `--model <CHOICE>` / `--revision <SHA>` flags as the underlying `init` step.
+- **Error launches surface the Logs tab.** When a managed launch transitions into `Error{cause}`, the right pane now exposes a Logs tab alongside Settings (previously only Settings was reachable), and the TUI auto-snaps the focused-launch right pane to Logs on the transition so the failure tail is visible without an extra keystroke.
+
 ### Changed
 
+- **`--llama-server <PATH>` is now sticky.** Passing the global flag writes the resolved path back into the user's `config.yaml` (`llama_server_path:` key) on every invocation, so the next launch picks it up without re-typing. Best-effort: a failed write logs and the command proceeds normally. No-op when the resolved path already matches the configured value.
 - **Padded + colored CLI tables on TTY for `list`, `status`, `presets list`, `favorites list`, `last-params`, and `daemon status`.** Report-style commands now render column-padded tables with bold headers, a dim underline rule, and semantic value colors (state-green/yellow/dim/red, launch-id magenta, port cyan, paths with `$HOME → ~` collapse). Action-style commands (`daemon start/stop`, `start`, `stop`) pick up value-color highlights on launch-id / port / pid / state. `daemon status` now renders the daemon's `version` response as a labelled key/value block on TTY; `daemon status --json` preserves the previous machine-readable pretty-JSON contract verbatim. Pipes and `--no-colors` / `NO_COLOR` keep emitting today's exact TSV bytes so `awk -F\t` / `column -t` pipelines stay supported. `--json` is byte-stable everywhere. No new crates — the `console` crate already in tree covers the new helpers in `src/cli/format.rs`.
-
 - **Renamed from LlamaDash to LlamaStash before the first public release.** Project, binary, crate, GH org (`llamastash`), brew tap (`llamastash/llamastash`), marketing site (`llamastash.cli.rs`), env-var prefix (`LLAMADASH_*` → `LLAMASTASH_*`), and on-disk paths (`$XDG_CONFIG_HOME/llamadash/` → `$XDG_CONFIG_HOME/llamastash/`, runtime socket dir, log dir, share dir) all updated in one sweep. No backwards-compatibility shims — pre-publish rename. Local dev installs need a one-shot `mv` of the old XDG directories; see `CONTRIBUTING.md`.
 
 ## [0.0.1] — 2026-05-20

@@ -1,0 +1,17 @@
+#!/bin/sh
+
+set -e
+
+echo "Running pre-push hook:"
+
+echo "Executing: cargo fmt --all -- --check"
+cargo fmt --all -- --check
+
+echo "Executing: make lint"
+make lint
+
+# --test-threads=1 keeps env-var-mutating tests (e.g. util::paths)
+# from racing each other. CI's macOS leg also caps integration
+# tests for the same class of contention.
+echo "Executing: cargo test --features test-fixtures -- --test-threads=1"
+cargo test --features test-fixtures -- --test-threads=1

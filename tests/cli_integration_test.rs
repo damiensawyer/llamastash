@@ -37,20 +37,34 @@ fn fake_binary() -> PathBuf {
 }
 
 fn unique_temp(label: &str) -> PathBuf {
+  // macOS's sockaddr_un.sun_path is 104 bytes. macOS sets `$TMPDIR`
+  // to `/var/folders/<a>/<bbbbbbbbbbbb>/T/` (~49 chars), and the
+  // daemon appends `daemon.sock` (11). With long labels + PID +
+  // nanos, the per-test path can exceed 104 chars and `bind()`
+  // silently fails in the spawned daemon task. Anchor at `/tmp`
+  // on Unix (Linux already resolves `temp_dir` there) and keep the
+  // label short — full path stays well under the limit.
   let nanos = SystemTime::now()
     .duration_since(UNIX_EPOCH)
     .expect("clock")
     .as_nanos();
-  let p = std::env::temp_dir().join(format!(
-    "llamastash-cli-{label}-{}-{nanos}",
-    std::process::id()
-  ));
+  let root = if cfg!(target_os = "macos") {
+    PathBuf::from("/tmp")
+  } else {
+    std::env::temp_dir()
+  };
+  let p = root.join(format!("lts-{label}-{}-{nanos}", std::process::id()));
   std::fs::create_dir_all(&p).expect("temp");
   p
 }
 
 async fn wait_for_socket(path: &Path) {
-  let deadline = Instant::now() + Duration::from_secs(3);
+  // 30 s for macOS GitHub runners. Ten parallel tests each spawn a
+  // daemon and the runner only has a couple of cores, so socket
+  // bind can slip past tighter budgets under load. Linux CI binds
+  // in <300 ms; the longer deadline only fires when something is
+  // genuinely wrong.
+  let deadline = Instant::now() + Duration::from_secs(30);
   loop {
     if Instant::now() > deadline {
       panic!("daemon socket never appeared: {}", path.display());
@@ -197,7 +211,9 @@ async fn spawn_daemon_with_model(label: &str, model_name: &str, arch: &str) -> D
 }
 
 async fn await_catalog_populated(socket: &Path) {
-  let deadline = Instant::now() + Duration::from_secs(3);
+  // 30 s for the same reason `wait_for_socket` was bumped: macOS
+  // GitHub runners are slow under parallel test load.
+  let deadline = Instant::now() + Duration::from_secs(30);
   loop {
     if Instant::now() > deadline {
       panic!(

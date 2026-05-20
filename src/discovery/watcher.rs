@@ -300,12 +300,27 @@ mod tests {
     let (_handle, mut rx) =
       start(vec![WatchRoot::recursive(root.clone())], fast_opts()).expect("start watcher");
 
-    // Wait long enough that at least one periodic tick must arrive.
-    let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-      .await
-      .expect("periodic rescan within 2s")
-      .expect("channel open");
-    assert!(matches!(event, WatchEvent::PeriodicRescan));
+    // Drain spurious `Changed` events that some platforms emit when
+    // the watcher first attaches to a freshly-created temp dir
+    // (macOS FSEvents flushes a synthetic "directory exists" event
+    // on subscribe). We're proving the periodic tick fires on its
+    // own, so the assertion is "at least one PeriodicRescan arrives
+    // within the deadline", not "the very first event is a tick".
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut got_tick = false;
+    while std::time::Instant::now() < deadline {
+      let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+      match tokio::time::timeout(remaining, rx.recv()).await {
+        Ok(Some(WatchEvent::PeriodicRescan)) => {
+          got_tick = true;
+          break;
+        }
+        Ok(Some(WatchEvent::Changed { .. })) => continue,
+        Ok(None) => panic!("watcher channel closed before PeriodicRescan"),
+        Err(_) => break,
+      }
+    }
+    assert!(got_tick, "no PeriodicRescan event within 2s deadline");
     fs::remove_dir_all(&root).ok();
   }
 
