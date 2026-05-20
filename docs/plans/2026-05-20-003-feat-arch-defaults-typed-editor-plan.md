@@ -1,7 +1,7 @@
 ---
 title: Built-in Architecture Defaults + Typed Advanced Editor
 type: feat
-status: active
+status: completed
 date: 2026-05-20
 origin: docs/brainstorms/2026-05-20-arch-defaults-typed-advanced-editor-requirements.md
 ---
@@ -234,7 +234,7 @@ Settings tab
 
 ## Implementation Units
 
-- [ ] **Unit 1: Typed `LaunchParams` + flag-alias table**
+- [x] **Unit 1: Typed `LaunchParams` + flag-alias table**
 
 **Goal:** Replace `LaunchParams.advanced: Vec<OsString>` with `knobs: TypedKnobs` (extending today's `ArchDefaults` shape with four R109 fields) + `extras: Vec<OsString>`. Update `compose` to render knobs first (canonical flag order) then extras last. Lift flag-alias recognition into a small shared module so the editor, CLI parser, and merge code share one source of truth.
 
@@ -275,7 +275,7 @@ Settings tab
 - `cargo test -p llamastash --lib launch::params` and `launch::flag_aliases` pass.
 - `compose` argv shape is identical to today for the existing test fixtures except for flag-ordering canonicalisation, which is documented in the test diff.
 
-- [ ] **Unit 2: Built-in defaults table + layered resolver**
+- [x] **Unit 2: Built-in defaults table + layered resolver**
 
 **Goal:** Ship the static `(arch, backend) → TypedKnobs` table inside the binary and the four-layer resolver (`preset > last_params > yaml > built-in > llama-server`). Replace the `apply_arch_defaults_for` call site in `start_model_handler` with the resolver.
 
@@ -319,7 +319,7 @@ Settings tab
 - `cargo test -p llamastash --features test-fixtures` passes including the IPC handler integration test.
 - `cargo test -p llamastash --lib launch::defaults_table` covers every backend × arch axis.
 
-- [ ] **Unit 3: Wizard cleanup — stop writing `arch_defaults`**
+- [x] **Unit 3: Wizard cleanup — stop writing `arch_defaults`**
 
 **Goal:** Delete the `run_config_step` arch-defaults seeding block and the `InitConfigAdditions.arch_defaults` field. The YAML `arch_defaults` schema stays as user escape hatch; the wizard never writes it.
 
@@ -353,7 +353,7 @@ Settings tab
 - `cargo test --features test-fixtures init::wizard` passes.
 - Manual: `cargo run -- init --recommended` on a CUDA host writes a YAML file with no `arch_defaults` block, and a subsequent `llamastash start qwen2-7b ...` still emits `--n-gpu-layers 99` (sourced from the built-in table).
 
-- [ ] **Unit 4: IPC + `last_params` wire schema swap**
+- [x] **Unit 4: IPC + `last_params` wire schema swap**
 
 **Goal:** Replace `advanced: Vec<String>` on `StartParams` and the `last_params_list` row shape with `knobs: TypedKnobs` + `extras: Vec<String>`. CLI `last-params` printer updated.
 
@@ -394,7 +394,7 @@ Settings tab
 - `cargo test --features test-fixtures` integration suite passes — daemon-spawning tests pick up the new schema.
 - Manual: launch a model via the CLI, then `llamastash last-params --json` shows the typed shape.
 
-- [ ] **Unit 5: CLI tail-args parser routes into typed slots + extras**
+- [x] **Unit 5: CLI tail-args parser routes into typed slots + extras**
 
 **Goal:** The `start <model> -- <flags>` tail-args path recognises typed-knob flags and short aliases, routes recognised tokens into `StartParams.knobs`, unknown tokens into `StartParams.extras`.
 
@@ -432,7 +432,7 @@ Settings tab
 - `cargo test --lib cli::start` passes including new parse cases.
 - Manual: `cargo run -- start qwen2-7b -- --threads xyz` exits 64 with the expected error text on stderr.
 
-- [ ] **Unit 6: Typed editor in Settings tab (rows + cycle + inline edit + validation)**
+- [x] **Unit 6: Typed editor in Settings tab (rows + cycle + inline edit + validation)**
 
 **Goal:** Replace the three-field Settings picker with a 13+ row typed editor. Each row renders label, value (with cycle glyphs when focused), and source label. `e` enters inline edit mode; Enter commits (with validation); Esc cancels; Backspace resets the focused row to default.
 
@@ -486,7 +486,7 @@ Settings tab
 - `cargo test --lib tui::tabs::settings` and `tui::launch_picker` and `tui::events` pass.
 - Manual: `cargo run` against a daemon with a qwen2 model under cursor — scroll through every row, edit one, launch, verify argv via `journalctl`/the supervisor log file path documented in `docs/usage.md`.
 
-- [ ] **Unit 7: Retire the advanced modal**
+- [x] **Unit 7: Retire the advanced modal**
 
 **Goal:** Delete the freeform modal and its supporting plumbing (`Action::OpenAdvancedPanel`, `Focus::AdvancedPanel`, `app.advanced_panel`, the `'a'` binding). The unbound-action startup warning already covers users who had `'a'` rebound.
 
@@ -521,7 +521,7 @@ Settings tab
 - `cargo build` / `cargo test --features test-fixtures` pass.
 - Manual: `cargo run`, press `a` — nothing happens, no panic; press `e` in Settings — opens inline edit on the focused row.
 
-- [ ] **Unit 8: Extras row + forbidden-flag inline warning**
+- [x] **Unit 8: Extras row + forbidden-flag inline warning**
 
 **Goal:** The final Settings row is `extras` — a free-text argv buffer. `e` opens an inline horizontal-scroll edit field with the same caret style as numeric rows. On commit, run `forbidden_in_extras` (rename of today's `forbidden_in_advanced`) and surface a red inline warning beneath the row, redacting values for known secret-bearing flags before display.
 
@@ -564,7 +564,7 @@ Settings tab
 - `cargo test --lib launch::params` (redaction helper), `tui::launch_picker`, `tui::tabs::settings` pass.
 - Manual: type `--api-key foo` into extras, observe redacted warning; press Enter to launch and confirm the daemon refuses with the existing forbidden-flag IPC error.
 
-- [ ] **Unit 9: Docs, CHANGELOG, TODO sync**
+- [x] **Unit 9: Docs, CHANGELOG, TODO sync**
 
 **Goal:** All user-facing docs reflect the new typed shape, the new keybindings, the new precedence chain, and the wizard surface change. `CHANGELOG.md` `[Unreleased]` carries the right entries.
 

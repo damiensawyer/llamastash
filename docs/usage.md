@@ -119,9 +119,8 @@ Override semantics mirror kdash: the action's existing default binding(s) are re
 | `clear_filter` | `Esc` | Filter input |
 | `toggle_favorite` | `f` | List |
 | `open_launch_picker` | `Enter` | List |
-| `open_advanced_panel` | `a` | List, launch picker |
-| `submit` | `Enter` | Filter, picker, advanced |
-| `cancel` | `Esc` | Picker, advanced |
+| `submit` | `Enter` | Filter, picker, inline edit |
+| `cancel` | `Esc` | Picker, inline edit |
 | `yank_url` / `yank_curl` / `yank_path` | `y` / `Y` / `p` | List |
 | `cycle_theme` | `t` | List |
 | `toggle_help` | `?` | List, right pane |
@@ -133,7 +132,8 @@ Override semantics mirror kdash: the action's existing default binding(s) are re
 | `focus_chat_tab` | `Shift+C` | List, right pane — mode-appropriate (Chat / Embed / Rerank), gated on a running model |
 | `focus_settings_tab` | `Shift+S` | List, right pane — always available |
 | `next_focus` / `prev_focus` | `→`/`l`, `←`/`h` | Cross-pane navigation (arrows + vim-style; `Tab` is reserved for field cycling) |
-| `next_field` / `prev_field` | `Tab` / `Shift+Tab` | Right pane (Settings tab cycles ctx/reasoning/advanced) · Rerank input (cycles Query/Candidate) |
+| `next_field` / `prev_field` | `Tab` / `Shift+Tab` | Right pane (Settings tab moves between editor rows) · Rerank input (cycles Query/Candidate) |
+| `cycle_value_next` / `cycle_value_prev` | `→` / `←` | Settings tab — cycles the focused row's value through pinned presets |
 | `enter_edit` / `exit_edit` | `e` / `Esc` | Right pane → tab input |
 | `send_chat` | `Enter` (Shift+Enter inserts newline on kitty-protocol terminals) | Chat input |
 | `toggle_think_collapse` | `Ctrl+r` | Chat input |
@@ -387,7 +387,6 @@ These are the defaults. Override any binding via the `keybindings:` block in `co
 | `/` | Open filter (predicate applies live as you type; `Enter` drills into the focused result by opening the launch picker; `Esc` walks back: exit edit → clear → close) |
 | `f` | Toggle favorite on focused model |
 | `Enter` | Open launch picker on focused model |
-| `a` | Open advanced flags panel |
 | `y` / `Y` / `p` | Yank URL / curl / model path |
 | `t` | Cycle theme |
 | `Tab` / `Shift+Tab` | Move focus across panes (`h` / `l` do the same — Left/Right arrows are intentionally unbound on Models to avoid an asymmetric pane-jump) |
@@ -411,20 +410,54 @@ Three-stage modal: **Search → File picker → Confirm**. Search runs live agai
 | `Esc` | Walk back one layer: editing → exit edit · resting+content → clear · resting+empty → close (in-flight downloads keep running). In the FilePicker / Confirm stages, Esc steps back to the previous stage. |
 | `Ctrl+X` | Cancel the currently-active HF download (also reachable from anywhere outside the dialog) |
 
-### Launch picker
+### Launch picker (Settings tab)
+
+The Settings tab hosts the typed-knob launch editor. Each row shows
+the resolved value plus a `(source)` chip indicating where the value
+came from in the precedence chain (`(user)`, `(last used)`, `(arch
+default)`, `(built-in)`, `(model default)`).
 
 | Key | Action |
 |---|---|
-| `Enter` | Dispatch `start_model` with the picked params |
-| `Tab` | Next field |
-| `a` | Open advanced flags overlay |
-| `Esc` | Cancel |
+| `↑` / `↓` | Move between editor rows |
+| `←` / `→` | Cycle the focused row's value through its preset list |
+| `e` | Open inline edit on a numeric / enum / extras row |
+| `Enter` | Commit an open inline edit; otherwise dispatch `start_model` |
+| `Esc` | Cancel an open inline edit, or return focus to the Models list |
+
+Knob set: `n_gpu_layers`, `threads`, `cache_type_k`, `cache_type_v`,
+`flash_attn`, `mlock`, `no_mmap`, `parallel`, `batch_size`,
+`ubatch_size`, `rope_freq_scale`, `keep`. Booleans cycle
+`default ↔ on ↔ off`; enums cycle their allowed set (`f16` / `q8_0`
+/ `q4_0` for cache types). `e` enters free-form numeric / enum edit
+mode for any row whose preset list doesn't cover the value the user
+wants. The bottom `extras` row holds the free-form argv tail for
+flags the typed editor doesn't model; forbidden flags
+(`--host`, `--listen`, `--bind`, `--api-key`, `--ssl-*`) surface a
+red inline warning with secret values redacted.
+
+### Precedence chain
+
+When the daemon composes the argv for `start_model`, it walks the
+following layers top-down per typed knob; the first `Some` wins:
+
+```
+preset       (R21)
+  └─ last_params  (R20)
+       └─ config.yaml arch_defaults
+            └─ built-in (architecture, gpu_backend) table
+                 └─ llama-server defaults
+```
+
+User-supplied `knobs` in the IPC request body sit above `last_params`
+on the chain. The Settings tab renders the source label so the
+inheritance is visible at the row level.
 
 ### Right pane
 
 | Key | Action |
 |---|---|
-| `Tab` / `Shift+Tab` | In the Settings tab, cycles through form fields (ctx → reasoning → advanced). In other right-pane tabs, no-op — use arrows / `h` / `l` to navigate panes. |
+| `Tab` / `Shift+Tab` | In the Settings tab, moves between editor rows. In other right-pane tabs, no-op — use arrows / `h` / `l` to navigate panes. |
 | `l` / `h` | Cycle pane focus (Right arrow is only bound on the Settings tab for `cycle value`; Left arrow stays unbound on the list side) |
 | `Esc` / `Shift+M` | Return focus to the Models list |
 | `Shift+L` / `Shift+C` / `Shift+S` | Jump to Logs / Chat / Settings tab. `L` and `C` are gated on a running model. |

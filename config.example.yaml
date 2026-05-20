@@ -142,12 +142,33 @@ probe_timeout_secs: 120
 # binding cheat-sheet):
 #   quit, move_up, move_down, page_up, page_down, go_top, go_bottom,
 #   open_filter, clear_filter, toggle_favorite, open_launch_picker,
-#   open_advanced_panel, submit, cancel, yank_url, yank_curl,
+#   submit, cancel, yank_url, yank_curl,
 #   yank_path, cycle_theme, focus_list, next_focus, prev_focus,
 #   send_chat, toggle_think_collapse, toggle_auto_scroll,
 #   stage_rerank_candidate, toggle_help, stop_model, enter_edit,
-#   exit_edit, kill_daemon
+#   exit_edit, kill_daemon, next_field, prev_field,
+#   cycle_value_next, cycle_value_prev
 keybindings: {}
 #   quit: ctrl+q
 #   cycle_theme: T
 #   toggle_help: f1
+
+# arch_defaults: user escape hatch over the built-in `(architecture,
+#   gpu_backend) → TypedKnobs` table that ships in the binary. Keys
+#   are GGUF `general.architecture` strings (e.g. `qwen2`, `llama3`,
+#   `gemma3`). Each value is a `TypedKnobs` partial — only the fields
+#   you want to override need to be specified. At launch time the
+#   daemon walks `preset > last_params > arch_defaults > built-in
+#   table > llama-server` and picks the first non-null per field.
+#
+#   Field names match llama-server's flag names (snake_case): each
+#   is grep-able directly from the binary's log output.
+# arch_defaults:
+#   qwen2:
+#     n_gpu_layers: 99
+#     flash_attn: true
+#     cache_type_k: q8_0
+#     cache_type_v: q8_0
+#   llama:
+#     threads: 8
+#     parallel: 4
