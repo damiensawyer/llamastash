@@ -320,6 +320,9 @@ mod tests {
 
   #[test]
   fn log_dir_is_logs_under_cache_dir() {
+    // Hold env_mutex so a concurrent override-setting test can't flip
+    // LLAMASTASH_CACHE_DIR between our two reads and split the answer.
+    let _guard = env_mutex().lock().unwrap_or_else(|e| e.into_inner());
     let log = log_dir().unwrap();
     let cache = cache_dir().unwrap();
     assert_eq!(log, cache.join("logs"));
@@ -327,24 +330,28 @@ mod tests {
 
   #[test]
   fn user_config_file_lives_under_config_dir() {
+    let _guard = env_mutex().lock().unwrap_or_else(|e| e.into_inner());
     let path = user_config_file().unwrap();
     assert_eq!(path, config_dir().unwrap().join("config.yaml"));
   }
 
   #[test]
   fn state_file_lives_under_state_dir() {
+    let _guard = env_mutex().lock().unwrap_or_else(|e| e.into_inner());
     let path = state_file().unwrap();
     assert_eq!(path, state_dir().unwrap().join("state.json"));
   }
 
   #[test]
   fn daemon_pidfile_lives_under_state_dir() {
+    let _guard = env_mutex().lock().unwrap_or_else(|e| e.into_inner());
     let path = daemon_pidfile().unwrap();
     assert_eq!(path, state_dir().unwrap().join("daemon.pid"));
   }
 
   #[test]
   fn init_snapshot_file_lives_under_state_dir() {
+    let _guard = env_mutex().lock().unwrap_or_else(|e| e.into_inner());
     let path = init_snapshot_file().unwrap();
     assert_eq!(path, state_dir().unwrap().join("init_snapshot.json"));
   }
