@@ -50,11 +50,12 @@ fn unique_temp(label: &str) -> PathBuf {
 }
 
 async fn wait_for_socket(path: &Path) {
-  // 10 s gives macOS GitHub runners enough headroom — the previous
-  // 3 s budget timed out during parallel test bursts on slower
-  // hardware. Linux CI typically binds in <300 ms, so the longer
-  // deadline never fires in practice and just hardens the test.
-  let deadline = Instant::now() + Duration::from_secs(10);
+  // 30 s for macOS GitHub runners. Ten parallel tests each spawn a
+  // daemon and the runner only has a couple of cores, so socket
+  // bind can slip past tighter budgets under load. Linux CI binds
+  // in <300 ms; the longer deadline only fires when something is
+  // genuinely wrong.
+  let deadline = Instant::now() + Duration::from_secs(30);
   loop {
     if Instant::now() > deadline {
       panic!("daemon socket never appeared: {}", path.display());
@@ -201,10 +202,9 @@ async fn spawn_daemon_with_model(label: &str, model_name: &str, arch: &str) -> D
 }
 
 async fn await_catalog_populated(socket: &Path) {
-  // 10 s for the same reason `wait_for_socket` was bumped: macOS
-  // GitHub runners are slow under parallel test load and the prior
-  // 3 s budget false-triggered.
-  let deadline = Instant::now() + Duration::from_secs(10);
+  // 30 s for the same reason `wait_for_socket` was bumped: macOS
+  // GitHub runners are slow under parallel test load.
+  let deadline = Instant::now() + Duration::from_secs(30);
   loop {
     if Instant::now() > deadline {
       panic!(
