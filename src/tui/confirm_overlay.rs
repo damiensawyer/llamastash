@@ -2,7 +2,7 @@
 //! actions (stop a managed launch, kill the whole daemon).
 //!
 //! Enter / `y` confirms, Esc / `n` (or any other key) cancels — see
-//! [`events::handle_key`] for the key-routing precedence.
+//! `events::handle_key` for the key-routing precedence.
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};

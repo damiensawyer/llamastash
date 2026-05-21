@@ -25,6 +25,7 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 ## v1+ release blockers
 
 - [ ] mouse capture for pane focus and launch picker selection.
+- [ ] PATH in list output is too long, show Size instead.
 - [ ] vim-style keybindings (h/j/k/l to navigate list, enter to launch, etc).
 - [ ] Init does not hand off to TUI
 - [x] Make input filed a reusable component and use it for all text fields throughout the project. All text fields should have same behavior (e:edit, Esc:stop-edit, 2nd Esc:clear). The component need not have any styling (border etc) so that it can be styled as it is today for filter/chat/embed/rerank -> inputs, Advanced settings free text input (extras), HF search input etc. The component work can be done first in a separate commit.

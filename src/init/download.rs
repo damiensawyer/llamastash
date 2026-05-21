@@ -1,7 +1,7 @@
 //! HuggingFace pull (Unit 9, R65).
 //!
 //! Backs `llamastash pull <repo>` standalone and the init wizard's
-//! model step. v2 uses the [`hf-hub`] crate (0.5 line) for the HF
+//! model step. v2 uses the `hf-hub` crate (0.5 line) for the HF
 //! listing + download path. hf-hub resolves the same `reqwest 0.12`
 //! we pin elsewhere, so adopting it does not introduce a duplicate
 //! reqwest in the dep tree.

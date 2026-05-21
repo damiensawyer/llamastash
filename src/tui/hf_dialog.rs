@@ -424,7 +424,7 @@ impl HfDialogState {
   /// and the current seq hasn't already been dispatched. For
   /// `Trending` sort the dispatch fires regardless of buffer content
   /// (the HF endpoint ignores `search` for trending — see
-  /// [`init::hf_api::search`]); every other sort still needs a
+  /// [`crate::init::hf_api::search`]); every other sort still needs a
   /// non-empty query to avoid hammering the API with empty searches.
   pub fn search_due(&self, now: Instant) -> bool {
     let seq_advanced = self.query_seq > self.last_dispatched_seq;

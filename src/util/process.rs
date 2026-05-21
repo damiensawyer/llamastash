@@ -4,7 +4,7 @@
 //!
 //! Replaces three near-identical implementations that grew across
 //! the v2 surface:
-//! - [`crate::gpu::run_with_timeout`] (vendor probes)
+//! - `crate::gpu::run_with_timeout` (vendor probes)
 //! - [`crate::init::smoke::version_probe`] (`llama-server --version`)
 //! - `run_brew_with_timeout` (brew install / brew --prefix)
 //!

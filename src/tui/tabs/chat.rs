@@ -49,7 +49,7 @@ pub struct ChatTabState {
   pub scroll_offset: u16,
   /// Receiver for the most recent `spawn_chat_stream` invocation.
   /// The render loop drains it via `try_recv` on every tick — that
-  /// way SSE deltas land in [`response`] without the input thread
+  /// way SSE deltas land in [`ChatTabState::response`] without the input thread
   /// having to await anything. `None` once the stream signals
   /// `Finished` or `Error`.
   pub stream_rx: Option<mpsc::Receiver<ChatStreamMsg>>,

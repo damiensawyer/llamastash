@@ -94,7 +94,7 @@ impl SupervisorRegistry {
   /// Atomically pick a port and add it to the in-flight reservation
   /// set, given the live-supervisor ports the caller already knows
   /// about. The returned port is held in the reservation set until
-  /// [`release_reserved_port`] is called. Use this from
+  /// [`Self::release_reserved_port`] is called. Use this from
   /// `start_model` to close the choose-and-reserve race against
   /// concurrent IPC clients.
   pub async fn reserve_port(

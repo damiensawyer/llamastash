@@ -170,7 +170,7 @@ pub struct App {
   /// Cursor index into the rendered row list (which mixes headers
   /// and models). Header rows are skipped during `move_*`.
   pub list_cursor: usize,
-  /// Filter input — modal text field backed by [`InputField`] so the
+  /// Filter input — modal text field backed by [`crate::tui::input_field::InputField`] so the
   /// editing semantics (`e` enters edit, `Esc` walks back exit-edit
   /// → clear → close) match every other text input. Filter auto-
   /// enters edit on `open_filter` so the user can type immediately.
@@ -301,7 +301,7 @@ impl App {
   }
 
   /// `true` when the download strip should be rendered. Delegates
-  /// to [`DownloadStripState::is_active`] so the renderer's layout
+  /// to [`crate::tui::download_strip::DownloadStripState`] so the renderer's layout
   /// decision and the strip's render contract stay aligned.
   pub fn download_strip_active(&self) -> bool {
     self.download_strip.is_active()
@@ -1063,7 +1063,7 @@ impl App {
   /// Close the filter input entirely (matches the legacy
   /// `Esc clears + leaves filter mode` behaviour for callers that
   /// still want the one-shot reset). Distinct from
-  /// [`InputField`]'s `Esc` walk-back, which only exits edit / clears
+  /// [`crate::tui::input_field::InputField`]'s `Esc` walk-back, which only exits edit / clears
   /// the buffer; this resets both at once.
   pub fn clear_filter(&mut self) {
     self.filter_input.clear();
@@ -1077,7 +1077,7 @@ impl App {
     self.toast = Some((msg.into(), Instant::now()));
   }
 
-  /// Drop the toast if it's older than [`TOAST_TTL`].
+  /// Drop the toast if it's older than `TOAST_TTL`.
   pub fn expire_toast(&mut self) {
     if let Some((_, at)) = &self.toast {
       if at.elapsed() > TOAST_TTL {

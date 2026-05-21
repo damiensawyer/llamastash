@@ -420,7 +420,7 @@ pub enum FilterTitle<'a> {
   Active { buffer: &'a str, focused: bool },
 }
 
-/// Inputs to [`build_block_title`]. Bundled so the title call site
+/// Inputs to `build_block_title`. Bundled so the title call site
 /// in `render` and `render_empty_state` doesn't drift; adding a new
 /// piece of context (e.g. a "stale catalog" badge) only touches
 /// one place.
