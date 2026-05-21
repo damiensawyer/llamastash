@@ -36,10 +36,11 @@ use self::{
   shutdown::{install_signal_handlers, ShutdownToken},
   state_store::{load as load_state, RunningSnapshot},
 };
-use crate::config::loader::PortRange;
+use crate::config::loader::{PortRange, ProxyConfig};
 use crate::daemon::probe::ProbeOptions;
 use crate::discovery::ModelCatalog;
 use crate::ipc::methods::{LaunchEnv, MethodContext, PersistedState};
+use crate::proxy::{self, server::ProxyStatus};
 
 /// Options for starting the daemon. `state_dir` holds the PID lockfile;
 /// `socket_path` is the Unix-domain socket the server binds to. Both
@@ -85,6 +86,13 @@ pub struct DaemonOptions {
   /// would have. Without propagation the child rebuilds its options
   /// from an empty `Cli` and silently ignores the user's flags.
   pub propagated_cli_args: Vec<std::ffi::OsString>,
+  /// OpenAI-compat proxy router config (enabled flag + loopback
+  /// port). Sourced from the user's `[proxy]` section; defaults to
+  /// enabled on `127.0.0.1:11434`. Tests that don't care about the
+  /// proxy can keep the default — the listener binds on an
+  /// unprivileged port and is best-effort (bind failure is
+  /// non-fatal).
+  pub proxy: ProxyConfig,
 }
 
 impl DaemonOptions {
@@ -105,6 +113,11 @@ impl DaemonOptions {
       probe_timeout_secs: None,
       arch_defaults: std::collections::BTreeMap::new(),
       propagated_cli_args: Vec::new(),
+      // Tests using `rooted_at` rarely care about the proxy; bind
+      // attempts are best-effort so even a port-collision is silent
+      // from the test's standpoint. Tests that *do* want the proxy
+      // off can flip `enabled` after construction.
+      proxy: ProxyConfig::default(),
     }
   }
 
@@ -130,6 +143,7 @@ impl DaemonOptions {
       probe_timeout_secs: None,
       arch_defaults: std::collections::BTreeMap::new(),
       propagated_cli_args: Vec::new(),
+      proxy: ProxyConfig::default(),
     })
   }
 }
@@ -295,6 +309,34 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
     log::info!(
       "daemon started without `llama-server` binary resolved; `start_model` will return an error until one is configured"
     );
+  }
+
+  // 8b. OpenAI-compat proxy listener. Spawned between the
+  // host-metrics sampler (which the proxy doesn't depend on but
+  // which is the canonical "background sampler" anchor) and the
+  // unix-socket accept loop so the IPC ctx is fully populated
+  // before the proxy reads from it. Bind failure is intentionally
+  // non-fatal — the proxy is a convenience surface; the daemon's
+  // primary contract (IPC + supervisor) survives a port collision.
+  // The status cell holds the outcome (Disabled / Listening /
+  // PortInUse / Unbound) so Unit 5 can surface it through the IPC
+  // `status` response. Leading underscore until that wiring lands.
+  let _proxy_status = proxy::server::new_status_cell();
+  if opts.proxy.enabled {
+    let state = proxy::ProxyState::from_context(&ctx);
+    let addr = proxy::server::loopback_addr(opts.proxy.port);
+    let token_for_proxy = token.clone();
+    let status_for_proxy = std::sync::Arc::clone(&_proxy_status);
+    supervisor::spawn_supervised("proxy_listener", async move {
+      if let Err(e) = proxy::serve(state, addr, token_for_proxy, status_for_proxy).await {
+        log::warn!("proxy listener task ended with error: {e}");
+      }
+    });
+  } else {
+    log::info!("proxy listener disabled in config; daemon stays IPC-only");
+    if let Ok(mut guard) = _proxy_status.write() {
+      *guard = ProxyStatus::Disabled;
+    }
   }
 
   // Hold a second handle to the dispatcher context so the

@@ -142,6 +142,26 @@ sha2 = { version = "0.10", default-features = false, features = ["std"] }
 # the `command-group` crate would boil down to the same syscall
 # on Unix and is not needed.
 
+# OpenAI-compat proxy router (post-v2 feat). Hyper 1.x is the
+# lightest tokio-compatible HTTP server option and already lives in
+# the dep tree transitively via reqwest. Loopback HTTP/1.1 only —
+# HTTP/2 is intentionally not enabled to keep the ALPN/TLS surface
+# out of the build. See docs/plans/2026-05-21-001-feat-proxy-router-plan.md
+# Key Technical Decisions for the axum-vs-hyper analysis.
+hyper = { version = "1", default-features = false, features = [
+  "http1",
+  "server",
+] }
+# `server-auto` would re-enable hyper's HTTP/2 feature transitively;
+# we use `hyper::server::conn::http1::Builder` directly instead so
+# the build stays HTTP/1.1-only. The `tokio` feature ships the
+# `TokioIo` adapter that bridges hyper's `Io` traits onto
+# `tokio::net::TcpStream`.
+hyper-util = { version = "0.1", default-features = false, features = [
+  "tokio",
+] }
+http-body-util = "0.1"
+
 [lib]
 name = "llamastash"
 path = "src/lib.rs"
