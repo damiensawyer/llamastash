@@ -32,6 +32,9 @@ use crate::cli::resolve::{resolve_model, CatalogRow};
 use crate::daemon::supervisor::ManagedState;
 use crate::discovery::DiscoveredModel;
 
+use super::launch::{self, LaunchOutcome};
+use super::mru::{pick_fallback, FallbackCandidate};
+use super::router::ProxyResponse;
 use super::state::ProxyState;
 
 /// Inbound body size cap. The 2 MiB ceiling lets OpenAI-shape chat
@@ -302,6 +305,127 @@ fn catalog_row_from_discovered(m: &DiscoveredModel) -> CatalogRow {
 /// equality is exact in production.
 fn same_path(model_id_path: &std::path::Path, row_path: &str) -> bool {
   model_id_path.to_string_lossy() == row_path
+}
+
+/// Unit 4 entry point — invoked from `router.rs` when a request
+/// hits a catalog row whose model isn't currently Ready.
+///
+/// Drives:
+///   1. Auto-start via [`launch::auto_start`] (single-flight
+///      coalesced; waits for Ready or terminal Error).
+///   2. On Ready → MRU touch + forward (no fallback headers).
+///   3. On Error → pick a family-MRU fallback and forward with
+///      `x-llamastash-served-by` + `x-llamastash-fallback-reason:
+///      launch_failed`. If no Ready candidate exists → 503
+///      `launch_failed` with the running list.
+pub(crate) async fn handle_not_running(
+  state: &Arc<ProxyState>,
+  inbound: super::forward::InboundRequest,
+  requested_model: String,
+  resolved_row: CatalogRow,
+  requested_arch: Option<String>,
+) -> ProxyResponse {
+  let outcome = launch::auto_start(state, &resolved_row).await;
+  match outcome {
+    LaunchOutcome::Ready { port, .. } => {
+      // Touch the MRU using the supervisor we just confirmed Ready.
+      // The display name for the response header on the happy path
+      // is the requested model name — no fallback, no surprise.
+      super::router::touch_mru_for_port(state, port).await;
+      let served = served_name_for_row(&resolved_row);
+      super::forward::forward_to_upstream(
+        state,
+        inbound,
+        super::forward::Target {
+          port,
+          served_model_id: &served,
+          fallback: false,
+          fallback_reason: None,
+        },
+      )
+      .await
+    }
+    LaunchOutcome::Failed { cause } => {
+      // Family-MRU fallback. Walk the supervisor snapshot, filter
+      // to Ready, attach each entry's catalog arch + MRU
+      // timestamp, then defer to `pick_fallback` for the policy.
+      let candidates = collect_fallback_candidates(state).await;
+      if let Some(pick) = pick_fallback(candidates, requested_arch.as_deref()) {
+        super::router::touch_mru_for_id(state, &pick.model_id).await;
+        return super::forward::forward_to_upstream(
+          state,
+          inbound,
+          super::forward::Target {
+            port: pick.port,
+            served_model_id: &pick.served_model_id,
+            fallback: true,
+            fallback_reason: Some("launch_failed"),
+          },
+        )
+        .await;
+      }
+      // No running model to fall back to. R155 mandates a 503
+      // with the (empty) `running` list inline. Drop the requested
+      // model name into the message so logs surface what was being
+      // attempted.
+      super::router::launch_failed_response(&cause, Vec::<String>::new(), &requested_model)
+    }
+  }
+}
+
+/// Resolve a display name for a CatalogRow that mirrors what
+/// `/v1/models` and `llamastash list` show. Falls back to the
+/// resolver's `name()` which uses `path.file_name()`; the
+/// `display_label` form (Ollama's `<name>:<tag>`) wins when present.
+fn served_name_for_row(row: &CatalogRow) -> String {
+  if let Some(label) = &row.display_label {
+    return label.clone();
+  }
+  row.name()
+}
+
+/// Build the candidate list the fallback selector picks from. Reads
+/// the supervisor snapshot (filtering to Ready), joins each row
+/// against the catalog snapshot to find the matching `arch`, and
+/// stamps the latest MRU timestamp.
+async fn collect_fallback_candidates(state: &Arc<ProxyState>) -> Vec<FallbackCandidate> {
+  let sup_snap = state.supervisors.snapshot().await;
+  // Build a `path -> CatalogRow` lookup from the catalog snapshot
+  // so we can attach arch + display label without re-walking the
+  // catalog for each supervisor entry. The catalog is small (tens
+  // to hundreds of rows in v1) so a HashMap build is fine on this
+  // path — only triggered when an auto-start has just failed.
+  let cat_snap = state.catalog.snapshot().await;
+  let mut by_path: std::collections::HashMap<String, &DiscoveredModel> =
+    std::collections::HashMap::with_capacity(cat_snap.len());
+  for m in cat_snap.iter() {
+    by_path.insert(m.path.to_string_lossy().into_owned(), m);
+  }
+
+  let mut out: Vec<FallbackCandidate> = Vec::with_capacity(sup_snap.len());
+  for (_launch_id, model) in sup_snap.into_iter() {
+    if !matches!(model.state().await, ManagedState::Ready) {
+      continue;
+    }
+    let id = model.id().clone();
+    let path_key = id.path.to_string_lossy().into_owned();
+    let catalog_entry = by_path.get(&path_key);
+    let arch = catalog_entry
+      .and_then(|m| m.metadata.as_ref())
+      .and_then(|md| md.arch.clone());
+    let served_model_id = catalog_entry
+      .and_then(|m| m.display_label.clone())
+      .unwrap_or_else(|| crate::util::paths::model_display_name(&id.path));
+    let last_request_at = state.mru.last_request_at(&id).await;
+    out.push(FallbackCandidate {
+      model_id: id,
+      arch,
+      last_request_at,
+      port: model.port(),
+      served_model_id,
+    });
+  }
+  out
 }
 
 #[cfg(test)]

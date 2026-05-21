@@ -111,6 +111,13 @@ pub struct ErrorObject {
   /// case JSON-shaped the same as Unit 2's bare errors.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub matches: Option<Vec<String>>,
+  /// Currently-Ready model names reported alongside `launch_failed`
+  /// errors. R155 mandates "no running models" maps to a 503 with
+  /// `running: []`; the field is always present on the
+  /// `launch_failed` arm (even when empty) so clients can branch on
+  /// it without an `Option`-style absence check.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub running: Option<Vec<String>>,
 }
 
 impl ErrorObject {
@@ -121,7 +128,22 @@ impl ErrorObject {
       code: None,
       param: None,
       matches: None,
+      running: None,
     }
+  }
+
+  /// Builder helper: stamp the running-model list (presented to
+  /// clients on `launch_failed` 503s). Always wins on the wire,
+  /// even when empty — R155 requires the field be present so
+  /// clients can see "no running models" explicitly.
+  pub fn with_running<I, S>(mut self, names: I) -> Self
+  where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+  {
+    let v: Vec<String> = names.into_iter().map(Into::into).collect();
+    self.running = Some(v);
+    self
   }
 
   /// Builder helper: stamp `code` (e.g. `"model_required"`).

@@ -463,8 +463,11 @@ async fn empty_model_string_returns_400_model_required() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn catalog_match_without_running_supervisor_returns_503() {
-  // Catalog row exists; no supervisor → Unit 3 placeholder 503.
+async fn catalog_match_without_running_supervisor_returns_launch_failed() {
+  // Catalog row exists but no supervisor is Ready *and* the path
+  // points at a non-existent file → Unit 4's auto-start fails at
+  // the GGUF header read; no Ready fallback exists either → 503
+  // `launch_failed` with `running: []`.
   let registry = SupervisorRegistry::new();
   let state = proxy_state_with(
     vec![discovered("/m/qwen3.gguf", Some("qwen3"), "qwen3")],
@@ -477,14 +480,11 @@ async fn catalog_match_without_running_supervisor_returns_503() {
   let (status, _headers, response) = http_post(addr, "/v1/chat/completions", body, &[]).await;
   assert_eq!(status, 503);
   let v: Value = serde_json::from_slice(&response).expect("json");
-  assert_eq!(v["error"]["type"], "model_not_running");
-  assert!(
-    v["error"]["message"]
-      .as_str()
-      .unwrap_or("")
-      .contains("auto-start is not yet wired"),
-    "placeholder message present: {v}"
-  );
+  assert_eq!(v["error"]["type"], "launch_failed");
+  let running = v["error"]["running"]
+    .as_array()
+    .expect("running array present");
+  assert!(running.is_empty(), "no Ready models to fall back to");
   shutdown.trigger();
 }
 

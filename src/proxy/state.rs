@@ -15,6 +15,9 @@ use crate::daemon::registry::SupervisorRegistry;
 use crate::discovery::ModelCatalog;
 use crate::ipc::methods::{LaunchEnv, MethodContext, PersistedState};
 
+use super::coalesce::Coalesce;
+use super::mru::MruTracker;
+
 /// Cheap-to-clone bundle of the daemon-side handles the proxy needs.
 /// The inner `Arc` makes per-connection cloning a single refcount
 /// bump — the `service_fn` closure clones a fresh handle for every
@@ -44,6 +47,22 @@ pub struct ProxyState {
   /// `Arc` so the per-connection clone is a refcount bump rather
   /// than rebuilding the pool.
   pub http_client: Arc<reqwest::Client>,
+  /// Single-flight coalesce map for Unit 4's auto-start path. Keyed
+  /// on [`crate::gguf::identity::ModelId`] so two concurrent
+  /// requests with different fuzzy spellings of the same model
+  /// share one launch.
+  pub(crate) coalesce: Coalesce,
+  /// In-memory `last_request_at` tracker. Unit 4's family-MRU
+  /// fallback picker reads from it; `route::forward_request` writes
+  /// to it as forwarding starts (per the plan's "as it starts
+  /// forwarding, not on completion" rule).
+  pub(crate) mru: MruTracker,
+  /// Full IPC context handle. Cheap to clone (every field is
+  /// already `Arc`-wrapped) and only consumed by the proxy's
+  /// auto-start path which calls into
+  /// [`crate::ipc::methods::start_model_inner`]. Kept off the hot
+  /// path — Ready-model forwarding never reads from this field.
+  pub(crate) ctx: MethodContext,
 }
 
 impl ProxyState {
@@ -57,6 +76,9 @@ impl ProxyState {
       state: ctx.state.clone(),
       launch: ctx.launch.clone(),
       http_client: Arc::new(build_http_client()),
+      coalesce: Coalesce::new(),
+      mru: MruTracker::new(),
+      ctx: ctx.clone(),
     })
   }
 }

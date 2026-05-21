@@ -22,6 +22,7 @@ use super::route::{self, BodyError as RouteBodyError, RouteDecision};
 use super::state::ProxyState;
 use crate::daemon::supervisor::ManagedState;
 use crate::discovery::DiscoveredModel;
+use serde_json::Value;
 
 /// The error type our `BoxBody` carries. Unit 3 streams upstream
 /// `reqwest::Response::bytes_stream()` chunks through `StreamBody`,
@@ -90,6 +91,12 @@ async fn forward_request(state: Arc<ProxyState>, req: Request<Incoming>) -> Prox
       fallback_reason,
       ..
     } => {
+      // MRU touch on the Ready path. Stamped *before* forwarding
+      // begins (per the plan's "as it starts forwarding, not on
+      // completion" rule) so long-running streams don't delay the
+      // timestamp. We re-look-up the supervisor's ModelId from the
+      // snapshot — `RouteDecision::ReadyAt` doesn't carry it.
+      touch_mru_for_port(&state, port).await;
       forward::forward_to_upstream(
         &state,
         forward::InboundRequest {
@@ -108,17 +115,23 @@ async fn forward_request(state: Arc<ProxyState>, req: Request<Incoming>) -> Prox
       .await
     }
     RouteDecision::NotRunning {
-      requested_model, ..
+      requested_model,
+      resolved_row,
+      arch,
     } => {
-      // TODO(unit-4): replace with auto-start + wait-for-Ready +
-      // family-MRU fallback. The `RouteDecision::NotRunning`
-      // variant carries the resolved row + arch so Unit 4 can
-      // launch without re-resolving.
-      error_response(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "model_not_running",
-        &format!("{requested_model} not running; auto-start is not yet wired"),
+      route::handle_not_running(
+        &state,
+        forward::InboundRequest {
+          method,
+          uri,
+          headers,
+          body_bytes: parsed.bytes,
+        },
+        requested_model,
+        *resolved_row,
+        arch,
       )
+      .await
     }
     RouteDecision::NotFound { requested_model } => error_with_matches(
       StatusCode::NOT_FOUND,
@@ -274,6 +287,49 @@ where
   let error = ErrorObject::new(r#type, message).with_matches(matches);
   let bytes = serde_json::to_vec(&ErrorResponse { error }).expect("json encoding of fixed shape");
   Ok(json_response(status, bytes))
+}
+
+/// Build the 503 `launch_failed` envelope used by Unit 4's
+/// fallback path when no Ready model is available. The
+/// `running: []` field is always present (R155); the message
+/// surfaces the supervisor's `cause` so clients see *why* the
+/// launch failed.
+pub(crate) fn launch_failed_response<I, S>(
+  cause: &str,
+  running: I,
+  requested_model: &str,
+) -> ProxyResponse
+where
+  I: IntoIterator<Item = S>,
+  S: Into<String>,
+{
+  let message =
+    format!("auto-start of `{requested_model}` failed and no running model is available: {cause}");
+  let error = ErrorObject::new("launch_failed", message).with_running(running);
+  let bytes = serde_json::to_vec(&ErrorResponse { error }).expect("json encoding of fixed shape");
+  let _ = Value::Null; // keep the import alive without an actual use
+  Ok(json_response(StatusCode::SERVICE_UNAVAILABLE, bytes))
+}
+
+/// Touch the MRU tracker for the supervisor currently bound to
+/// `port`. The proxy stamps `last_request_at` on every successful
+/// request *as forwarding begins* (per the plan's locked decision),
+/// not on completion — long-running streams shouldn't delay the
+/// timestamp.
+pub(crate) async fn touch_mru_for_port(state: &Arc<ProxyState>, port: u16) {
+  let snap = state.supervisors.snapshot().await;
+  for (_launch_id, model) in snap.into_iter() {
+    if model.port() == port {
+      state.mru.touch(model.id()).await;
+      return;
+    }
+  }
+}
+
+/// Touch the MRU tracker by `ModelId`. Used by the fallback arm
+/// which already has the id from the supervisor snapshot it walked.
+pub(crate) async fn touch_mru_for_id(state: &Arc<ProxyState>, id: &crate::gguf::identity::ModelId) {
+  state.mru.touch(id).await;
 }
 
 fn json_response(status: StatusCode, body: Vec<u8>) -> Response<BoxBody<Bytes, BodyError>> {
