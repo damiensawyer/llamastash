@@ -26,32 +26,19 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     if let Some(m) = app.focused_managed() {
       lines.push(heading("Running launch", palette));
       lines.push(kv("launch", m.launch_id.clone(), palette));
-      lines.push(kv("port", format!(":{}", m.port), palette));
-      lines.push(kv(
-        "state",
-        crate::tui::status_icons::label_for(m.state).to_string(),
-        palette,
-      ));
-      if let Some(rss) = m.rss_bytes {
-        lines.push(kv("rss", crate::tui::fmt::format_bytes(rss), palette));
-      }
-      if let Some(cpu) = m.cpu_pct {
-        lines.push(kv("cpu", format!("{cpu:.0}%"), palette));
-      }
+      // port / state / rss / cpu already render in the header info
+      // row above the divider — dropping them here removes the
+      // duplication that bloated the running-launch view.
       let last = app.last_params.get(&m.path);
-      lines.push(Line::default());
-      lines.push(heading("Launch params", palette));
-      let ctx_value = last
-        .and_then(|p| p.ctx)
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "native".into());
-      lines.push(kv("ctx", ctx_value, palette));
-      let reasoning_value = last.map(|p| p.reasoning).unwrap_or(false);
-      lines.push(kv(
-        "reasoning",
-        if reasoning_value { "on" } else { "off" }.into(),
-        palette,
-      ));
+      let empty_knobs = crate::config::TypedKnobs::default();
+      let persisted_knobs = last.map(|p| &p.knobs).unwrap_or(&empty_knobs);
+      for spec in knob_specs() {
+        lines.push(kv(
+          knob_label(spec.field),
+          format_persisted_knob_value(persisted_knobs, spec.field),
+          palette,
+        ));
+      }
       let extras: String = last
         .map(|p| p.extras.join(" "))
         .filter(|s| !s.is_empty())
@@ -239,6 +226,68 @@ fn knob_label(field: KnobField) -> &'static str {
     KnobField::UbatchSize => "ubatch_size",
     KnobField::RopeFreqScale => "rope_freq_scale",
     KnobField::Keep => "keep",
+  }
+}
+
+/// Read-only formatter for the running-launch view. Same vocabulary
+/// as `format_knob_value` (value or `default` / `on` / `off`) but
+/// reads straight from a persisted `TypedKnobs` instead of a picker
+/// state. Untouched fields render `default` — the user can open the
+/// editor (`e`) to see the resolved chip.
+fn format_persisted_knob_value(knobs: &crate::config::TypedKnobs, field: KnobField) -> String {
+  match field {
+    KnobField::Ctx => knobs
+      .ctx
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::NGpuLayers => knobs
+      .n_gpu_layers
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::Threads => knobs
+      .threads
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::Parallel => knobs
+      .parallel
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::BatchSize => knobs
+      .batch_size
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::UbatchSize => knobs
+      .ubatch_size
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::Keep => knobs
+      .keep
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::RopeFreqScale => knobs
+      .rope_freq_scale
+      .map(|v| format!("{v}"))
+      .unwrap_or_else(|| "default".into()),
+    KnobField::CacheTypeK => knobs
+      .cache_type_k
+      .clone()
+      .unwrap_or_else(|| "default".into()),
+    KnobField::CacheTypeV => knobs
+      .cache_type_v
+      .clone()
+      .unwrap_or_else(|| "default".into()),
+    KnobField::Reasoning => bool_label(knobs.reasoning),
+    KnobField::FlashAttn => bool_label(knobs.flash_attn),
+    KnobField::Mlock => bool_label(knobs.mlock),
+    KnobField::NoMmap => bool_label(knobs.no_mmap),
+  }
+}
+
+fn bool_label(v: Option<bool>) -> String {
+  match v {
+    Some(true) => "on".into(),
+    Some(false) => "off".into(),
+    None => "default".into(),
   }
 }
 

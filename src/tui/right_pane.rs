@@ -370,6 +370,13 @@ fn render_header_stats(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &P
       let label_style = palette.label_style();
       let value_style = palette.text_style();
       Line::from(vec![
+        // `ID:L9` prefix surfaces the launch id alongside the port so
+        // it's visible without diving into the Settings tab. The
+        // label tone matches `RAM` / `CPU` so the trio reads as one
+        // styled-label cadence.
+        Span::styled("ID:", label_style),
+        Span::styled(m.launch_id.clone(), value_style),
+        Span::styled("  ", Style::default()),
         Span::styled(format!(":{}  ", m.port), palette.muted_style()),
         Span::styled(
           format!("{} ", glyph_for(m.state)),
