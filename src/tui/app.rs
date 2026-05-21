@@ -26,6 +26,26 @@ use crate::tui::tabs::{tabs_for_mode, RightTab};
 /// transient yank confirmations from sticking around forever.
 const TOAST_TTL: Duration = Duration::from_secs(3);
 
+/// Map the daemon's wire-stable `gpu_backend` label
+/// (`"nvidia"`/`"amd"`/...) to the recommender's per-backend key
+/// (`"cuda"`/`"hip"`/...). Kept here so the dialog stays decoupled
+/// from the daemon's sampler vocabulary. R113: `"unknown"` and
+/// `"unsampled"` pass through verbatim so `vram_fit_for_file` can
+/// return `FileFit::Unknown`.
+fn recommender_backend_key(wire: &str) -> &'static str {
+  use crate::daemon::host_metrics::HostMetricsSnapshot as H;
+  match wire {
+    H::BACKEND_NVIDIA => "cuda",
+    H::BACKEND_AMD => "hip",
+    H::BACKEND_APPLE_METAL => "metal",
+    H::BACKEND_CPU_ONLY => "cpu",
+    // Vulkan-only or never-sampled fall through; the dialog renders
+    // `FileFit::Unknown` rather than fake confidence.
+    H::BACKEND_UNKNOWN => "unknown",
+    _ => "unknown",
+  }
+}
+
 /// How many entries the `↺ Recent` section surfaces. Five matches
 /// what the user picked during planning; the daemon's storage
 /// itself isn't capped — the cap is purely a render-side window.
@@ -93,6 +113,12 @@ pub struct AppOptions {
   /// (vs. directly on `App`) so it travels through the same
   /// construction path as the theme.
   pub keymap: KeyMap,
+  /// Resolved offline mode for this TUI session. `true` when the
+  /// user passed `--offline` on the CLI or `LLAMASTASH_OFFLINE=1`
+  /// at startup. Threads into the HF dialog's FetchClient + the
+  /// download dispatch so a pull confirmation can't trigger network
+  /// I/O behind the user's back.
+  pub offline: bool,
 }
 
 impl Default for AppOptions {
@@ -101,6 +127,7 @@ impl Default for AppOptions {
       theme: ThemeName::Macchiato,
       custom_palette: None,
       keymap: KeyMap::default(),
+      offline: false,
     }
   }
 }
@@ -143,7 +170,11 @@ pub struct App {
   /// Cursor index into the rendered row list (which mixes headers
   /// and models). Header rows are skipped during `move_*`.
   pub list_cursor: usize,
-  pub filter_buffer: String,
+  /// Filter input — modal text field backed by [`InputField`] so the
+  /// editing semantics (`e` enters edit, `Esc` walks back exit-edit
+  /// → clear → close) match every other text input. Filter auto-
+  /// enters edit on `open_filter` so the user can type immediately.
+  pub filter_input: crate::tui::input_field::InputField,
   pub launch_picker: Option<LaunchPickerState>,
   pub advanced_panel: Option<AdvancedPanelState>,
   pub toast: Option<(String, Instant)>,
@@ -165,6 +196,14 @@ pub struct App {
   /// and kill-daemon so a fat-finger doesn't drop a running model
   /// or the whole supervisor.
   pub confirm_dialog: Option<ConfirmAction>,
+  /// HuggingFace pull dialog (R104). `Some(_)` whenever the modal
+  /// is open; the input pump routes through `Focus::HfDialog` to the
+  /// per-stage key handler.
+  pub hf_dialog: Option<crate::tui::hf_dialog::HfDialogState>,
+  /// Pinned download status strip (R115). Always present; the
+  /// renderer reserves a 1-line slot above the body only when
+  /// `download_strip.is_active()` is true.
+  pub download_strip: crate::tui::download_strip::DownloadStripState,
   /// Per-frame memo of `rendered_rows()`. Primed at the top of
   /// `render::render` and cleared at the bottom — see audit §4.1
   /// #1 (the biggest single perf finding). The same `Vec<ListRow>`
@@ -192,6 +231,20 @@ pub enum ConfirmAction {
   /// `Ctrl+R:restart daemon` — shuts the daemon down and re-spawns
   /// a fresh one. All managed launches are stopped in the process.
   RestartDaemon,
+  /// `Ctrl+D:delete` — remove a non-running model from disk.
+  /// `path` is the GGUF (or split-shard launch file); the deleter
+  /// walks the HF snapshot dir up to the cache root when the file
+  /// is symlinked into `~/.cache/huggingface`, so a confirmed
+  /// delete reclaims the blob bytes too.
+  DeleteModel { path: PathBuf, display_name: String },
+  /// `Ctrl+X:cancel download` — abort the currently-active HF
+  /// download. The queue stays intact; the next queued pull is
+  /// promoted on confirm. `friendly_name` is what the popup renders
+  /// so the user reads the same identifier the strip is showing.
+  CancelDownload {
+    repo_id: String,
+    friendly_name: String,
+  },
   /// `Enter:launch` on a model that already has a managed launch
   /// (round-8). v1 supports duplicate launches on fresh ports, but
   /// we ask the user to confirm so a stray Enter doesn't silently
@@ -230,7 +283,7 @@ impl App {
       rerank: Default::default(),
       logs_state: Default::default(),
       list_cursor: 0,
-      filter_buffer: String::new(),
+      filter_input: crate::tui::input_field::InputField::new(),
       launch_picker: None,
       advanced_panel: None,
       toast: None,
@@ -240,9 +293,66 @@ impl App {
       should_exit: false,
       show_help: false,
       confirm_dialog: None,
+      hf_dialog: None,
+      download_strip: crate::tui::download_strip::DownloadStripState::default(),
       rows_cache: None,
       right_tabs_cache: None,
     }
+  }
+
+  /// `true` when the download strip should be rendered. Delegates
+  /// to [`DownloadStripState::is_active`] so the renderer's layout
+  /// decision and the strip's render contract stay aligned.
+  pub fn download_strip_active(&self) -> bool {
+    self.download_strip.is_active()
+  }
+
+  /// Open the HuggingFace pull dialog. Initialises in the Search
+  /// stage and snaps focus into [`Focus::HfDialog`] so the per-stage
+  /// key router takes over. The dialog reads its offline flag from
+  /// [`AppOptions::offline`] (which is itself the runtime-resolved
+  /// `--offline` ∨ `LLAMASTASH_OFFLINE` value) so the "search
+  /// disabled" hint renders immediately and the dialog's spawned
+  /// fetch tasks short-circuit before any HF traffic.
+  pub fn open_hf_dialog(&mut self) {
+    if self.hf_dialog.is_none() {
+      let ctx = self.hf_hardware_fit_ctx();
+      let offline = self.options.offline || crate::init::fetch::offline_requested(false);
+      self.hf_dialog = Some(crate::tui::hf_dialog::HfDialogState::open(offline, ctx));
+    }
+    self.focus = Focus::HfDialog;
+  }
+
+  /// Snapshot the inputs `vram_fit_for_file` needs into the dialog
+  /// state at open time. Backend / VRAM / RAM come from the
+  /// daemon's host-metrics sampler; the per-backend overhead band
+  /// is read from the bundled benchmark snapshot. R111 + R113.
+  fn hf_hardware_fit_ctx(&self) -> crate::tui::hf_dialog::HardwareFitContext {
+    use crate::tui::hf_dialog::HardwareFitContext;
+    let backend = recommender_backend_key(&self.host_metrics.gpu_backend);
+    let vram_bytes = self.host_metrics.gpu_mem_total_bytes;
+    let ram_total_bytes = self.host_metrics.ram_total_bytes;
+    let overhead_band_bytes = crate::init::benchmark::load_bundled()
+      .recommender_weights
+      .overhead_band_bytes
+      .get(backend)
+      .copied();
+    HardwareFitContext {
+      backend: backend.to_string(),
+      vram_bytes,
+      ram_total_bytes,
+      overhead_band_bytes,
+      ctx_tokens: crate::init::recommender::DEFAULT_CTX,
+    }
+  }
+
+  /// Close the HuggingFace pull dialog and snap focus back to the
+  /// Models list. Background download tasks the dialog spawned
+  /// (Unit 6) keep ticking under the pinned strip — closing the
+  /// dialog does not cancel them.
+  pub fn close_hf_dialog(&mut self) {
+    self.hf_dialog = None;
+    self.focus = Focus::List;
   }
 
   /// Memoize `rendered_rows()` and `available_right_tabs()` for the
@@ -351,6 +461,22 @@ impl App {
       .iter()
       .find(|b| b.action == action)?;
     Some(format!("{}:{}", b.label, description))
+  }
+
+  /// Resolve the live label (`Esc`, `Enter`, `Ctrl+X`, …) for
+  /// `(focus, action)`, falling back to `fallback` when the action
+  /// is unbound. Used by dialog renderers that want a single-token
+  /// chord label (without a description) so `format!("{label}
+  /// returns to ...")` reads naturally. Both the HF dialog footer
+  /// and the confirm-popup body call this; the helper lives on
+  /// `App` so we have one canonical lookup.
+  pub fn resolve_label(&self, focus: Focus, action: Action, fallback: &str) -> String {
+    self
+      .bindings_for(focus)
+      .iter()
+      .find(|b| b.action == action)
+      .map(|b| b.label.to_string())
+      .unwrap_or_else(|| fallback.to_string())
   }
 
   /// Apply a `list_models` IPC response. The TUI calls this after
@@ -596,8 +722,8 @@ impl App {
       running: &running,
       recent_paths: &self.recent_paths,
     });
-    if !self.filter_buffer.is_empty() {
-      all = apply_filter(&all, &self.filter_buffer);
+    if !self.filter_input.is_empty() {
+      all = apply_filter(&all, self.filter_input.buffer());
     }
     all
   }
@@ -879,9 +1005,9 @@ impl App {
     if let Some(path) = self.focused_path() {
       if let Some(last) = self.last_params.get(&path) {
         if !last.advanced.is_empty() {
-          let buffer = last.advanced.join(" ");
-          let cursor = buffer.len();
-          self.advanced_panel = Some(AdvancedPanelState { buffer, cursor });
+          let mut buffer = crate::tui::input_field::InputField::with_text(last.advanced.join(" "));
+          buffer.enter_edit();
+          self.advanced_panel = Some(AdvancedPanelState { buffer });
         }
       }
     }
@@ -905,7 +1031,11 @@ impl App {
   }
 
   pub fn open_advanced_panel(&mut self) {
-    self.advanced_panel = Some(AdvancedPanelState::default());
+    let mut panel = AdvancedPanelState::default();
+    // Auto-enter edit mode so the user can type immediately. The
+    // `Esc` walk-back (exit-edit → clear → close) handles teardown.
+    panel.buffer.enter_edit();
+    self.advanced_panel = Some(panel);
     self.focus = Focus::AdvancedPanel;
   }
 
@@ -925,11 +1055,19 @@ impl App {
 
   pub fn open_filter(&mut self) {
     self.focus = Focus::Filter;
+    // Auto-enter edit so the user can type immediately. The Esc
+    // walk-back (exit-edit → clear → close) handles teardown.
+    self.filter_input.enter_edit();
   }
 
-  /// Esc clears + leaves filter mode.
+  /// Close the filter input entirely (matches the legacy
+  /// `Esc clears + leaves filter mode` behaviour for callers that
+  /// still want the one-shot reset). Distinct from
+  /// [`InputField`]'s `Esc` walk-back, which only exits edit / clears
+  /// the buffer; this resets both at once.
   pub fn clear_filter(&mut self) {
-    self.filter_buffer.clear();
+    self.filter_input.clear();
+    self.filter_input.exit_edit();
     self.focus = Focus::List;
     self.clamp_cursor();
   }
@@ -1336,6 +1474,7 @@ mod tests {
       theme: ThemeName::Macchiato,
       custom_palette: Some(custom),
       keymap: KeyMap::default(),
+      ..Default::default()
     });
     let total = ThemeName::iter().count();
     let mut saw_custom = false;
@@ -1553,7 +1692,7 @@ mod tests {
     let advanced = app
       .advanced_panel
       .as_ref()
-      .map(|p| p.buffer.clone())
+      .map(|p| p.buffer.buffer().to_string())
       .expect("advanced panel must materialise when last_params carries flags");
     assert_eq!(advanced, "--flash-attn --n-gpu-layers 20");
   }
@@ -1735,7 +1874,7 @@ mod tests {
       fake("/m/x/qwen.gguf", "/m/x"),
       fake("/m/y/phi.gguf", "/m/y"),
     ];
-    app.filter_buffer = "qwen".into();
+    app.filter_input.set_text("qwen");
     let rows = app.rendered_rows();
     let names: Vec<String> = rows
       .iter()

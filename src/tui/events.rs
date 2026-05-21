@@ -110,6 +110,27 @@ pub fn pump_input_with_writer(
   app.should_exit
 }
 
+/// Top-level key dispatcher.
+///
+/// **Esc walk-back precedence (R3 / item-8 contract):** the user
+/// expects a single `Esc` to peel one layer off the navigation
+/// tree, no matter where they are. The order below resolves
+/// ambiguities so the highest-priority surface owns the chord:
+/// 1. Help overlay open → close the overlay (this function).
+/// 2. Confirm popup open → cancel (this function).
+/// 3. HF dialog open → stage walk-back (`handle_hf_dialog_input`).
+/// 4. Modal text input editing → exit edit (`InputField::handle_key`
+///    inside each focus handler).
+/// 5. Modal text input resting with content → clear buffer.
+/// 6. Modal text input empty → close the input or step focus back.
+/// 7. `RightPane` focused → `Action::FocusList` returns to the list.
+/// 8. `List` focused → no-op (already at the root).
+///
+/// Layers 4–6 live inside the input field's state machine and only
+/// apply to inputs that have been migrated to [`InputField`]
+/// (currently `filter_input` and the HF dialog search field; the
+/// chat / embed / rerank composers + advanced-panel extras input
+/// migrate in a follow-up).
 fn handle_key(app: &mut App, key: KeyEvent, writer: Option<&mpsc::Sender<WriterCmd>>) {
   // Help dialog owns Esc and `?` ahead of every focus-specific
   // routing: when it's open, the user expects Esc to dismiss it
@@ -147,8 +168,18 @@ fn handle_key(app: &mut App, key: KeyEvent, writer: Option<&mpsc::Sender<WriterC
   match app.focus {
     Focus::Filter => handle_filter_input(app, key),
     Focus::AdvancedPanel => handle_advanced_input(app, key),
-    Focus::ChatInput | Focus::EmbedInput | Focus::RerankInput if bound.is_none() => {
-      handle_tab_input(app, key);
+    Focus::HfDialog => handle_hf_dialog_input(app, key, writer),
+    Focus::ChatInput | Focus::EmbedInput | Focus::RerankInput => {
+      // Modal text-input focuses give the field first crack at every
+      // key so the `Esc` walk-back (exit-edit → clear → close) wins
+      // over the static action binding. The field returns `false`
+      // (PassThrough) for Tab / Shift+Enter / final-Esc-at-root so
+      // those still dispatch through `apply_action`.
+      if !handle_tab_input(app, key) {
+        if let Some(action) = bound {
+          apply_action(app, action, writer);
+        }
+      }
     }
     _ => {
       if let Some(action) = bound {
@@ -159,71 +190,100 @@ fn handle_key(app: &mut App, key: KeyEvent, writer: Option<&mpsc::Sender<WriterC
 }
 
 /// Text-capture handler for the chat / embed / rerank prompt
-/// buffers. Bound actions (Enter, Tab, Esc, etc.) are routed
-/// through [`apply_action`] *before* this is called — see
-/// [`handle_key`] — so alphanumerics fall through to the buffer
-/// without trampling the surrounding keybindings. Shift+Enter is
-/// also bound (`Action::InsertNewline`); it never reaches this
-/// fallthrough.
-fn handle_tab_input(app: &mut App, key: KeyEvent) {
-  match (app.focus, key.code) {
-    (Focus::ChatInput, KeyCode::Backspace) => {
-      app.chat.prompt.pop();
-    }
-    (Focus::ChatInput, KeyCode::Char(ch)) => {
-      app.chat.prompt.push(ch);
-    }
-    (Focus::EmbedInput, KeyCode::Backspace) => {
-      app.embed.input.pop();
-    }
-    (Focus::EmbedInput, KeyCode::Char(ch)) => {
-      app.embed.input.push(ch);
-    }
-    (Focus::RerankInput, KeyCode::Backspace) => match app.rerank.field {
-      RerankField::Query => {
-        app.rerank.query.pop();
-      }
-      RerankField::Candidate => {
-        app.rerank.candidate_buffer.pop();
-      }
+/// buffers. Each tab's input is a modal
+/// [`crate::tui::input_field::InputField`]. The dispatcher routes
+/// keys here ahead of the action layer so the field's `Esc`
+/// walk-back (exit-edit → clear → close) wins over the static
+/// `Esc:exit_edit` binding. Keys the field declines
+/// (`InputOutcome::PassThrough`) fall through to the bound
+/// action — Tab cycles fields, Shift+Enter inserts a newline,
+/// final-Esc-at-root triggers `Action::ExitEdit`.
+///
+/// Returns `true` when the field consumed the key — caller skips
+/// the action-layer dispatch in that case.
+fn handle_tab_input(app: &mut App, key: KeyEvent) -> bool {
+  use crate::tui::input_field::InputOutcome;
+  let outcome = match app.focus {
+    Focus::ChatInput => app.chat.prompt.handle_key(key),
+    Focus::EmbedInput => app.embed.input.handle_key(key),
+    Focus::RerankInput => match app.rerank.field {
+      RerankField::Query => app.rerank.query.handle_key(key),
+      RerankField::Candidate => app.rerank.candidate_buffer.handle_key(key),
     },
-    (Focus::RerankInput, KeyCode::Char(ch)) => match app.rerank.field {
-      RerankField::Query => app.rerank.query.push(ch),
-      RerankField::Candidate => app.rerank.candidate_buffer.push(ch),
-    },
-    _ => {}
+    _ => return false,
+  };
+  match outcome {
+    InputOutcome::Handled => true,
+    InputOutcome::Submit => {
+      match app.focus {
+        Focus::ChatInput => apply_send_chat(app),
+        Focus::EmbedInput => apply_embed_submit(app),
+        Focus::RerankInput => apply_rerank_submit(app),
+        _ => {}
+      }
+      true
+    }
+    InputOutcome::PassThrough => false,
   }
 }
 
 fn handle_filter_input(app: &mut App, key: KeyEvent) {
-  match key.code {
-    KeyCode::Esc => {
-      app.clear_filter();
-    }
-    KeyCode::Enter => {
+  use crate::tui::input_field::InputOutcome;
+  match app.filter_input.handle_key(key) {
+    InputOutcome::Handled => {}
+    InputOutcome::Submit => {
+      // Filter is a *live* predicate (filter_input.buffer() applies
+      // on every keystroke via `rendered_rows()`), so Enter carries
+      // no "apply" semantics — it drills into the focused result
+      // row by opening the launch picker. Exit edit first so the
+      // user's typing doesn't continue feeding the filter once
+      // focus moves to the right pane; when no row is focused
+      // (header / empty result set) just drop back to the list
+      // with the filter buffer intact.
+      app.filter_input.exit_edit();
       app.focus = Focus::List;
+      if app.focused_name().is_some() {
+        app.open_launch_picker();
+      }
     }
-    KeyCode::Backspace => {
-      app.filter_buffer.pop();
-    }
-    KeyCode::Char(ch) => {
-      app.filter_buffer.push(ch);
-    }
-    _ => {}
+    InputOutcome::PassThrough => match key.code {
+      // Resting + empty buffer + Esc → close the filter entirely
+      // (back to the list). Other resting Esc cases are handled
+      // inside the InputField (clears the buffer).
+      KeyCode::Esc => app.clear_filter(),
+      // Arrow / vi-aliased navigation while the filter is focused
+      // must still move the list cursor so the user can scroll the
+      // filtered results without leaving the filter focus. The
+      // InputField passes arrows through in both editing and
+      // resting modes (no in-buffer cursor model), so this is the
+      // single place that wires the gesture. `j`/`k` only fire in
+      // resting mode — the InputField captures them as typed chars
+      // while editing.
+      KeyCode::Up | KeyCode::Char('k') => app.move_up(),
+      KeyCode::Down | KeyCode::Char('j') => app.move_down(),
+      KeyCode::PageUp => app.move_by(-10),
+      KeyCode::PageDown => app.move_by(10),
+      _ => {}
+    },
   }
 }
 
 fn handle_advanced_input(app: &mut App, key: KeyEvent) {
-  let panel = match &mut app.advanced_panel {
-    Some(p) => p,
+  use crate::tui::input_field::InputOutcome;
+  let outcome = match app.advanced_panel.as_mut() {
+    Some(panel) => panel.buffer.handle_key(key),
     None => return,
   };
-  match key.code {
-    KeyCode::Esc => app.close_advanced_panel(),
-    KeyCode::Enter => app.close_advanced_panel(),
-    KeyCode::Backspace => panel.backspace(),
-    KeyCode::Char(ch) => panel.insert(ch),
-    _ => {}
+  match outcome {
+    InputOutcome::Handled => {}
+    InputOutcome::Submit => app.close_advanced_panel(),
+    InputOutcome::PassThrough => {
+      // Field decided not to handle: Esc walks back at the panel
+      // level (close), other keys are unbound.
+      if matches!(key.code, KeyCode::Esc) {
+        app.close_advanced_panel();
+      }
+    }
   }
 }
 
@@ -241,6 +301,7 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
     Action::ToggleFavorite => apply_toggle_favorite(app, writer),
     Action::OpenLaunchPicker => app.open_launch_picker(),
     Action::OpenAdvancedPanel => app.open_advanced_panel(),
+    Action::OpenHfDialog => apply_open_hf_dialog(app),
     Action::Submit => match app.focus {
       Focus::AdvancedPanel => app.close_advanced_panel(),
       Focus::EmbedInput => apply_embed_submit(app),
@@ -344,10 +405,14 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
     Action::RestartDaemon => {
       app.confirm_dialog = Some(ConfirmAction::RestartDaemon);
     }
+    Action::DeleteModel => apply_delete_model(app),
+    Action::CancelDownload => apply_cancel_download(app),
     Action::EnterEdit => {
       // Tab-aware:
       //  - Chat / Embed / Rerank: shift focus into the input buffer
-      //    so subsequent keystrokes go to the prompt.
+      //    so subsequent keystrokes go to the prompt. The field
+      //    itself enters edit mode so typing works immediately and
+      //    the `Esc` walk-back is wired up.
       //  - Settings on a running launch: stage the launch picker so
       //    the user can edit next-launch params over the live
       //    read-only view (the arrow-keys path no longer
@@ -355,6 +420,15 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
       //  - Anywhere else: no-op.
       if let Some(target) = edit_focus_for_tab(app.right_tab) {
         app.focus = target;
+        match target {
+          Focus::ChatInput => app.chat.prompt.enter_edit(),
+          Focus::EmbedInput => app.embed.input.enter_edit(),
+          Focus::RerankInput => match app.rerank.field {
+            RerankField::Query => app.rerank.query.enter_edit(),
+            RerankField::Candidate => app.rerank.candidate_buffer.enter_edit(),
+          },
+          _ => {}
+        }
       } else if app.right_tab == RightTab::Settings && app.launch_picker.is_none() {
         if app.focused_path().is_some() {
           app.open_launch_picker();
@@ -364,23 +438,48 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
       }
     }
     Action::ExitEdit => {
-      // Step back from a text-input focus to the surrounding right
-      // pane navigation focus. Keystrokes resume hitting the chain
-      // (Tab / Shift+Tab / h / l) instead of the buffer.
+      // Final Esc at the input root walks one step further back:
+      // exit edit on whatever field was active and return focus to
+      // the right-pane chain so Tab/Shift+Tab/h/l resume working.
+      match app.focus {
+        Focus::ChatInput => app.chat.prompt.exit_edit(),
+        Focus::EmbedInput => app.embed.input.exit_edit(),
+        Focus::RerankInput => {
+          app.rerank.query.exit_edit();
+          app.rerank.candidate_buffer.exit_edit();
+        }
+        _ => {}
+      }
       app.focus = Focus::RightPane;
     }
     Action::FocusLogsTab => apply_focus_logs_tab(app),
     Action::FocusChatTab => apply_focus_chat_tab(app),
     Action::FocusSettingsTab => apply_focus_settings_tab(app),
-    Action::InsertNewline => match app.focus {
-      Focus::ChatInput => app.chat.prompt.push('\n'),
-      Focus::EmbedInput => app.embed.input.push('\n'),
-      Focus::RerankInput => match app.rerank.field {
-        RerankField::Query => app.rerank.query.push('\n'),
-        RerankField::Candidate => app.rerank.candidate_buffer.push('\n'),
-      },
-      _ => {}
-    },
+    Action::InsertNewline => {
+      // Force-insert a newline into whichever modal field is in
+      // focus. Skips the input component's modifier filter so
+      // Shift+Enter still works even when the field is resting
+      // (resting + Shift+Enter would otherwise PassThrough and
+      // hit nothing).
+      fn push_newline(field: &mut crate::tui::input_field::InputField) {
+        let mut next = String::from(field.buffer());
+        next.push('\n');
+        let editing = field.is_editing();
+        field.set_text(next);
+        if editing {
+          field.enter_edit();
+        }
+      }
+      match app.focus {
+        Focus::ChatInput => push_newline(&mut app.chat.prompt),
+        Focus::EmbedInput => push_newline(&mut app.embed.input),
+        Focus::RerankInput => match app.rerank.field {
+          RerankField::Query => push_newline(&mut app.rerank.query),
+          RerankField::Candidate => push_newline(&mut app.rerank.candidate_buffer),
+        },
+        _ => {}
+      }
+    }
     // ↑/↓ cycle the cursor across the form's input fields. Only
     // meaningful in the Settings tab (cycles ctx / reasoning /
     // advanced) and the Rerank input (cycles query / candidate).
@@ -578,10 +677,160 @@ fn apply_stop_model(app: &mut App) {
       return;
     }
   };
-  app.confirm_dialog = Some(ConfirmAction::StopModel {
-    launch_id: managed.launch_id.clone(),
-    name: crate::util::paths::model_display_name(&managed.path),
+  let launch_id = managed.launch_id.clone();
+  let path = managed.path.clone();
+  let name = crate::util::paths::model_display_name(&path);
+  app.confirm_dialog = Some(ConfirmAction::StopModel { launch_id, name });
+}
+
+/// Stage a cancel-download confirmation. Refuses (with a toast) when
+/// no pull is currently active — pressing Ctrl+X on an empty strip
+/// shouldn't bring up a popup with nothing to confirm. The popup
+/// payload mirrors what the strip is showing so the user reads the
+/// same identifier they pressed Ctrl+X over.
+fn apply_cancel_download(app: &mut App) {
+  let Some(active) = app.download_strip.active.as_ref() else {
+    app.show_toast("no active download to cancel");
+    return;
+  };
+  app.confirm_dialog = Some(ConfirmAction::CancelDownload {
+    repo_id: active.repo_id.clone(),
+    friendly_name: active.friendly_name.clone(),
   });
+}
+
+/// Stage a delete-model confirmation. Refuses (with a toast) when
+/// the focused row points at a file something else is actively
+/// reading — a supervised managed launch, an external read-only
+/// `llama-server`, or a row that's still in an Error/Loading/
+/// Launching state with a pending file handle. The toast names the
+/// reason so the user knows whether to wait, stop, or kill the
+/// external owner.
+fn apply_delete_model(app: &mut App) {
+  let Some(path) = app.focused_path() else {
+    app.show_toast("nothing to delete — focus a model row");
+    return;
+  };
+  if let Some(reason) = delete_refusal_reason(app) {
+    app.show_toast(reason);
+    return;
+  }
+  let display_name = crate::util::paths::model_display_name(&path);
+  app.confirm_dialog = Some(ConfirmAction::DeleteModel { path, display_name });
+}
+
+/// Returns the toast message describing why a delete must refuse on
+/// the focused row, or `None` when the delete should be allowed.
+/// Mirrors the chip-rendering rule in `render::focused_row_is_deletable`
+/// so the hint and the keybinding stay in lock-step.
+fn delete_refusal_reason(app: &App) -> Option<&'static str> {
+  use crate::tui::status_icons::SurfaceState;
+  if let Some(managed) = app.focused_managed() {
+    return Some(match managed.state {
+      SurfaceState::Ready | SurfaceState::Loading | SurfaceState::Launching => {
+        "model is running — stop the launch first"
+      }
+      SurfaceState::Error => "launch is in error — stop it first, then delete",
+      // Stopped/NotLaunched routes through the managed-table but is
+      // free to delete; fall through.
+      _ => return None,
+    });
+  }
+  // External (read-only daemon-tracked process). Not in `managed`,
+  // so we walk `external` by path.
+  if app
+    .external
+    .iter()
+    .any(|e| Some(&e.path) == app.focused_path().as_ref())
+  {
+    return Some("model is open in an external process — close it first");
+  }
+  None
+}
+
+/// Perform the actual file removal. Walks the path's parent chain
+/// up to the HF cache root so symlinked snapshot files take the
+/// underlying blob with them — otherwise the cache fills up with
+/// orphan blobs after every "delete". Non-HF paths just unlink the
+/// single file. Returns a human-readable summary suitable for a
+/// toast.
+///
+/// Thin wrapper over [`delete_model_with_cache_root`] that resolves
+/// the live `hf_cache_dir()` — tests pass their own root to exercise
+/// the cache-gate without touching env vars.
+fn delete_model_on_disk(path: &std::path::Path) -> Result<String, std::io::Error> {
+  let cache_root = crate::init::download::hf_cache_dir().ok();
+  delete_model_with_cache_root(path, cache_root.as_deref())
+}
+
+/// Worker for [`delete_model_on_disk`] parameterised on the HF cache
+/// root. Treats `path` as part of the HF cache only when *both* the
+/// directory shape (`models--*/snapshots/<rev>/`) matches *and* the
+/// resolved repo dir lives under `cache_root`. Anything else — a
+/// `models--*` layout outside the cache root (manually rsynced
+/// backup, restored archive, surprise Docker volume), a plain user
+/// path, or a `cache_root = None` build — falls through to a
+/// single-file unlink so a confirmed delete can't recursively rm-rf
+/// an unrelated directory tree.
+fn delete_model_with_cache_root(
+  path: &std::path::Path,
+  cache_root: Option<&std::path::Path>,
+) -> Result<String, std::io::Error> {
+  use std::fs;
+  if let Some(repo_dir) = hf_repo_dir_for_snapshot_path(path, cache_root) {
+    fs::remove_dir_all(&repo_dir)?;
+    return Ok(format!(
+      "deleted HF cache for {}",
+      repo_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+    ));
+  }
+  // Plain GGUF on a user path (or HF-shaped path outside the cache
+  // root) — just unlink the single file.
+  fs::remove_file(path)?;
+  Ok(format!(
+    "deleted {}",
+    path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+  ))
+}
+
+/// Return the `models--<owner>--<repo>` directory the given snapshot
+/// path lives under, but only when the directory shape matches the
+/// HF cache layout *and* the resolved repo dir is inside `cache_root`.
+/// Returns `None` for anything else, including HF-shaped layouts
+/// outside the cache root — those get a single-file unlink in
+/// `delete_model_with_cache_root` rather than a recursive removal.
+/// Carved out as a pure helper so tests can pin the gate without
+/// constructing the rest of the dispatch chain.
+fn hf_repo_dir_for_snapshot_path(
+  path: &std::path::Path,
+  cache_root: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+  let snapshot_dir = path.parent()?;
+  let snapshots_root = snapshot_dir.parent()?;
+  if snapshots_root.file_name().and_then(|n| n.to_str()) != Some("snapshots") {
+    return None;
+  }
+  let repo_dir = snapshots_root.parent()?;
+  let is_hf_repo = repo_dir
+    .file_name()
+    .and_then(|n| n.to_str())
+    .is_some_and(|n| n.starts_with("models--"));
+  if !is_hf_repo {
+    return None;
+  }
+  // Refuse to treat a `models--*/snapshots/*/file` layout as an HF
+  // cache when the resolved repo dir is *not* inside the configured
+  // HF cache root. Falling through to single-file unlink is the
+  // conservative behaviour for unfamiliar layouts.
+  let cache_root = cache_root?;
+  let cache_root_canonical = cache_root
+    .canonicalize()
+    .unwrap_or_else(|_| cache_root.to_path_buf());
+  let candidate = repo_dir.canonicalize().unwrap_or_else(|_| repo_dir.into());
+  if !candidate.starts_with(&cache_root_canonical) {
+    return None;
+  }
+  Some(candidate)
 }
 
 /// Apply a confirmed [`ConfirmAction`] — dispatches the writer
@@ -620,6 +869,47 @@ fn apply_confirmed(app: &mut App, action: ConfirmAction, writer: Option<&mpsc::S
         "daemon restart failed — writer offline",
         "daemon restart (no writer)".into(),
       );
+    }
+    ConfirmAction::DeleteModel { path, display_name } => match delete_model_on_disk(&path) {
+      Ok(_summary) => {
+        // Drop the row from the cached model list so the next render
+        // doesn't flash a stale entry. A real refresh re-discovers on
+        // the next tick and will catch any siblings (e.g. split-shard
+        // members that lived in the same HF snapshot).
+        app.models.retain(|m| m.path != path);
+        if app.list_cursor >= app.models.len() {
+          app.list_cursor = app.models.len().saturating_sub(1);
+        }
+        app.show_toast(format!("deleted {display_name}"));
+      }
+      Err(e) => app.show_toast(format!("delete failed: {e}")),
+    },
+    ConfirmAction::CancelDownload { .. } => {
+      use crate::tui::download_strip::CancelOutcome;
+      match app.download_strip.cancel_active() {
+        CancelOutcome::NothingActive => {
+          // Race between the popup being staged and the active pull
+          // finishing on its own. No-op + low-key toast so the user
+          // understands the confirm landed.
+          app.show_toast("download already finished");
+        }
+        CancelOutcome::Cancelled {
+          cancelled_friendly_name,
+          next,
+          ..
+        } => {
+          app.show_toast(format!("cancelled: {cancelled_friendly_name}"));
+          if let Some(promoted) = next {
+            app.download_strip.install_active(&promoted);
+            let abort = spawn_download_task(
+              promoted,
+              app.options.offline,
+              app.download_strip.event_tx.clone(),
+            );
+            app.download_strip.active_abort = Some(abort);
+          }
+        }
+      }
     }
     ConfirmAction::LaunchDuplicate {
       model_path,
@@ -747,11 +1037,11 @@ fn apply_send_chat(app: &mut App) {
   let Some(managed) = focused_managed_or_toast(app, "chat") else {
     return;
   };
-  if app.chat.prompt.trim().is_empty() {
+  if app.chat.prompt.buffer().trim().is_empty() {
     app.show_toast("prompt is empty");
     return;
   }
-  let prompt = app.chat.prompt.clone();
+  let prompt = app.chat.prompt.buffer().to_string();
   let model_name = crate::util::paths::model_display_name(&managed.path);
   app.chat.reset_for_send();
   let rx = spawn_chat_stream(managed.port, model_name, prompt);
@@ -765,11 +1055,11 @@ fn apply_embed_submit(app: &mut App) {
   let Some(managed) = focused_managed_or_toast(app, "embed") else {
     return;
   };
-  if app.embed.input.trim().is_empty() {
+  if app.embed.input.buffer().trim().is_empty() {
     app.show_toast("embed input is empty");
     return;
   }
-  let input = app.embed.input.clone();
+  let input = app.embed.input.buffer().to_string();
   let model_name = crate::util::paths::model_display_name(&managed.path);
   let (tx, rx) = mpsc::unbounded_channel::<TabEvent>();
   app.embed.busy = true;
@@ -811,7 +1101,7 @@ fn apply_rerank_submit(app: &mut App) {
   let Some(managed) = focused_managed_or_toast(app, "rerank") else {
     return;
   };
-  if app.rerank.query.trim().is_empty() {
+  if app.rerank.query.buffer().trim().is_empty() {
     app.show_toast("rerank query is empty");
     return;
   }
@@ -824,7 +1114,7 @@ fn apply_rerank_submit(app: &mut App) {
     app.show_toast("stage at least one candidate (↓ to candidate field, Enter to add)");
     return;
   }
-  let query = app.rerank.query.clone();
+  let query = app.rerank.query.buffer().to_string();
   let candidates = app.rerank.candidates.clone();
   let model_name = crate::util::paths::model_display_name(&managed.path);
   let (tx, rx) = mpsc::unbounded_channel::<TabEvent>();
@@ -951,8 +1241,9 @@ fn apply_launch_submit(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) 
   // but a fat-finger shouldn't silently triple-launch a 14B model.
   let active_instances = app.managed.iter().filter(|m| m.path == path).count();
   if active_instances > 0 {
+    let name = crate::util::paths::model_display_name(&path);
     app.confirm_dialog = Some(ConfirmAction::LaunchDuplicate {
-      name: crate::util::paths::model_display_name(&path),
+      name,
       active_instances,
       model_path: path,
       ctx: picker.ctx,
@@ -1008,9 +1299,10 @@ fn build_yank_text(app: &App, action: Action) -> Option<String> {
     Action::YankCurl => {
       let m = app.focused_managed()?;
       let url = format!("http://127.0.0.1:{}/v1", m.port);
+      let model_name = crate::util::paths::model_display_name(&m.path);
       Some(format!(
         "curl -s -H 'Content-Type: application/json' -d '{{\"model\":\"{}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hello\"}}]}}' {}/chat/completions",
-        crate::util::paths::model_display_name(&m.path),
+        model_name,
         url
       ))
     }
@@ -1282,6 +1574,8 @@ pub async fn run(
     drain_chat_stream(&mut app);
     drain_embed_pending(&mut app);
     drain_rerank_pending(&mut app);
+    drain_hf_dialog(&mut app);
+    drain_download_strip(&mut app);
 
     if event::poll(POLL_INTERVAL)? {
       let evt = event::read()?;
@@ -1421,6 +1715,7 @@ pub async fn launch(
   theme: crate::theme::ThemeName,
   custom_palette: Option<crate::theme::Palette>,
   keymap: crate::tui::keybindings::KeyMap,
+  offline: bool,
   socket: &Path,
   daemon_opts: Option<crate::daemon::DaemonOptions>,
 ) -> Result<()> {
@@ -1428,6 +1723,7 @@ pub async fn launch(
     theme,
     custom_palette,
     keymap,
+    offline,
   });
   run(app, socket.to_path_buf(), daemon_opts).await
 }
@@ -1549,6 +1845,576 @@ pub fn drain_rerank_pending(app: &mut App) {
   }
 }
 
+/// Open the HuggingFace pull dialog (`d` in `Focus::List`).
+/// Offline state is resolved inside `App::open_hf_dialog` from
+/// `app.options.offline` ∨ `LLAMASTASH_OFFLINE`, so the call site
+/// stays a single line and the runtime offline value travels through
+/// `AppOptions`.
+fn apply_open_hf_dialog(app: &mut App) {
+  app.open_hf_dialog();
+}
+
+/// Outcome of dispatching a key into the HF dialog. The router
+/// resolves the state-mutating action under a single `&mut
+/// state` borrow, then surfaces any side effect (toast, close) for
+/// the caller to apply against `&mut App` once the borrow ends.
+enum HfDialogOutcome {
+  None,
+  Toast(&'static str),
+  EnqueuePull {
+    repo: String,
+    row: crate::tui::hf_dialog::PickerRow,
+  },
+  Close,
+}
+
+/// Per-stage key router for `Focus::HfDialog`.
+///
+/// Search stage routes keys through the modal `InputField` first:
+/// while editing, printable chars / Backspace mutate the query and
+/// Esc steps the field out of edit; while resting `e` re-enters
+/// edit, Esc clears a non-empty buffer (or closes the dialog when
+/// already empty), and the dialog's own keymap (`o`, `n`, `p`, …)
+/// fires through. Enter always means "submit the current query /
+/// row" regardless of edit mode. FilePicker and Confirm stages use
+/// Esc to walk back one stage; arrow keys move the cursor.
+fn handle_hf_dialog_input(app: &mut App, key: KeyEvent, _writer: Option<&mpsc::Sender<WriterCmd>>) {
+  use crate::tui::hf_dialog::HfStage;
+  use crate::tui::input_field::InputOutcome;
+  let outcome = {
+    let Some(state) = app.hf_dialog.as_mut() else {
+      return;
+    };
+    match state.stage {
+      HfStage::Search => {
+        match state.handle_search_key(key) {
+          InputOutcome::Handled => HfDialogOutcome::None,
+          InputOutcome::Submit => match state.submit_search() {
+            Some(repo_id) => {
+              spawn_hf_list_repo_files(state, repo_id);
+              HfDialogOutcome::None
+            }
+            None => HfDialogOutcome::Toast("type a query, paste a slug, or pick a row"),
+          },
+          InputOutcome::PassThrough => match key.code {
+            // The input only PassThroughs Esc when the buffer is
+            // empty and the field is resting, so this arm always
+            // means "close the dialog."
+            KeyCode::Esc => HfDialogOutcome::Close,
+            KeyCode::Up => {
+              state.move_up();
+              HfDialogOutcome::None
+            }
+            KeyCode::Down => {
+              state.move_down();
+              HfDialogOutcome::None
+            }
+            KeyCode::Enter => match state.submit_search() {
+              Some(repo_id) => {
+                spawn_hf_list_repo_files(state, repo_id);
+                HfDialogOutcome::None
+              }
+              None => HfDialogOutcome::Toast("type a query, paste a slug, or pick a row"),
+            },
+            KeyCode::Char('o') => {
+              state.cycle_sort();
+              HfDialogOutcome::None
+            }
+            KeyCode::Char('n') => {
+              if let Some(cursor) = state.advance_page() {
+                spawn_hf_search(state, cursor);
+              }
+              HfDialogOutcome::None
+            }
+            KeyCode::Char('p') => {
+              if let Some(cursor) = state.retreat_page() {
+                spawn_hf_search(state, cursor);
+              }
+              HfDialogOutcome::None
+            }
+            _ => HfDialogOutcome::None,
+          },
+        }
+      }
+      HfStage::FilePicker => match key.code {
+        // Esc walks back to Search (per R3 Esc-navigation contract);
+        // a further Esc on Search closes the dialog.
+        KeyCode::Esc => {
+          state.back_to_search();
+          HfDialogOutcome::None
+        }
+        KeyCode::Up => {
+          state.move_up();
+          HfDialogOutcome::None
+        }
+        KeyCode::Down => {
+          state.move_down();
+          HfDialogOutcome::None
+        }
+        KeyCode::Enter => {
+          if state.submit_picker() {
+            HfDialogOutcome::None
+          } else {
+            HfDialogOutcome::Toast("no file selected")
+          }
+        }
+        _ => HfDialogOutcome::None,
+      },
+      HfStage::Confirm => match key.code {
+        KeyCode::Esc => {
+          state.back_to_picker();
+          HfDialogOutcome::None
+        }
+        KeyCode::Enter => {
+          if let Some((repo, row)) = state.take_confirm_target() {
+            HfDialogOutcome::EnqueuePull { repo, row }
+          } else {
+            HfDialogOutcome::Close
+          }
+        }
+        _ => HfDialogOutcome::None,
+      },
+    }
+  };
+  match outcome {
+    HfDialogOutcome::None => {}
+    HfDialogOutcome::Toast(msg) => app.show_toast(msg),
+    HfDialogOutcome::EnqueuePull { repo, row } => {
+      enqueue_hf_pull(app, repo, row);
+      app.close_hf_dialog();
+    }
+    HfDialogOutcome::Close => app.close_hf_dialog(),
+  }
+}
+
+/// Push a pull onto the download-strip queue and — when no pull is
+/// currently active — promote it and spawn the background download
+/// task that ships progress back over the strip's mpsc.
+fn enqueue_hf_pull(app: &mut App, repo: String, row: crate::tui::hf_dialog::PickerRow) {
+  use crate::tui::download_strip::{DownloadEvent, QueuedPull};
+  let filename = row.download_filename().to_string();
+  // R116 cache-hit short-circuit: probe the HF cache before queuing
+  // anything. When every requested file already lives under a single
+  // snapshot dir, emit AlreadyCached directly via the strip's mpsc
+  // and skip both the queue and the download spawn. Deterministic —
+  // replaces the earlier "<200 ms elapsed" heuristic that conflated
+  // a fast network with a real cache hit.
+  if let Some(cached_path) = probe_cached_pull(&repo, &row.all_filenames()) {
+    let _ = app
+      .download_strip
+      .event_tx
+      .send(DownloadEvent::AlreadyCached {
+        repo_id: repo.clone(),
+        cached_path,
+      });
+    return;
+  }
+  let pull = QueuedPull {
+    repo_id: repo.clone(),
+    friendly_name: format!("{repo} :{filename}"),
+    row,
+  };
+  let queue_pos = app.download_strip.enqueue(pull);
+  app.show_toast(format!("pull queued: {repo} :{filename} (#{queue_pos})"));
+  // Promote immediately when nothing's active so the user sees the
+  // strip light up on the next render.
+  if app.download_strip.active.is_none() {
+    if let Some(promoted) = app.download_strip.promote_next() {
+      app.download_strip.install_active(&promoted);
+      let abort = spawn_download_task(
+        promoted,
+        app.options.offline,
+        app.download_strip.event_tx.clone(),
+      );
+      app.download_strip.active_abort = Some(abort);
+    }
+  }
+}
+
+/// Probe the HF cache for every filename the pull would produce on
+/// disk and, when all are present under the same snapshot directory,
+/// return the path to the user-facing first file (the row's
+/// `download_filename`). Used by `spawn_download_task` to short-
+/// circuit a redundant pull deterministically, replacing the
+/// previous elapsed-time heuristic (R116). Returns `None` when the
+/// repo isn't cached, any shard is missing, or the cache root can't
+/// be resolved on this platform.
+fn probe_cached_pull(repo_id: &str, filenames: &[String]) -> Option<std::path::PathBuf> {
+  if filenames.is_empty() {
+    return None;
+  }
+  let cache_root = crate::init::download::hf_cache_dir().ok()?;
+  let repo_dir = cache_root.join(crate::init::download::repo_folder_name(repo_id));
+  let snapshots = repo_dir.join("snapshots");
+  let entries = std::fs::read_dir(&snapshots).ok()?;
+  for entry in entries.filter_map(|e| e.ok()) {
+    let snapshot = entry.path();
+    if !snapshot.is_dir() {
+      continue;
+    }
+    // The HF cache exposes files as symlinks under `snapshots/<rev>/`.
+    // A snapshot only counts as a hit when every requested filename
+    // resolves there — partial caches (e.g. only shard 1) must fall
+    // through to the real download path.
+    if filenames.iter().all(|f| snapshot.join(f).exists()) {
+      return Some(snapshot.join(&filenames[0]));
+    }
+  }
+  None
+}
+
+/// Spawn a tokio task that calls `init::download::download_repo`
+/// with a `DownloadProgress` shim relaying every callback to the
+/// strip's mpsc. Caller has already run `probe_cached_pull` against
+/// the requested files, so this path only fires for real downloads —
+/// the cache-hit short-circuit (R116) lives next to the queue
+/// enqueue, not inside the spawn.
+///
+/// Returns the spawned task's [`tokio::task::AbortHandle`] so the
+/// `Ctrl+X:cancel download` flow can interrupt an in-flight pull
+/// mid-chunk. Aborting drops hf-hub's stream future, leaves any
+/// partial blob in the cache, and (because the task never sends
+/// `Finished` / `Error` after the abort point) lets the strip's
+/// own state transition drive the next promotion.
+///
+/// `offline` is the runtime-resolved offline flag (CLI `--offline` ∨
+/// `LLAMASTASH_OFFLINE`). Passing `true` ensures the spawned task's
+/// FetchClient short-circuits before it issues any HF traffic — the
+/// pull surfaces as a clean offline error in the strip rather than
+/// silently bypassing the user's chosen network policy.
+fn spawn_download_task(
+  pull: crate::tui::download_strip::QueuedPull,
+  offline: bool,
+  tx: tokio::sync::mpsc::UnboundedSender<crate::tui::download_strip::DownloadEvent>,
+) -> tokio::task::AbortHandle {
+  use crate::init::download::{DownloadOptions, RepoSpec};
+  use crate::init::fetch;
+  let handle = tokio::spawn(async move {
+    let spec = match RepoSpec::parse(&format!(
+      "{}:{}",
+      pull.repo_id,
+      pull.row.download_filename()
+    )) {
+      Ok(s) => s,
+      Err(e) => {
+        let _ = tx.send(crate::tui::download_strip::DownloadEvent::Error {
+          repo_id: pull.repo_id.clone(),
+          message: e.to_string(),
+        });
+        return;
+      }
+    };
+    let fetch_client =
+      fetch::build_with_offline_check(offline, fetch::FetchClientConfig::default())
+        .unwrap_or_else(|_| fetch::FetchClient::offline());
+    let progress = std::sync::Arc::new(StripProgress {
+      tx: tx.clone(),
+      repo_id: pull.repo_id.clone(),
+      inner: std::sync::Mutex::new(StripProgressInner::default()),
+    });
+    let options = DownloadOptions {
+      extension_filter: Some(".gguf".into()),
+      estimated_bytes: pull.row.size_bytes(),
+      progress: Some(
+        progress.clone() as std::sync::Arc<dyn crate::init::download::DownloadProgress>
+      ),
+      revision: None,
+    };
+    match crate::init::download::download_repo(&spec, &fetch_client, &options).await {
+      Ok(_) => {
+        let _ = tx.send(crate::tui::download_strip::DownloadEvent::Finished {
+          repo_id: pull.repo_id.clone(),
+        });
+      }
+      Err(e) => {
+        let _ = tx.send(crate::tui::download_strip::DownloadEvent::Error {
+          repo_id: pull.repo_id.clone(),
+          message: e.to_string(),
+        });
+      }
+    }
+  });
+  handle.abort_handle()
+}
+
+/// DownloadProgress shim that forwards hf-hub callbacks into the
+/// download strip's mpsc. Tracks per-file sizes resolved at the
+/// listing pass so per-file finish callbacks aggregate cleanly
+/// across multi-shard pulls. Byte-level progress flows via
+/// `on_bytes_progress` — driven by `HfHubProgressAdapter` bridging
+/// hf-hub's `Progress::update(size)` chunk callbacks into our
+/// cumulative `(filename, bytes_in_file)` shape. The `bytes_total`
+/// clamp inside [`StripProgressInner`] protects against the
+/// (theoretical) race where a late `update` chunk lands after the
+/// per-file `Finished` callback — `bytes_done.saturating_add` is
+/// clamped to `bytes_total` so the strip can't overshoot 100%.
+struct StripProgress {
+  tx: tokio::sync::mpsc::UnboundedSender<crate::tui::download_strip::DownloadEvent>,
+  repo_id: String,
+  inner: std::sync::Mutex<StripProgressInner>,
+}
+
+#[derive(Default)]
+struct StripProgressInner {
+  /// `filename → size_bytes` snapshot captured at
+  /// `on_files_resolved` time.
+  file_sizes: std::collections::HashMap<String, u64>,
+  bytes_total: u64,
+  bytes_done: u64,
+  /// Bytes credited so far for the file currently downloading.
+  /// Replaces the running per-file counter every `on_bytes_progress`;
+  /// reset to zero at `on_file_finished` so the next file starts
+  /// fresh.
+  bytes_in_current_file: u64,
+}
+
+impl crate::init::download::DownloadProgress for StripProgress {
+  fn on_files_resolved(&self, files: &[(String, u64)]) {
+    let mut inner = self.inner.lock().unwrap();
+    inner.file_sizes = files.iter().cloned().collect();
+    inner.bytes_total = files.iter().map(|(_, n)| *n).sum();
+    inner.bytes_done = 0;
+    let _ = self
+      .tx
+      .send(crate::tui::download_strip::DownloadEvent::Started {
+        repo_id: self.repo_id.clone(),
+        bytes_total: inner.bytes_total,
+      });
+  }
+
+  fn on_file_started(&self, _filename: &str, _size: u64, _index: usize, _total: usize) {
+    // Per-file byte counter resets on every file boundary; the
+    // hf-hub adapter then drives `on_bytes_progress` as chunks land.
+    let mut inner = self.inner.lock().unwrap();
+    inner.bytes_in_current_file = 0;
+  }
+
+  fn on_file_finished(&self, filename: &str, _index: usize, _total: usize) {
+    let mut inner = self.inner.lock().unwrap();
+    let size = inner.file_sizes.get(filename).copied().unwrap_or(0);
+    let prior_in_file = inner.bytes_in_current_file;
+    // Aggregate the file's full size into the pull total (subtract any
+    // partial credit `on_bytes_progress` already attributed so we don't
+    // double-count).
+    let credit = size.saturating_sub(prior_in_file);
+    inner.bytes_done = inner
+      .bytes_total
+      .min(inner.bytes_done.saturating_add(credit));
+    inner.bytes_in_current_file = 0;
+    let bytes_done = inner.bytes_done;
+    let bytes_total = inner.bytes_total;
+    drop(inner);
+    let _ = self
+      .tx
+      .send(crate::tui::download_strip::DownloadEvent::Progress {
+        repo_id: self.repo_id.clone(),
+        bytes_done,
+        bytes_total,
+      });
+  }
+
+  fn on_bytes_progress(&self, _filename: &str, bytes_in_file: u64) {
+    let mut inner = self.inner.lock().unwrap();
+    // Replace the running per-file count with the new cumulative
+    // value. Subtract the previous in-file credit so the pull's
+    // aggregate `bytes_done` only ever grows monotonically.
+    let prior = inner.bytes_in_current_file;
+    let delta = bytes_in_file.saturating_sub(prior);
+    inner.bytes_in_current_file = bytes_in_file;
+    inner.bytes_done = inner
+      .bytes_total
+      .min(inner.bytes_done.saturating_add(delta));
+    let bytes_done = inner.bytes_done;
+    let bytes_total = inner.bytes_total;
+    drop(inner);
+    let _ = self
+      .tx
+      .send(crate::tui::download_strip::DownloadEvent::Progress {
+        repo_id: self.repo_id.clone(),
+        bytes_done,
+        bytes_total,
+      });
+  }
+}
+
+/// Spawn a background `init::hf_api::search` task whose result is
+/// shipped back over the dialog's mpsc. Tagged with the dialog's
+/// current `query_seq` so the drain can discard stale responses.
+fn spawn_hf_search(state: &mut crate::tui::hf_dialog::HfDialogState, cursor: Option<String>) {
+  use crate::init::hf_api;
+  let tx = state.event_tx.clone();
+  let query = state.input.buffer().to_string();
+  let sort = state.sort;
+  let seq = state.query_seq;
+  let offline = state.offline;
+  state.mark_dispatched();
+  tokio::spawn(async move {
+    let fetch_client = build_tui_fetch_client(offline);
+    let evt = match hf_api::search(&fetch_client, &query, sort, cursor.as_deref()).await {
+      Ok(page) => crate::tui::hf_dialog::HfDialogEvent::SearchResults { seq, page },
+      Err(e) => crate::tui::hf_dialog::HfDialogEvent::SearchFailed { seq, error: e },
+    };
+    let _ = tx.send(evt);
+  });
+}
+
+/// Spawn a background `list_repo_files` task whose result is
+/// shipped back over the dialog's mpsc.
+fn spawn_hf_list_repo_files(state: &mut crate::tui::hf_dialog::HfDialogState, repo_id: String) {
+  use crate::init::hf_api;
+  let tx = state.event_tx.clone();
+  let offline = state.offline;
+  tokio::spawn(async move {
+    let fetch_client = build_tui_fetch_client(offline);
+    let evt = match hf_api::list_repo_files(&fetch_client, &repo_id).await {
+      Ok(files) => crate::tui::hf_dialog::HfDialogEvent::RepoFiles {
+        repo_id: repo_id.clone(),
+        files,
+      },
+      Err(error) => crate::tui::hf_dialog::HfDialogEvent::RepoFilesFailed {
+        repo_id: repo_id.clone(),
+        error,
+      },
+    };
+    let _ = tx.send(evt);
+  });
+}
+
+/// Build the dialog's FetchClient. Mirrors the wizard's resolution:
+/// honour `LLAMASTASH_OFFLINE`, fall back to a fresh client with the
+/// default config (host allowlist + redirect cap + body cap). The
+/// `offline` arg threads the runtime's resolved offline state
+/// (CLI `--offline` ∨ `LLAMASTASH_OFFLINE`) so the dialog can't make
+/// network calls behind the user's back. On builder error we hand
+/// back an offline stub so the dialog's network calls fail with a
+/// clean typed error instead of panicking.
+fn build_tui_fetch_client(offline: bool) -> crate::init::fetch::FetchClient {
+  use crate::init::fetch::{build_with_offline_check, FetchClient, FetchClientConfig};
+  build_with_offline_check(offline, FetchClientConfig::default())
+    .unwrap_or_else(|_| FetchClient::offline())
+}
+
+/// Drain pending DownloadEvents into the strip. Promotes the next
+/// queued pull when the active one finishes / errors / hits the
+/// cache; surfaces a toast when a cache-hit short-circuit lands.
+pub fn drain_download_strip(app: &mut App) {
+  use crate::tui::download_strip::DownloadEvent;
+  loop {
+    let evt = app.download_strip.event_rx.try_recv();
+    let evt = match evt {
+      Ok(e) => e,
+      Err(_) => break,
+    };
+    let next_pull = match evt {
+      DownloadEvent::Started {
+        repo_id,
+        bytes_total,
+      } => {
+        app.download_strip.apply_started(&repo_id, bytes_total);
+        None
+      }
+      DownloadEvent::Progress {
+        repo_id,
+        bytes_done,
+        bytes_total,
+      } => {
+        app
+          .download_strip
+          .apply_progress(&repo_id, bytes_done, bytes_total);
+        None
+      }
+      DownloadEvent::Finished { repo_id } => {
+        let label = app
+          .download_strip
+          .active
+          .as_ref()
+          .map(|a| a.friendly_name.clone());
+        let next = app.download_strip.apply_finished(&repo_id);
+        if let Some(name) = label {
+          app.show_toast(format!("pulled: {name}"));
+        }
+        next
+      }
+      DownloadEvent::Error { repo_id, message } => {
+        app.download_strip.apply_error(&repo_id, message)
+      }
+      DownloadEvent::AlreadyCached {
+        repo_id,
+        cached_path,
+      } => {
+        let next = app
+          .download_strip
+          .apply_already_cached(&repo_id, cached_path);
+        if let Some(path) = app.download_strip.pending_cache_hit.take() {
+          app.show_toast(format!(
+            "already downloaded — {}",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+          ));
+          // Select the matching catalog row (path equality) so the
+          // user lands on it. Best-effort — `models` may not yet
+          // reflect the just-cached file until the next refresh.
+          if let Some(idx) = app.models.iter().position(|m| m.path == path) {
+            // Find the row index in rendered_rows that matches this
+            // model path so the cursor visibly snaps.
+            let target = app.models[idx].path.clone();
+            let rows = app.rendered_rows();
+            if let Some(row_idx) = rows
+              .iter()
+              .position(|r| r.path().map(|p| p == target).unwrap_or(false))
+            {
+              app.list_cursor = row_idx;
+            }
+          }
+        }
+        next
+      }
+    };
+    if let Some(pull) = next_pull {
+      app.download_strip.install_active(&pull);
+      let abort = spawn_download_task(
+        pull,
+        app.options.offline,
+        app.download_strip.event_tx.clone(),
+      );
+      app.download_strip.active_abort = Some(abort);
+    }
+  }
+}
+
+/// Drain pending HF dialog events. Applies search / repo-listing
+/// results to the dialog state. Idempotent — safe to call every run-
+/// loop tick.
+pub fn drain_hf_dialog(app: &mut App) {
+  let Some(state) = app.hf_dialog.as_mut() else {
+    return;
+  };
+  use crate::tui::hf_dialog::HfDialogEvent;
+  loop {
+    match state.event_rx.try_recv() {
+      Ok(HfDialogEvent::SearchResults { seq, page }) => {
+        state.apply_search_results(seq, page);
+      }
+      Ok(HfDialogEvent::SearchFailed { seq, error }) => {
+        state.apply_search_failed(seq, error);
+      }
+      Ok(HfDialogEvent::RepoFiles { repo_id, files }) => {
+        state.apply_repo_files(&repo_id, files);
+      }
+      Ok(HfDialogEvent::RepoFilesFailed { repo_id, error }) => {
+        state.apply_repo_files_failed(&repo_id, &error);
+      }
+      Err(_) => break,
+    }
+  }
+  // Debounced live search (R107): fire a dispatch once the debounce
+  // window elapses since the last keystroke. Honours the `query_seq`
+  // monotonicity so a stale response can still be dropped.
+  if state.search_due(std::time::Instant::now()) {
+    let cursor = state.current_cursor.clone();
+    spawn_hf_search(state, cursor);
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1556,6 +2422,580 @@ mod tests {
 
   fn key(code: KeyCode, mods: KeyModifiers) -> Event {
     Event::Key(KeyEvent::new(code, mods))
+  }
+
+  #[test]
+  fn ctrl_d_on_user_path_model_stages_delete_confirm() {
+    use crate::tui::app::ConfirmAction;
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    app.go_top();
+    pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    match app
+      .confirm_dialog
+      .as_ref()
+      .expect("confirm popup must stage")
+    {
+      ConfirmAction::DeleteModel { display_name, .. } => {
+        assert!(
+          display_name.contains("qwen"),
+          "got display name `{display_name}`"
+        );
+      }
+      other => panic!("expected DeleteModel confirm, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn delete_model_unlinks_user_path_file() {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join(format!("llamastash-delete-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("victim.gguf");
+    {
+      let mut f = std::fs::File::create(&path).unwrap();
+      writeln!(f, "fake gguf").unwrap();
+    }
+    assert!(path.exists());
+    let summary = delete_model_on_disk(&path).expect("delete must succeed");
+    assert!(summary.contains("victim.gguf"), "got `{summary}`");
+    assert!(!path.exists(), "user-path file must be unlinked");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn delete_model_removes_full_hf_repo_dir_when_under_cache_root() {
+    // Mimic the HF cache layout the deleter is supposed to recognise:
+    //   <cache_root>/models--owner--repo/
+    //     blobs/<sha>
+    //     snapshots/main/file.gguf -> ../../blobs/<sha>
+    // The cache-root gate is explicit here so we don't rely on the
+    // ambient `HF_HOME` env var (which would race other tests).
+    let cache_root =
+      std::env::temp_dir().join(format!("llamastash-delete-hf-cache-{}", std::process::id()));
+    let repo_dir = cache_root.join("models--owner--repo");
+    let blobs = repo_dir.join("blobs");
+    let snap = repo_dir.join("snapshots").join("main");
+    std::fs::create_dir_all(&blobs).unwrap();
+    std::fs::create_dir_all(&snap).unwrap();
+    std::fs::write(blobs.join("sha"), b"blob").unwrap();
+    let symlink_target = snap.join("file.gguf");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(blobs.join("sha"), &symlink_target).unwrap();
+    #[cfg(not(unix))]
+    std::fs::write(&symlink_target, b"blob").unwrap();
+    assert!(symlink_target.exists());
+    let summary = delete_model_with_cache_root(&symlink_target, Some(&cache_root))
+      .expect("delete must succeed");
+    assert!(summary.contains("HF cache"), "got `{summary}`");
+    assert!(!repo_dir.exists(), "the whole repo dir should be gone");
+    let _ = std::fs::remove_dir_all(&cache_root);
+  }
+
+  #[test]
+  fn delete_model_only_unlinks_when_hf_layout_lives_outside_cache_root() {
+    // Same `models--owner--repo/snapshots/main/file.gguf` shape but
+    // *not* under the configured HF cache root (think rsynced backup
+    // or restored archive). The deleter must refuse to recursively
+    // remove that tree and instead only unlink the single file.
+    let outside =
+      std::env::temp_dir().join(format!("llamastash-delete-outside-{}", std::process::id()));
+    let repo_dir = outside.join("models--owner--repo");
+    let snap = repo_dir.join("snapshots").join("main");
+    std::fs::create_dir_all(&snap).unwrap();
+    let file = snap.join("file.gguf");
+    std::fs::write(&file, b"weights").unwrap();
+    let other = snap.join("other.gguf");
+    std::fs::write(&other, b"other").unwrap();
+    // Point the cache root somewhere unrelated; the deleter must
+    // fall through to single-file unlink.
+    let unrelated_cache = std::env::temp_dir().join("llamastash-unrelated-cache");
+    let _ = std::fs::create_dir_all(&unrelated_cache);
+    let summary =
+      delete_model_with_cache_root(&file, Some(&unrelated_cache)).expect("delete must succeed");
+    assert!(
+      !summary.contains("HF cache"),
+      "non-cache HF-shaped layout must not be treated as HF cache: `{summary}`"
+    );
+    assert!(!file.exists(), "the target file should be unlinked");
+    assert!(
+      other.exists(),
+      "sibling file in the same snapshot dir must NOT have been removed"
+    );
+    assert!(
+      repo_dir.exists(),
+      "the repo dir itself must NOT have been removed"
+    );
+    let _ = std::fs::remove_dir_all(&outside);
+    let _ = std::fs::remove_dir_all(&unrelated_cache);
+  }
+
+  #[test]
+  fn delete_model_with_no_cache_root_only_unlinks() {
+    // Defense in depth: when `hf_cache_dir()` returns an error (HOME
+    // unresolvable, exotic build target), the deleter must still
+    // safely unlink a single file rather than recursing.
+    let dir =
+      std::env::temp_dir().join(format!("llamastash-delete-no-cache-{}", std::process::id()));
+    let repo_dir = dir.join("models--owner--repo");
+    let snap = repo_dir.join("snapshots").join("main");
+    std::fs::create_dir_all(&snap).unwrap();
+    let file = snap.join("file.gguf");
+    std::fs::write(&file, b"weights").unwrap();
+    let summary =
+      delete_model_with_cache_root(&file, None).expect("no-cache-root delete must succeed");
+    assert!(!summary.contains("HF cache"), "got `{summary}`");
+    assert!(!file.exists());
+    assert!(
+      repo_dir.exists(),
+      "with no cache root we must NOT remove the repo dir"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn ctrl_d_on_error_managed_model_refuses_with_toast() {
+    use crate::tui::app::ManagedRow;
+    use crate::tui::status_icons::SurfaceState;
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    app.managed = vec![ManagedRow {
+      launch_id: "L-error".into(),
+      path: PathBuf::from("/m/qwen.gguf"),
+      port: 41100,
+      state: SurfaceState::Error,
+      rss_bytes: None,
+      cpu_pct: None,
+    }];
+    app.go_top();
+    pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert!(
+      app.confirm_dialog.is_none(),
+      "error-state row must not stage delete"
+    );
+    let toast = app.toast_message().unwrap_or("");
+    assert!(
+      toast.contains("error"),
+      "expected error-specific toast, got `{toast}`"
+    );
+  }
+
+  #[test]
+  fn ctrl_d_on_external_model_refuses_with_toast() {
+    use crate::tui::app::ManagedRow;
+    use crate::tui::status_icons::SurfaceState;
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    // External rows live on `app.external`, not `app.managed`.
+    app.external = vec![ManagedRow {
+      launch_id: "ext-1".into(),
+      path: PathBuf::from("/m/qwen.gguf"),
+      port: 41200,
+      state: SurfaceState::External,
+      rss_bytes: None,
+      cpu_pct: None,
+    }];
+    app.go_top();
+    pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert!(
+      app.confirm_dialog.is_none(),
+      "external-process row must not stage delete"
+    );
+    let toast = app.toast_message().unwrap_or("");
+    assert!(
+      toast.contains("external"),
+      "expected external-specific toast, got `{toast}`"
+    );
+  }
+
+  #[test]
+  fn ctrl_d_on_running_model_refuses_with_toast() {
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    app.managed = vec![ready_managed_for_events("/m/qwen.gguf", 41100)];
+    app.go_top();
+    pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert!(
+      app.confirm_dialog.is_none(),
+      "running model must not stage delete"
+    );
+    let toast = app.toast_message().unwrap_or("");
+    assert!(
+      toast.contains("stop the launch"),
+      "expected stop-first toast, got `{toast}`"
+    );
+  }
+
+  #[test]
+  fn d_opens_hf_dialog_and_esc_closes_it() {
+    use crate::tui::hf_dialog::HfStage;
+    let mut app = App::new(Default::default());
+    assert!(app.hf_dialog.is_none());
+    pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::NONE));
+    let dialog = app.hf_dialog.as_ref().expect("`d` must open the HF dialog");
+    assert_eq!(dialog.stage, HfStage::Search);
+    assert!(
+      dialog.input.is_editing(),
+      "search field must auto-enter edit mode so the user can type immediately"
+    );
+    assert_eq!(app.focus, Focus::HfDialog);
+    // Type into the search buffer.
+    pump_input(&mut app, key(KeyCode::Char('q'), KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Char('w'), KeyModifiers::NONE));
+    assert_eq!(app.hf_dialog.as_ref().map(|d| d.input.buffer()), Some("qw"));
+    // First Esc: exit edit (buffer kept, dialog still open).
+    pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+    let after_first_esc = app.hf_dialog.as_ref().expect("first Esc must keep dialog");
+    assert!(!after_first_esc.input.is_editing());
+    assert_eq!(after_first_esc.input.buffer(), "qw");
+    // Second Esc: clear buffer (still open, still resting).
+    pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+    let after_second_esc = app.hf_dialog.as_ref().expect("second Esc must keep dialog");
+    assert!(after_second_esc.input.is_empty());
+    // Third Esc: closes the dialog and returns focus.
+    pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.hf_dialog.is_none());
+    assert_eq!(app.focus, Focus::List);
+  }
+
+  #[test]
+  fn hf_dialog_o_in_resting_mode_cycles_sort_key() {
+    use crate::init::hf_api::HfSortKey;
+    let mut app = App::new(Default::default());
+    pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::NONE));
+    assert_eq!(
+      app.hf_dialog.as_ref().map(|d| d.sort),
+      Some(HfSortKey::Downloads)
+    );
+    // First Esc exits edit so the dialog's keymap (o / n / p) fires.
+    pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Char('o'), KeyModifiers::NONE));
+    assert_eq!(
+      app.hf_dialog.as_ref().map(|d| d.sort),
+      Some(HfSortKey::Likes)
+    );
+  }
+
+  #[test]
+  fn filter_focus_three_esc_walk_back_chain() {
+    // Lock down the Esc walk-back contract for the filter input
+    // documented in handle_key:
+    //   1st Esc → exit edit (buffer kept, focus stays)
+    //   2nd Esc → clear buffer (focus stays)
+    //   3rd Esc → close filter (focus walks back to List)
+    let mut app = App::new(Default::default());
+    pump_input(&mut app, key(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert_eq!(app.focus, Focus::Filter);
+    pump_input(&mut app, key(KeyCode::Char('q'), KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Char('w'), KeyModifiers::NONE));
+    assert!(app.filter_input.is_editing());
+    assert_eq!(app.filter_input.buffer(), "qw");
+    // 1st Esc.
+    pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.focus, Focus::Filter, "filter still focused");
+    assert!(
+      !app.filter_input.is_editing(),
+      "edit must exit on first Esc"
+    );
+    assert_eq!(app.filter_input.buffer(), "qw", "buffer must survive");
+    // 2nd Esc.
+    pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.focus, Focus::Filter, "filter still focused");
+    assert!(
+      app.filter_input.is_empty(),
+      "buffer must clear on second Esc"
+    );
+    // 3rd Esc.
+    pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(
+      app.focus,
+      Focus::List,
+      "third Esc must walk focus back to List"
+    );
+  }
+
+  #[test]
+  fn chat_input_three_esc_walk_back_chain() {
+    // Same contract for the chat composer (representative of
+    // chat/embed/rerank). The third Esc dispatches `Action::ExitEdit`
+    // which exits edit on every tab field + flips focus back to
+    // RightPane.
+    let mut app = App::new(Default::default());
+    app.right_tab = RightTab::Chat;
+    app.focus = Focus::RightPane;
+    // `e` activates the chat-input focus (auto-enters edit).
+    pump_input(&mut app, key(KeyCode::Char('e'), KeyModifiers::NONE));
+    assert_eq!(app.focus, Focus::ChatInput);
+    assert!(app.chat.prompt.is_editing());
+    // Type something so the second Esc has buffer content to clear.
+    pump_input(&mut app, key(KeyCode::Char('h'), KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Char('i'), KeyModifiers::NONE));
+    assert_eq!(app.chat.prompt.buffer(), "hi");
+    // 1st Esc — exit edit.
+    pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.focus, Focus::ChatInput, "focus stays on chat input");
+    assert!(!app.chat.prompt.is_editing());
+    assert_eq!(app.chat.prompt.buffer(), "hi");
+    // 2nd Esc — clear.
+    pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.chat.prompt.is_empty());
+    assert_eq!(
+      app.focus,
+      Focus::ChatInput,
+      "focus stays on chat input after clear"
+    );
+    // 3rd Esc — exit chat input back to the right pane.
+    pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(
+      app.focus,
+      Focus::RightPane,
+      "third Esc must walk focus back to RightPane"
+    );
+  }
+
+  #[test]
+  fn filter_enter_opens_launch_picker_on_focused_row() {
+    // Filter is a live predicate (rows update on every keystroke),
+    // so Enter has no "apply" semantics. Instead it drills into the
+    // focused result by opening the launch picker — same affordance
+    // as `Enter` on the model list. The filter buffer survives the
+    // drill-in so the user can dismiss the picker and keep scrolling
+    // the filtered results.
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    app.go_top();
+    // Open filter, type a query, then Enter.
+    pump_input(&mut app, key(KeyCode::Char('/'), KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Char('q'), KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Char('w'), KeyModifiers::NONE));
+    assert_eq!(app.focus, Focus::Filter);
+    assert!(app.filter_input.is_editing());
+    pump_input(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
+    // Picker is open + focus moved to the right pane's Settings tab.
+    assert!(
+      app.launch_picker.is_some(),
+      "Enter on filter must open the launch picker for the focused row"
+    );
+    assert_eq!(app.focus, Focus::RightPane);
+    assert_eq!(app.right_tab, RightTab::Settings);
+    // Filter buffer survives so the user keeps the predicate after
+    // dismissing the picker.
+    assert_eq!(app.filter_input.buffer(), "qw");
+    assert!(
+      !app.filter_input.is_editing(),
+      "filter must have exited edit before drilling into picker"
+    );
+  }
+
+  #[test]
+  fn filter_enter_on_empty_results_only_exits_edit() {
+    // With no rows matching the filter, Enter falls back to "stop
+    // editing + return to list" — no picker (there's nothing to
+    // launch), no toast.
+    let mut app = App::new(Default::default());
+    app.models = vec![]; // empty catalog → zero rows after filter.
+    pump_input(&mut app, key(KeyCode::Char('/'), KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Char('z'), KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.launch_picker.is_none());
+    assert_eq!(app.focus, Focus::List);
+    assert!(!app.filter_input.is_editing());
+  }
+
+  #[test]
+  fn filter_focus_arrow_keys_move_the_list_cursor() {
+    // Up/Down (and the vi `k`/`j` aliases) must scroll the filtered
+    // model list while focus stays on the filter input, in both
+    // editing and resting modes. The InputField passes arrows
+    // through; `handle_filter_input` is the single wire that turns
+    // those passthroughs into list-cursor movement.
+    let mut app = App::new(Default::default());
+    app.models = vec![
+      fake_model_for_events("/m/a.gguf", "/m"),
+      fake_model_for_events("/m/b.gguf", "/m"),
+      fake_model_for_events("/m/c.gguf", "/m"),
+    ];
+    app.go_top();
+    let cursor_before = app.list_cursor;
+    // Enter filter focus (auto-enters edit).
+    pump_input(&mut app, key(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert_eq!(app.focus, Focus::Filter);
+    assert!(app.filter_input.is_editing(), "filter must auto-edit");
+    // Down while editing → list cursor advances.
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
+    assert!(
+      app.list_cursor > cursor_before,
+      "Down arrow in filter edit mode must advance the list cursor"
+    );
+    let mid_cursor = app.list_cursor;
+    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    assert!(
+      app.list_cursor < mid_cursor,
+      "Up arrow in filter edit mode must rewind the list cursor"
+    );
+    // Now leave edit mode (resting). `j` is captured as a typed char
+    // while editing, but in resting mode it goes through to the list
+    // cursor.
+    pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+      !app.filter_input.is_editing(),
+      "first Esc must exit edit (filter still focused)"
+    );
+    let before_j = app.list_cursor;
+    pump_input(&mut app, key(KeyCode::Char('j'), KeyModifiers::NONE));
+    assert!(
+      app.list_cursor > before_j,
+      "`j` in resting filter must scroll the list, got cursor {before_j} → {}",
+      app.list_cursor
+    );
+  }
+
+  #[test]
+  fn opening_hf_dialog_inherits_offline_flag_from_app_options() {
+    // Regression: app.options.offline must propagate into the dialog
+    // state at open time so the dialog renders "search disabled" and
+    // its spawned fetch tasks short-circuit before HF traffic. A
+    // false `app.options.offline` plus `LLAMASTASH_OFFLINE` unset
+    // means the dialog stays online; a true value forces offline.
+    let mut online = App::new(crate::tui::app::AppOptions {
+      offline: false,
+      ..Default::default()
+    });
+    online.open_hf_dialog();
+    assert_eq!(
+      online.hf_dialog.as_ref().map(|d| d.offline),
+      Some(false),
+      "online AppOptions must not flip the dialog into offline mode"
+    );
+
+    let mut offline = App::new(crate::tui::app::AppOptions {
+      offline: true,
+      ..Default::default()
+    });
+    offline.open_hf_dialog();
+    assert_eq!(
+      offline.hf_dialog.as_ref().map(|d| d.offline),
+      Some(true),
+      "offline AppOptions must flip the dialog into offline mode"
+    );
+  }
+
+  #[test]
+  fn ctrl_x_with_no_active_download_toasts_refusal() {
+    let mut app = App::new(Default::default());
+    pump_input(&mut app, key(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    assert!(
+      app.confirm_dialog.is_none(),
+      "idle strip must not stage cancel confirm"
+    );
+    let toast = app.toast_message().unwrap_or("");
+    assert!(
+      toast.contains("no active download"),
+      "expected refusal toast, got `{toast}`"
+    );
+  }
+
+  #[test]
+  fn ctrl_x_with_active_download_stages_cancel_confirm() {
+    use crate::tui::app::ConfirmAction;
+    use crate::tui::download_strip::QueuedPull;
+    use crate::tui::hf_dialog::PickerRow;
+    let mut app = App::new(Default::default());
+    let pull = QueuedPull {
+      repo_id: "owner/repo".into(),
+      friendly_name: "owner/repo :model.gguf".into(),
+      row: PickerRow::Single {
+        filename: "model.gguf".into(),
+        size_bytes: Some(123),
+      },
+    };
+    app.download_strip.enqueue(pull);
+    let promoted = app.download_strip.promote_next().unwrap();
+    app.download_strip.install_active(&promoted);
+    pump_input(&mut app, key(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    match app
+      .confirm_dialog
+      .as_ref()
+      .expect("cancel popup must stage")
+    {
+      ConfirmAction::CancelDownload {
+        repo_id,
+        friendly_name,
+      } => {
+        assert_eq!(repo_id, "owner/repo");
+        assert!(friendly_name.contains("model.gguf"));
+      }
+      other => panic!("expected CancelDownload, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn confirmed_cancel_download_clears_active_and_keeps_queue() {
+    // Confirm flow: stage the cancel popup, press Enter, then assert
+    // the active slot is empty + the queued pull stayed in line.
+    // (The queued pull is auto-promoted by apply_confirmed; with no
+    // tokio runtime here we just verify the strip state.)
+    use crate::tui::download_strip::QueuedPull;
+    use crate::tui::hf_dialog::PickerRow;
+    let mut app = App::new(Default::default());
+    for (repo, file) in [("a/active", "active.gguf"), ("b/queued", "queued.gguf")] {
+      app.download_strip.enqueue(QueuedPull {
+        repo_id: repo.into(),
+        friendly_name: format!("{repo} :{file}"),
+        row: PickerRow::Single {
+          filename: file.into(),
+          size_bytes: Some(1),
+        },
+      });
+    }
+    let promoted = app.download_strip.promote_next().unwrap();
+    app.download_strip.install_active(&promoted);
+    // Stage the popup, then confirm with `y` (named cancel keys + y
+    // are the confirmation chord per `handle_key`).
+    pump_input(&mut app, key(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    assert!(app.confirm_dialog.is_some());
+    // The confirm dispatch spawns the next pull through tokio. We
+    // can't run tokio here, so use a current-thread runtime to drive
+    // the dispatch synchronously.
+    let rt = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    rt.block_on(async {
+      pump_input(&mut app, key(KeyCode::Char('y'), KeyModifiers::NONE));
+    });
+    assert!(app.confirm_dialog.is_none(), "popup must close on confirm");
+    let toast = app.toast_message().unwrap_or("");
+    assert!(
+      toast.contains("cancelled"),
+      "expected cancelled toast, got `{toast}`"
+    );
+    // The next pull was promoted, so active is now `b/queued`.
+    let active = app
+      .download_strip
+      .active
+      .as_ref()
+      .expect("queued pull must have been promoted");
+    assert_eq!(active.repo_id, "b/queued");
+  }
+
+  #[test]
+  fn hf_dialog_o_while_editing_is_typed_not_cycled() {
+    use crate::init::hf_api::HfSortKey;
+    let mut app = App::new(Default::default());
+    pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::NONE));
+    // Field is auto-edit on open, so `o` is typed.
+    pump_input(&mut app, key(KeyCode::Char('o'), KeyModifiers::NONE));
+    assert_eq!(
+      app.hf_dialog.as_ref().map(|d| d.input.buffer()),
+      Some("o"),
+      "`o` while editing must go into the buffer, not cycle sort"
+    );
+    assert_eq!(
+      app.hf_dialog.as_ref().map(|d| d.sort),
+      Some(HfSortKey::Downloads),
+      "sort must not have cycled while editing"
+    );
   }
 
   #[test]
@@ -1605,21 +3045,31 @@ mod tests {
   #[test]
   fn typing_in_filter_extends_buffer() {
     let mut app = App::new(Default::default());
-    app.focus = Focus::Filter;
+    app.open_filter();
     for ch in "qwen".chars() {
       pump_input(&mut app, key(KeyCode::Char(ch), KeyModifiers::NONE));
     }
-    assert_eq!(app.filter_buffer, "qwen");
+    assert_eq!(app.filter_input.buffer(), "qwen");
   }
 
   #[test]
-  fn esc_in_filter_clears_and_returns_focus() {
+  fn esc_in_filter_walks_back_edit_then_clear_then_close() {
     let mut app = App::new(Default::default());
-    app.focus = Focus::Filter;
-    app.filter_buffer = "qwen".into();
+    app.open_filter();
+    app.filter_input.set_text("qwen");
+    assert!(app.filter_input.is_editing());
+    // 1st Esc: exit edit (buffer kept, focus on filter).
+    pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.focus, Focus::Filter);
+    assert!(!app.filter_input.is_editing());
+    assert_eq!(app.filter_input.buffer(), "qwen");
+    // 2nd Esc: clear buffer (still resting, still on filter).
+    pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.focus, Focus::Filter);
+    assert!(app.filter_input.is_empty());
+    // 3rd Esc: close filter, return to list.
     pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.focus, Focus::List);
-    assert!(app.filter_buffer.is_empty());
   }
 
   #[test]
@@ -2268,7 +3718,11 @@ mod tests {
   }
 
   #[test]
-  fn right_arrow_on_models_list_enters_right_pane() {
+  fn right_arrow_on_models_list_does_not_change_focus() {
+    // 2026-05-21: the `→` shortcut was removed (read as
+    // "cycle value" everywhere else and the asymmetric pane-jump
+    // confused users). Pane focus moves via Tab / Shift+Tab / `l`
+    // / `h` instead. Verify a stray Right keystroke is a no-op.
     let mut app = App::new(Default::default());
     app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
     app.go_top();
@@ -2276,8 +3730,8 @@ mod tests {
     pump_input(&mut app, key(KeyCode::Right, KeyModifiers::NONE));
     assert_eq!(
       app.focus,
-      Focus::RightPane,
-      "→ from Models must focus the right pane (round-8)"
+      Focus::List,
+      "→ must NOT move focus off Models (binding removed)"
     );
   }
 

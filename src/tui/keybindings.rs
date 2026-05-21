@@ -45,6 +45,12 @@ pub enum Focus {
   /// resistant fallback so a stray keypress doesn't confirm a
   /// destructive action.
   ConfirmPopup,
+  /// HuggingFace pull dialog (R104). The per-stage key router lives
+  /// in `events.rs` because the dialog's `Search` / `FilePicker` /
+  /// `Confirm` stages each shadow a subset of the global keymap
+  /// (typing extends the query buffer; arrows move row cursors;
+  /// `o` cycles sort; `n`/`p` paginate).
+  HfDialog,
 }
 
 /// Symbolic action a binding triggers. Renderers / event handlers
@@ -53,6 +59,11 @@ pub enum Focus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
   Quit,
+  /// Open the HuggingFace pull dialog (R104). Bound to `Shift+D` in
+  /// [`Focus::List`] — mirrors the other Shift-letter quick-jumps
+  /// (`M / L / C / R / E / S`). The dialog itself handles its
+  /// per-stage keys.
+  OpenHfDialog,
   MoveUp,
   MoveDown,
   PageUp,
@@ -116,6 +127,17 @@ pub enum Action {
   /// options. Bound to `Ctrl+R` in the model list focus so the
   /// `Shift+R` mnemonic stays free for the Rerank tab alias.
   RestartDaemon,
+  /// Delete the focused model from disk after confirmation. Bound
+  /// to `Ctrl+D` in [`Focus::List`]; refuses (with a toast) when
+  /// the focused row is a running managed launch.
+  DeleteModel,
+  /// Cancel the currently-active HF download after confirmation.
+  /// Bound to `Ctrl+X` everywhere it makes sense (List + RightPane)
+  /// so the download strip's chip is reachable from either side of
+  /// the dashboard. Queued pulls behind the active one stay in the
+  /// queue — a second `Ctrl+X` cancels whichever pull was promoted
+  /// next. No-op (toast) when no pull is active.
+  CancelDownload,
   /// Jump focus to the Logs tab in the right pane. No-op (with a
   /// toast) when the focused model isn't running, since Logs is
   /// only reachable for live launches.
@@ -178,6 +200,7 @@ pub const DEFAULT_BINDINGS: &[(Focus, &[Binding])] = &[
   (Focus::EmbedInput, EMBED_INPUT_BINDINGS),
   (Focus::RerankInput, RERANK_INPUT_BINDINGS),
   (Focus::ConfirmPopup, CONFIRM_POPUP_BINDINGS),
+  (Focus::HfDialog, HF_DIALOG_BINDINGS),
 ];
 
 const LIST_BINDINGS: &[Binding] = &[
@@ -350,18 +373,13 @@ const LIST_BINDINGS: &[Binding] = &[
     description: "stop",
   },
   // Tab/⇧+Tab cycle panes (Models → Logs → Chat/Embed/Rerank →
-  // Settings → wrap). ↑/↓ scroll the list cursor. Right (→) jumps
-  // into the right pane from the model list (asymmetric — Left
-  // stays unbound here because the user lives in Models by
-  // default; Esc on the right pane snaps back). h/l stay as
-  // vi-style pane-cycle aliases for home-row navigators.
-  Binding {
-    key: KeyCode::Right,
-    mods: KeyModifiers::NONE,
-    action: Action::NextFocus,
-    label: "→",
-    description: "right pane",
-  },
+  // Settings → wrap). ↑/↓ scroll the list cursor. The `→` chord is
+  // deliberately unbound on the Models list: arrow-right reads as
+  // "cycle value" everywhere else (Settings tab) and surfaced as
+  // an asymmetric pane-jump it confused users into pressing it for
+  // every navigation. Pane cycle is reachable via Tab/Shift+Tab or
+  // the vi `h`/`l` aliases (still bound below); Enter launches the
+  // focused model into the right pane.
   Binding {
     key: KeyCode::Tab,
     mods: KeyModifiers::NONE,
@@ -446,6 +464,77 @@ const LIST_BINDINGS: &[Binding] = &[
     label: "S",
     description: "settings",
   },
+  // R104: `d` opens the HuggingFace pull dialog. Lowercase so the
+  // dialog is reachable with a single un-modified keystroke; Ctrl+D
+  // is reserved for delete-model on the focused row.
+  Binding {
+    key: KeyCode::Char('d'),
+    mods: KeyModifiers::NONE,
+    action: Action::OpenHfDialog,
+    label: "d",
+    description: "pull from HF",
+  },
+  // Ctrl+D deletes the focused model after a confirmation popup.
+  // Refusal-on-running is handled inside `apply_delete_model` so the
+  // binding stays uniform; the on-screen hint chip only renders for
+  // non-running rows (see `list_pane` hints).
+  Binding {
+    key: KeyCode::Char('d'),
+    mods: KeyModifiers::CONTROL,
+    action: Action::DeleteModel,
+    label: "Ctrl+D",
+    description: "delete model",
+  },
+  // Ctrl+X cancels the currently-active HF download after a confirm
+  // popup. Queued downloads keep their place; the user presses Ctrl+X
+  // again on the next promoted pull. Refusal-on-idle is handled in
+  // `apply_cancel_download` so the binding is uniform and the chip
+  // strip on the download line is the discoverability surface.
+  Binding {
+    key: KeyCode::Char('x'),
+    mods: KeyModifiers::CONTROL,
+    action: Action::CancelDownload,
+    label: "Ctrl+X",
+    description: "cancel download",
+  },
+];
+
+/// HF pull dialog (R104). The per-stage routing (Search / FilePicker
+/// / Confirm) lives in `events::handle_hf_dialog_input` because the
+/// dialog has stage-specific semantics that the static binding table
+/// can't capture (typing extends the query buffer; `n`/`p` paginate
+/// only in Search; Backspace toggles between sub-stages). What
+/// *does* belong here are the always-on keys the help bar needs to
+/// surface and the help-overlay needs to enumerate.
+const HF_DIALOG_BINDINGS: &[Binding] = &[
+  Binding {
+    key: KeyCode::Esc,
+    mods: KeyModifiers::NONE,
+    action: Action::Cancel,
+    label: "Esc",
+    description: "close",
+  },
+  Binding {
+    key: KeyCode::Up,
+    mods: KeyModifiers::NONE,
+    action: Action::MoveUp,
+    label: "↑",
+    description: "up",
+  },
+  Binding {
+    key: KeyCode::Down,
+    mods: KeyModifiers::NONE,
+    action: Action::MoveDown,
+    label: "↓",
+    description: "down",
+  },
+  Binding {
+    key: KeyCode::Enter,
+    mods: KeyModifiers::NONE,
+    action: Action::Submit,
+    label: "Enter",
+    description: "open / confirm",
+  },
 ];
 
 const FILTER_BINDINGS: &[Binding] = &[
@@ -456,12 +545,16 @@ const FILTER_BINDINGS: &[Binding] = &[
     label: "Esc",
     description: "clear",
   },
+  // Filter is a live predicate (applies on every keystroke), so
+  // Enter has no apply semantics — it drills into the focused
+  // result row by opening the launch picker. See
+  // `handle_filter_input`'s `Submit` arm.
   Binding {
     key: KeyCode::Enter,
     mods: KeyModifiers::NONE,
     action: Action::Submit,
     label: "Enter",
-    description: "apply",
+    description: "launch",
   },
 ];
 
@@ -721,6 +814,16 @@ const RIGHT_PANE_BINDINGS: &[Binding] = &[
     action: Action::FocusSettingsTab,
     label: "S",
     description: "settings",
+  },
+  // Mirror LIST_BINDINGS so Ctrl+X cancels the active download from
+  // either pane. `apply_cancel_download` gates idle / non-active
+  // states so the binding stays uniform across focuses.
+  Binding {
+    key: KeyCode::Char('x'),
+    mods: KeyModifiers::CONTROL,
+    action: Action::CancelDownload,
+    label: "Ctrl+X",
+    description: "cancel download",
   },
 ];
 
@@ -1089,6 +1192,8 @@ impl Action {
     ("exit_edit", Action::ExitEdit),
     ("kill_daemon", Action::KillDaemon),
     ("restart_daemon", Action::RestartDaemon),
+    ("delete_model", Action::DeleteModel),
+    ("cancel_download", Action::CancelDownload),
     ("focus_logs_tab", Action::FocusLogsTab),
     ("focus_chat_tab", Action::FocusChatTab),
     ("focus_settings_tab", Action::FocusSettingsTab),
@@ -1295,6 +1400,52 @@ mod tests {
   }
 
   #[test]
+  fn lowercase_d_in_list_focus_opens_hf_dialog() {
+    // Round-13: HF pull moved from Shift+D to lowercase `d` so it's
+    // reachable with a single unmodified keystroke. Ctrl+D is now
+    // bound to delete-model (see below).
+    assert_eq!(
+      action_for(Focus::List, KeyCode::Char('d'), KeyModifiers::NONE),
+      Some(Action::OpenHfDialog),
+    );
+  }
+
+  #[test]
+  fn d_is_not_shadowed_in_any_sub_focus() {
+    // The dialog steals input via `Focus::HfDialog`; the binding
+    // must not also fire under another focus (e.g. RightPane or
+    // the input modes) where it would collide with an unrelated
+    // action.
+    use crate::tui::keybindings::Focus::*;
+    for focus in [
+      Filter,
+      AdvancedPanel,
+      RightPane,
+      ChatInput,
+      EmbedInput,
+      RerankInput,
+      ConfirmPopup,
+      HfDialog,
+    ] {
+      let action = action_for(focus, KeyCode::Char('d'), KeyModifiers::NONE);
+      assert!(
+        action.is_none() || action == Some(Action::OpenHfDialog),
+        "`d` collision under {focus:?}: {action:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn shift_d_no_longer_opens_hf_dialog() {
+    // Round-13 retired Shift+D in favour of lowercase `d`. Pin the
+    // removal so a future refactor doesn't accidentally re-add it.
+    assert_eq!(
+      action_for(Focus::List, KeyCode::Char('D'), KeyModifiers::SHIFT),
+      None,
+    );
+  }
+
+  #[test]
   fn list_bindings_include_navigation_filter_launch_yank_theme() {
     let bs = bindings_for(Focus::List);
     let labels: Vec<&str> = bs.iter().map(|b| b.label).collect();
@@ -1335,20 +1486,25 @@ mod tests {
 
   #[test]
   fn list_right_arrow_enters_right_pane_but_left_is_unbound() {
-    // Round-8 nav: from the Models list, `→` opens / focuses the
-    // right pane. `←` is intentionally not bound — Esc on the
-    // right pane handles the return path; binding both would
-    // shadow potential future intents (e.g. column scroll). The
-    // canonical `Tab` / `⇧+Tab` cycle still works on top.
+    // 2026-05-21: the `→` shortcut from the Models list was removed
+    // — it read as "cycle value" everywhere else (Settings tab) and
+    // the asymmetric pane-jump confused users. Pane cycle is now
+    // reachable via Tab / Shift+Tab / `h` / `l` only. Left was
+    // already unbound; Right joins it.
     assert_eq!(
       action_for(Focus::List, KeyCode::Right, KeyModifiers::NONE),
-      Some(Action::NextFocus),
-      "Right arrow from Models must enter the right pane"
+      None,
+      "Right arrow must NOT open the right pane (removed)"
     );
     assert_eq!(
       action_for(Focus::List, KeyCode::Left, KeyModifiers::NONE),
       None,
-      "Left arrow stays unbound in Models — asymmetric on purpose"
+      "Left arrow stays unbound in Models"
+    );
+    assert_eq!(
+      action_for(Focus::List, KeyCode::Tab, KeyModifiers::NONE),
+      Some(Action::NextFocus),
+      "Tab remains the canonical pane-cycle chord"
     );
   }
 

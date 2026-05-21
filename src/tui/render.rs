@@ -23,7 +23,7 @@ use ratatui::Frame;
 
 use crate::theme::Palette;
 use crate::tui::app::App;
-use crate::tui::keybindings::Focus;
+use crate::tui::keybindings::{Action, Focus};
 use crate::tui::{
   advanced_panel, confirm_overlay, help_bar, help_overlay, host_stats_pane, info_pane, list_pane,
   logo_pane, right_pane,
@@ -87,13 +87,20 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
   let show_info_row = area.height >= MIN_HEIGHT_FOR_INFO_ROW;
 
-  // Vertical layout: title, [info,] body. The filter input renders
-  // inline in the Models block title now, so the body owns the
-  // bottom edge — no dedicated filter row.
-  let mut constraints: Vec<Constraint> = Vec::with_capacity(3);
+  // Vertical layout: title, [info,] [download strip,] body. The
+  // download strip is reserved only when active so the body keeps
+  // every available row when no pull is in flight.
+  let show_strip = app.download_strip_active();
+  let mut constraints: Vec<Constraint> = Vec::with_capacity(4);
   constraints.push(Constraint::Length(1));
   if show_info_row {
     constraints.push(Constraint::Length(INFO_ROW_HEIGHT));
+  }
+  if show_strip {
+    // 1 row for the strip itself + 1 row of vertical margin below
+    // it so the body's panel border doesn't sit flush against the
+    // progress text.
+    constraints.push(Constraint::Length(2));
   }
   constraints.push(Constraint::Min(1));
   let chunks = Layout::default()
@@ -108,6 +115,30 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     render_info_row(frame, chunks[idx], app, &palette);
     idx += 1;
   }
+  if show_strip {
+    // Strip renders into the top row of its 2-row slot; the bottom
+    // row stays blank (theme-painted background) as a visual gutter.
+    let strip_area = ratatui::layout::Rect {
+      height: 1,
+      ..chunks[idx]
+    };
+    // Surface the cancel-download chip only while a pull is actually
+    // active — the lingering-error / queue-promoting interstitials
+    // can't be cancelled because they're not consuming bytes.
+    let cancel_hint = if app.download_strip.active.is_some() {
+      app.hint(Focus::List, Action::CancelDownload)
+    } else {
+      None
+    };
+    super::download_strip::render(
+      frame,
+      strip_area,
+      &app.download_strip,
+      cancel_hint.as_deref(),
+      &palette,
+    );
+    idx += 1;
+  }
   render_body(frame, chunks[idx], app, &palette);
 
   // Overlays last. The launch picker no longer has a modal — the
@@ -118,6 +149,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     if let Some(state) = &app.advanced_panel {
       advanced_panel::render(frame, area, state, &palette);
     }
+  }
+  if app.hf_dialog.is_some() {
+    super::hf_dialog::render(frame, area, app, &palette);
   }
   if app.show_help {
     help_overlay::render(frame, area, app, &palette);
@@ -324,17 +358,23 @@ fn build_models_title<'a>(
   area_width: usize,
   rows: &[list_pane::ListRow],
 ) -> list_pane::TitleInputs<'a> {
-  let filter_active = !(app.filter_buffer.is_empty() && app.focus != Focus::Filter);
+  let filter_active = !(app.filter_input.is_empty() && app.focus != Focus::Filter);
   let filter = if filter_active {
     list_pane::FilterTitle::Active {
-      buffer: app.filter_buffer.as_str(),
+      buffer: app.filter_input.buffer(),
       focused: app.focus == Focus::Filter,
     }
   } else {
     list_pane::FilterTitle::Inactive
   };
   let on_running = focused_row_is_running(app, rows);
-  let hints = build_models_hints(app, filter_active, on_running);
+  let deletable = focused_row_is_deletable(app, rows);
+  // Mode the chip strip resolves against. `filter_active` collapses
+  // three independent signals (focus, edit state, buffer-non-empty)
+  // into one explicit enum so build_models_hints reads as a single
+  // match instead of three nested `if`s. See `FilterChipMode`.
+  let filter_chip_mode = filter_chip_mode(app, filter_active);
+  let hints = build_models_hints(app, filter_chip_mode, on_running, deletable);
   list_pane::TitleInputs {
     total: app.models.len(),
     area_width,
@@ -348,19 +388,84 @@ fn build_models_title<'a>(
 /// title bar. Order matters: the first chip is never dropped under
 /// budget pressure, so put the most important keystroke first
 /// (`Enter:apply` while filtering, `Enter:launch` otherwise).
-fn build_models_hints(app: &App, filter_active: bool, on_running: bool) -> Vec<String> {
-  use crate::tui::keybindings::Action;
+/// Filter-chip rendering mode. The chip strip differentiates three
+/// states so the InputField's modal contract (`e:edit / Esc:stop /
+/// 2nd-Esc:clear`) reads as a sequence of chips the user can follow
+/// without leaving the filter pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilterChipMode {
+  /// No filter — render the normal row-action chips.
+  Inactive,
+  /// Filter input has focus and is in edit mode (typing). Surface
+  /// the in-edit chord — `Esc:stop edit · Enter:apply` — instead of
+  /// the row actions so the user can see how to exit edit.
+  Editing,
+  /// Filter has focus but is resting (Esc was pressed once, buffer
+  /// kept). Surface `e:edit · Esc:clear · Enter:apply` so the user
+  /// can either re-enter edit, walk back one more step (clear), or
+  /// apply the predicate they already typed.
+  Resting,
+}
+
+/// Decide which filter-chip mode the title strip should render.
+/// Pure projection of the three relevant signals (`filter_active`,
+/// the focus, the InputField edit state). The
+/// `Editing` / `Resting` arms only fire when focus *is* the filter
+/// — once the user steps focus back to the list (filter buffer
+/// retained), the chip strip falls back to the normal model row
+/// chips and the filter-chip slot drops out so the model nav chord
+/// is the headline.
+fn filter_chip_mode(app: &App, filter_active: bool) -> FilterChipMode {
+  if !filter_active || app.focus != Focus::Filter {
+    return FilterChipMode::Inactive;
+  }
+  if app.filter_input.is_editing() {
+    FilterChipMode::Editing
+  } else {
+    FilterChipMode::Resting
+  }
+}
+
+fn build_models_hints(
+  app: &App,
+  filter_mode: FilterChipMode,
+  on_running: bool,
+  deletable: bool,
+) -> Vec<String> {
   let mut out: Vec<String> = Vec::with_capacity(7);
-  if filter_active {
-    // While the filter is being typed only the apply/clear keys are
-    // useful — every row-action hint would just clutter the strip.
-    if let Some(h) = app.hint(Focus::Filter, Action::Submit) {
-      out.push(h);
-    }
+  // Filter is a live predicate (applies on every keystroke), so
+  // `Submit` carries `Enter:launch` semantics: drill into the
+  // focused result. Override the binding's description to read as
+  // the actual user-facing action.
+  let enter_launch = || {
+    app
+      .hint_with(Focus::Filter, Action::Submit, "launch")
+      .unwrap_or_else(|| "Enter:launch".to_string())
+  };
+  if filter_mode == FilterChipMode::Editing {
+    // While editing only the in-edit chord is useful — `Esc:stop
+    // edit` exits to resting (buffer kept). The InputField's static
+    // binding for Esc inside Focus::Filter is `ClearFilter`, but in
+    // edit mode the field intercepts Esc first and exits edit; we
+    // surface the actual observed behavior here.
+    out.push(enter_launch());
+    out.push("Esc:stop edit".to_string());
+    return out;
+  }
+  if filter_mode == FilterChipMode::Resting {
+    // Resting: the InputField is in its post-first-Esc state. `e`
+    // re-enters edit, `Esc` clears the buffer, `Enter` launches the
+    // focused row. ↑/↓ scroll the filtered results without leaving
+    // the filter focus.
+    out.push("e:edit".to_string());
     if let Some(h) = app.hint(Focus::Filter, Action::ClearFilter) {
       out.push(h);
     }
-  } else {
+    out.push(enter_launch());
+    out.push("↑/↓:nav".to_string());
+    return out;
+  }
+  {
     // Audit §F5 #23: only surface `Enter:launch` when the cursor
     // sits on a launchable row. `open_launch_picker` is silently a
     // no-op on header rows (`★ Favorites`, `↺ Recent`, folder
@@ -396,6 +501,19 @@ fn build_models_hints(app: &App, filter_active: bool, on_running: bool) -> Vec<S
         out.push(h);
       }
     }
+    // Delete-model chip is gated to *idle* rows only — see
+    // [`focused_row_is_deletable`] for the exact rule. Running
+    // (Ready / Loading / Launching), Error, and External rows hide
+    // the chip so we don't tempt the user toward a refusal or a
+    // delete that would crash an out-of-process llama-server. The
+    // keybinding still fires on those rows (it toasts the reason it
+    // refused) so muscle memory works — the chip is purely the
+    // discovery surface.
+    if app.focused_name().is_some() && deletable {
+      if let Some(h) = app.hint(Focus::List, Action::DeleteModel) {
+        out.push(h);
+      }
+    }
   }
   out
 }
@@ -405,7 +523,6 @@ fn build_models_hints(app: &App, filter_active: bool, on_running: bool) -> Vec<S
 /// back to a static `/` glyph if the user has unbound the action
 /// (the chip still hints at the filter feature even without a key).
 fn models_filter_chip(app: &App) -> String {
-  use crate::tui::keybindings::Action;
   app
     .hint(Focus::List, Action::OpenFilter)
     .unwrap_or_else(|| "/:filter".to_string())
@@ -421,6 +538,29 @@ fn focused_row_is_running(app: &App, rows: &[list_pane::ListRow]) -> bool {
       state,
       SurfaceState::Ready | SurfaceState::Loading | SurfaceState::Launching
     ),
+    _ => false,
+  }
+}
+
+/// True when the focused row points at a model that's safe to delete
+/// from disk — i.e. nothing is currently reading the file. Idle
+/// states are `NotLaunched` (never launched in this session) and
+/// `Stopped` (gracefully terminated). Everything else (Launching,
+/// Loading, Ready, Error, External) keeps the file pinned by a
+/// process we'd otherwise crash, so the `Ctrl+D` hint chip hides
+/// and the keybinding refuses with a toast.
+///
+/// `Error` is included in the blocked set because the user's reading
+/// of "non-error" is: a failed-to-launch row still has a managed
+/// entry that may hold a file lock, and surfacing delete on the same
+/// row as "Error" reads as "retry by deleting" — wrong UX shape for
+/// a v1 surface.
+fn focused_row_is_deletable(app: &App, rows: &[list_pane::ListRow]) -> bool {
+  use crate::tui::status_icons::SurfaceState;
+  match rows.get(app.list_cursor) {
+    Some(list_pane::ListRow::Model { state, .. }) => {
+      matches!(state, SurfaceState::NotLaunched | SurfaceState::Stopped)
+    }
     _ => false,
   }
 }
@@ -528,6 +668,7 @@ mod tests {
       theme: ThemeName::Latte,
       custom_palette: None,
       keymap: KeyMap::default(),
+      ..Default::default()
     });
     // Force the Models pane into its populated path so the body cell
     // we probe is inside a real list area, not the empty-state hint.
@@ -560,6 +701,7 @@ mod tests {
       theme: ThemeName::Macchiato,
       custom_palette: None,
       keymap: KeyMap::default(),
+      ..Default::default()
     });
     let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
     let mut app_mut = app;
@@ -581,6 +723,7 @@ mod tests {
       theme: ThemeName::Mono,
       custom_palette: None,
       keymap: KeyMap::default(),
+      ..Default::default()
     });
     let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
     let mut app_mut = app;
@@ -604,6 +747,7 @@ mod tests {
       theme: ThemeName::Latte,
       custom_palette: None,
       keymap: KeyMap::default(),
+      ..Default::default()
     });
     app.show_help = true;
     let mut term = Terminal::new(TestBackend::new(140, 40)).unwrap();
@@ -632,6 +776,7 @@ mod tests {
       theme: ThemeName::Mono,
       custom_palette: None,
       keymap: KeyMap::default(),
+      ..Default::default()
     });
     app.show_help = true;
     let mut term = Terminal::new(TestBackend::new(140, 40)).unwrap();
@@ -701,7 +846,7 @@ mod tests {
   fn filter_input_appears_inline_in_models_title_when_focused() {
     let mut app = App::new(AppOptions::default());
     app.focus = Focus::Filter;
-    app.filter_buffer = "qwen".into();
+    app.filter_input.set_text("qwen");
     let rows = render_into(100, 30, app);
     let frame = rows.join("\n");
     // The inline input renders inside the Models block title strip.
@@ -724,7 +869,10 @@ mod tests {
     // keeps the headline action visible.
     let app = App::new(AppOptions::default());
     let hints = build_models_hints(
-      &app, /*filter_active=*/ false, /*on_running=*/ true,
+      &app,
+      FilterChipMode::Inactive,
+      /*on_running=*/ true,
+      /*deletable=*/ false,
     );
     let stop_at = hints
       .iter()
@@ -747,11 +895,166 @@ mod tests {
     // path keys remain so the strip stays uncluttered.
     let app = App::new(AppOptions::default());
     let hints = build_models_hints(
-      &app, /*filter_active=*/ false, /*on_running=*/ false,
+      &app,
+      FilterChipMode::Inactive,
+      /*on_running=*/ false,
+      /*deletable=*/ true,
     );
     assert!(!hints.iter().any(|h| h.contains("stop")), "{hints:?}");
     assert!(!hints.iter().any(|h| h.contains(":url")), "{hints:?}");
     assert!(!hints.iter().any(|h| h.contains(":curl")), "{hints:?}");
     assert!(hints.iter().any(|h| h.contains("fav")), "{hints:?}");
+  }
+
+  #[test]
+  fn delete_chip_appears_only_when_focused_row_is_deletable() {
+    use crate::discovery::{DiscoveredModel, ModelSource};
+    use std::path::PathBuf;
+    // No focused row → chip hidden.
+    let empty_app = App::new(AppOptions::default());
+    let empty_hints = build_models_hints(&empty_app, FilterChipMode::Inactive, false, false);
+    assert!(
+      !empty_hints.iter().any(|h| h.contains("delete")),
+      "no focused name = no delete chip: {empty_hints:?}"
+    );
+
+    // Focused row + deletable=true (NotLaunched / Stopped) → chip
+    // appears.
+    let mut focused_app = App::new(AppOptions::default());
+    focused_app.models = vec![DiscoveredModel {
+      path: PathBuf::from("/m/qwen.gguf"),
+      parent: PathBuf::from("/m"),
+      source: ModelSource::UserPath,
+      metadata: None,
+      parse_error: None,
+      split_siblings: Vec::new(),
+    }];
+    focused_app.go_top();
+    let deletable_hints = build_models_hints(&focused_app, FilterChipMode::Inactive, false, true);
+    assert!(
+      deletable_hints.iter().any(|h| h.contains("delete")),
+      "deletable focused row must surface delete chip: {deletable_hints:?}"
+    );
+
+    // Same focused row but deletable=false → chip hidden.
+    let non_deletable = build_models_hints(&focused_app, FilterChipMode::Inactive, false, false);
+    assert!(
+      !non_deletable.iter().any(|h| h.contains("delete")),
+      "non-deletable row must hide delete chip: {non_deletable:?}"
+    );
+  }
+
+  #[test]
+  fn filter_chip_strip_switches_between_editing_and_resting() {
+    // Edit mode: chip strip surfaces `Enter:launch` (filter is a
+    // live predicate, so Enter drills into the focused row) plus
+    // the in-edit chord (`Esc:stop edit`).
+    let mut app = App::new(AppOptions::default());
+    app.open_filter();
+    let editing = build_models_hints(&app, FilterChipMode::Editing, false, false);
+    assert!(
+      editing.iter().any(|h| h == "Enter:launch"),
+      "editing mode must surface Enter:launch (filter is live, no apply): {editing:?}"
+    );
+    assert!(
+      editing.iter().any(|h| h == "Esc:stop edit"),
+      "editing mode must surface stop-edit chord: {editing:?}"
+    );
+    assert!(
+      !editing.iter().any(|h| h.contains("apply")),
+      "editing mode must NOT surface Enter:apply (filter applies live): {editing:?}"
+    );
+    assert!(
+      !editing.iter().any(|h| h.contains("clear")),
+      "editing mode must NOT surface clear: {editing:?}"
+    );
+    // Resting mode: `e:edit`, `Esc:clear`, `Enter:launch`, plus a
+    // navigation hint so the user knows arrows still work.
+    let resting = build_models_hints(&app, FilterChipMode::Resting, false, false);
+    assert!(
+      resting.iter().any(|h| h == "e:edit"),
+      "resting mode must surface enter-edit chord: {resting:?}"
+    );
+    assert!(
+      resting.iter().any(|h| h.contains("clear")),
+      "resting mode must surface clear chord: {resting:?}"
+    );
+    assert!(
+      resting.iter().any(|h| h == "Enter:launch"),
+      "resting mode must surface Enter:launch: {resting:?}"
+    );
+    assert!(
+      !resting.iter().any(|h| h.contains("apply")),
+      "resting mode must NOT surface Enter:apply: {resting:?}"
+    );
+    assert!(
+      resting.iter().any(|h| h.contains("↑/↓")),
+      "resting mode must hint that arrows still navigate: {resting:?}"
+    );
+  }
+
+  #[test]
+  fn filter_chip_mode_projects_focus_and_edit_state() {
+    let mut app = App::new(AppOptions::default());
+    // No filter — Inactive.
+    assert_eq!(filter_chip_mode(&app, false), FilterChipMode::Inactive);
+    // Open filter (auto-enters edit) — Editing.
+    app.open_filter();
+    assert_eq!(filter_chip_mode(&app, true), FilterChipMode::Editing);
+    // Exit edit — Resting (focus still on filter).
+    app.filter_input.exit_edit();
+    assert_eq!(filter_chip_mode(&app, true), FilterChipMode::Resting);
+    // Focus moves back to List but buffer still has content — the
+    // chip strip stops claiming the filter slot and falls back to
+    // the model navigation chips. Filter remains visible in the
+    // pane title, just not in the chip strip.
+    app.filter_input.set_text("qwen");
+    app.focus = Focus::List;
+    assert_eq!(filter_chip_mode(&app, true), FilterChipMode::Inactive);
+  }
+
+  #[test]
+  fn focused_row_is_deletable_matches_idle_states_only() {
+    use crate::tui::list_pane::ListRow;
+    use crate::tui::status_icons::SurfaceState;
+    use std::path::PathBuf;
+    fn model_row(state: SurfaceState) -> ListRow {
+      ListRow::Model {
+        path: PathBuf::from("/m/qwen.gguf"),
+        name: "qwen".into(),
+        arch: String::new(),
+        quant: String::new(),
+        native_ctx: None,
+        weights_bytes: None,
+        mode_hint: String::new(),
+        favorite: false,
+        state,
+        port: None,
+        launch_id: None,
+      }
+    }
+    let app = App::new(AppOptions::default());
+    // Idle states allow delete.
+    for s in [SurfaceState::NotLaunched, SurfaceState::Stopped] {
+      let rows = vec![model_row(s)];
+      assert!(
+        focused_row_is_deletable(&app, &rows),
+        "{s:?} should be deletable"
+      );
+    }
+    // In-use states refuse delete.
+    for s in [
+      SurfaceState::Launching,
+      SurfaceState::Loading,
+      SurfaceState::Ready,
+      SurfaceState::Error,
+      SurfaceState::External,
+    ] {
+      let rows = vec![model_row(s)];
+      assert!(
+        !focused_row_is_deletable(&app, &rows),
+        "{s:?} must block delete"
+      );
+    }
   }
 }
