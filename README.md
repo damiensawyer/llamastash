@@ -1,45 +1,18 @@
-# LlamaStash 🦙
+# LlamaStash
 
-A fast, keyboard-driven TUI **and** CLI for launching local LLMs via `llama-server` (llama.cpp).
+![Logo](./assets/logo-h.jpg)
 
-> **Status: v2 work in progress.** v1 scope: [`docs/brainstorms/llamatui-requirements.md`](docs/brainstorms/llamatui-requirements.md), [v1 plan](docs/plans/2026-05-13-001-feat-llamatui-v1-launcher-plan.md). v2 scope: [v2 brainstorm](docs/brainstorms/2026-05-18-init-wizard-requirements.md), [v2 plan](docs/plans/2026-05-18-001-feat-init-wizard-doctor-pull-plan.md) — init wizard, doctor diagnostic, `llamastash pull` MVP, recommender.
+A fast, keyboard-driven TUI **and** CLI with init wizard for launching local LLMs via [llama.cpp](https://github.com/ggml-org/llama.cpp).
 
 ## Why
 
 Heavy abstractions (Ollama, LM Studio) hide llama.cpp; raw `llama-server` use is tedious. LlamaStash is a fast, transparent launcher that is also a first-class shell-tool surface for agents — one binary, daemon on demand, same primitives in the TUI and the CLI.
 
-## What it does (v1)
-
-- **Discovers GGUF models on disk** — your own paths plus HuggingFace, Ollama, and LM Studio caches — grouped by directory with live filesystem watching.
-- **Surfaces rich GGUF metadata** — architecture, quantization, native context length, KV-cache-aware memory estimates.
-- **Launches `llama-server`** through a keyboard-driven picker (context length, reasoning toggle, advanced flags); supports named per-model **presets** and **favorites**.
-- **Supervises multiple concurrent models** with a health-probed state machine. Running models survive TUI exit.
-- **Smoke-tests models** via a right-pane Chat / Embed / Rerank tab that hits the same OpenAI-compatible endpoints any external client would use.
-- **Exposes a complete non-interactive CLI** — `list`, `start`, `stop`, `status`, `logs`, `presets`, `favorites`, `daemon`, `init`, `doctor`, `pull`. Every read command supports `--json`. Distinct exit codes per failure class.
-
-## What's new in v2
-
-- **`llamastash init`** — first-run setup wizard: detects hardware, installs `llama-server` (brew on macOS, GH Releases prebuilt on Linux), picks a starter GGUF tuned to your VRAM via a built-in recommender (Open-LLM-Leaderboard + Aider benchmarks bundled, daily-CI-refreshed), downloads via the [`hf-hub`](https://crates.io/crates/hf-hub) crate, writes a tuned `config.yaml`. By default it runs **interactively** through a [`cliclack`](https://crates.io/crates/cliclack)-powered stepped wizard; pass `--recommended` (or the hidden `--yes` alias preserved for legacy scripts) to accept every hardware-aware default without prompting. Three per-step flags pre-answer individual prompts without skipping the rest: `--install <brew|gh-releases|existing|custom:PATH>`, `--model <recommended|none|owner/repo>`, `--config-step <write|skip>`. `--json` / `--offline` / `--only` / `--skip` still apply for agent use and post-GPU-swap re-runs.
-- **Colored CLI output** — every human-readable surface now renders success in green, errors in red, warnings in yellow, secondary text dim. Disable globally with `--no-colors`, `NO_COLOR=1`, or by piping stdout to a non-terminal; `--json` output is never colored.
-- **`llamastash doctor`** — read-only diagnostic. Compares current state against the recorded init snapshot, emits typed findings (`binary_missing`, `hardware_drift`, `snapshot_stale`, …) each with a `→ fix with: llamastash init --only X` hint.
-- **`llamastash pull <hf-repo>`** — graduated from the v1 stub. Downloads any GGUF repo into the canonical HF cache layout `llamastash list` already scans.
-- **In-TUI HuggingFace pull dialog (`d` from the model list).** Three-state modal — Search → File picker → Confirm — over the public `/api/models` endpoint. Live debounced search, sortable by Downloads / Likes / Recently Updated / Trending, with cursor-based pagination. The file picker collapses split-shard sets into one logical row and marks per-file hardware fit (`✓` / `⚠` / `✗`). Confirm enqueues a pull on a pinned download strip; already-cached files short-circuit to a toast.
-- **GPU-aware `arch_defaults` config block** — per-architecture launch flags (`qwen2`, `llama`, …) merged into your launch only when you haven't already supplied the flag yourself.
-
-## Roadmap (post-v2)
-
-- Custom themes
-- HTTP and MCP surfaces (origin: R34).
-- Anthropic API compatibility
-- Maybe MLX and vLLM if it's easy to add
-- Docker Ready
-- **Per-PID VRAM attribution via NVML.** Today the right-pane block title surfaces per-model RAM + CPU%; per-model VRAM is reported only at the host level. Post-v2 unlocks per-launch VRAM via NVML's `nvmlDeviceGetComputeRunningProcesses` (Linux + Windows; AMD/Apple parity depends on upstream surface).
-- Smoke phase 2 (daemon-mediated `/health` + chat-completion probe) — v2 ships phase 1 + `--version`.
-- Range-resume on partial HF downloads (waits on a future `hf-hub` line that exposes a custom-`reqwest::Client` hook without a reqwest 0.13 transitive).
+> **AI agents installing this for a user:** jump to [`INSTALL.md` § For AI agents](INSTALL.md#for-ai-agents). The non-interactive install + verify contract, and exit-code branching live there.
 
 ## Install
 
-Pick whichever channel you prefer. All three install the same binary.
+Pick whichever channel you prefer — all install the same binary. Full per-platform notes, troubleshooting, and the agent-friendly non-interactive path live in [`INSTALL.md`](INSTALL.md).
 
 ```bash
 # macOS + Linux, one-shot
@@ -49,22 +22,10 @@ curl -fsSL https://llamastash.cli.rs/install.sh | sh
 brew install llamastash/llamastash/llamastash
 
 # From crates.io (any platform with a Rust toolchain)
-cargo install llamastash
+cargo install llamastash --locked
 ```
 
-The marketing site at [llamastash.cli.rs](https://llamastash.cli.rs) is a content-verified mirror of the install script published with each GitHub Release; for the most paranoid path, run the equivalent `curl ... github.com/llamastash/llamastash/releases/latest/download/install.sh` directly.
-
-You also need `llama-server` on your `PATH` (or pointed at via `--llama-server <path>` / `LLAMASTASH_LLAMA_SERVER`). `llamastash init` will offer to install it for you on first run.
-
-> **macOS release tarballs are not codesigned for 0.2.0.** The `curl | sh`, `brew`, and `cargo install` paths all avoid Gatekeeper quarantine. The only path that hits the quarantine flag is hand-unzipping a tarball from the GitHub Releases page; `xattr -d com.apple.quarantine ./llamastash` clears it once if you do.
-
-### Build from source
-
-```bash
-git clone https://github.com/llamastash/llamastash
-cd llamastash
-cargo install --path .
-```
+Then run `llamastash init` — the interactive wizard installs `llama-server` for your hardware, downloads a starter GGUF, writes a tuned config, and smoke-launches it.
 
 ## Quickstart
 
@@ -72,7 +33,7 @@ cargo install --path .
 # Open the TUI. Scans default caches; daemon auto-spawns on demand.
 llamastash
 
-# List discovered models. TTY → padded + colored table; piped or
+# List discovered models. TTY → padded + table; piped or
 # `--no-colors` → TSV bytes. `--json` is the agent contract.
 llamastash list
 llamastash list --json | jq
@@ -91,26 +52,53 @@ llamastash stop qwen-coder
 
 Full subcommand reference: [`docs/usage.md`](docs/usage.md). Architecture and IPC contract: [`docs/architecture.md`](docs/architecture.md). When things go wrong: [`docs/troubleshooting.md`](docs/troubleshooting.md).
 
-## CLI exit codes
+## Features
 
-Every non-interactive subcommand returns a documented exit code so agent scripts can branch on failure class. Pin against numbers, not message text — they are the public contract.
+### Zero-to-chat in one command
 
-| Code | Meaning                                                                                                                                                                                                               |
-| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `0`  | Success                                                                                                                                                                                                               |
-| `64` | Usage error (missing required arg, invalid combination — clap-emitted)                                                                                                                                                |
-| `65` | Daemon unreachable (socket missing, peer hung up, timeout)                                                                                                                                                            |
-| `66` | Model reference matched zero or multiple models (stderr lists candidates)                                                                                                                                             |
-| `67` | `start_model` failed at the supervisor (probe timeout, port allocation failure)                                                                                                                                       |
-| `68` | `stop_model` / `stop_all` failed                                                                                                                                                                                      |
-| `69` | `pull` download failed (transport, checksum, or HF cache write)                                                                                                                                                       |
-| `70` | `llama-server` binary not found (`--llama-server`, `LLAMASTASH_LLAMA_SERVER`, or `$PATH`)                                                                                                                             |
-| `71` | Unexpected error (catch-all)                                                                                                                                                                                          |
-| `72` | `init` aborted before substantive work — failed precondition, integrity check, or rate-limited GH API. Safe to re-run.                                                                                                |
-| `73` | `init` download failed mid-step — disk space, transport, or HF cache write. Partial state recorded; re-run picks up where it stopped.                                                                                 |
-| `74` | `init` smoke-launch failed — phase-1 dry-run exceeded VRAM ceiling, or `--version` probe returned non-zero. Binary is installed; re-run smoke with `init --only smoke` (v2.1) or use `llamastash doctor` to diagnose. |
+- **`llamastash init` — first-run wizard.** Detects your hardware (NVIDIA, AMD/ROCm, Apple Metal, Vulkan, CPU), installs the right `llama-server` variant (Homebrew on macOS, integrity-verified GitHub Releases prebuilt on Linux), picks a starter GGUF tuned to your VRAM, downloads it into the HuggingFace cache, writes a tuned `config.yaml`, and smoke-launches it — all behind a stepped flow with live progress for every long step. `--recommended` accepts every default; `--only` / `--skip` scope re-runs after GPU swaps; `--json` + `--offline` make it agent-friendly.
+- **Hardware-aware model recommender.** VRAM-fit hard filter + composite ranking (benchmark score × tok/s × params × recency) over a bundled benchmark snapshot refreshed daily by CI (Open-LLM-Leaderboard + Aider Polyglot + curated whichllm catalog). Every pick is auditable: VRAM headroom, benchmark source, estimated tok/s, parameter count, quantization.
+- **`llamastash doctor` — read-only health check.** Compares your live setup against the snapshot init wrote, emits typed findings.
 
-> **Note on sysexits.h**: the numbers above are deliberately reused from `<sysexits.h>` for familiarity, but LlamaStash's _meanings_ diverge from the standard ones. Scripts that import `EX_NOHOST` (68) expecting "host unreachable" will get our "stop failed"; `EX_DATAERR` (65) is reused for "daemon unreachable", not "data error". Branch on LlamaStash's table above, not the libc constants.
+### Discovers what you already have
+
+- **Auto-scans HuggingFace, Ollama, and LM Studio caches.** Plus any user paths you add. Models stream into the catalog incrementally; the TUI stays responsive while scanning.
+- **Rich GGUF intelligence.** Header parser surfaces architecture, parameter count, quantization, native context length, embedded chat template, and reasoning hints. KV-cache-aware memory estimates that account for your chosen context length, not just weights.
+- **Smart deduplication.** Symlinks dedupe to their target; split GGUFs (`*-00001-of-00003.gguf`) collapse into one logical entry; Ollama's content-addressed blobs surface under their human-readable name.
+- **Live filesystem watching.** New GGUFs anywhere under the scan roots appear without restarting.
+
+### Launches anything, supervises everything
+
+- **Daemon-on-demand.** A single binary plays TUI, CLI, and background daemon. The first client auto-spawns the daemon; running models survive TUI close and daemon restart (three-factor orphan re-adoption: PID alive + port listening + `/v1/models` path match).
+- **Multi-model concurrency.** Run as many models as your hardware can hold. Each gets its own port (auto-allocated from a configurable range) and a `Launching → Loading → Ready → Stopping → Stopped` state machine with `/health` probing.
+- **GPU-aware built-in arch defaults.** A static `(architecture, gpu_backend) → flags` table ships in the binary — `llama*`, `qwen2*`, `qwen3*`, `mistral`, `mixtral`, `gemma*`, `phi*`, `deepseek*`, `granite`, `falcon`, `stablelm`, `command-r`, plus a `*` fallback. A fresh install gets sensible `n_gpu_layers` / `flash_attn` on every supported backend, with zero YAML to touch.
+- **Typed launch-knob editor.** Settings tab exposes `ctx`, `reasoning`, `n_gpu_layers`, `threads`, `cache_type_k/v`, `flash_attn`, `mlock`, `no_mmap`, `parallel`, `batch_size`, `ubatch_size`, `rope_freq_scale`, `keep`, plus a free-text `extras` row. Each row shows its **source chip** (`(user)`, `(last used)`, `(arch default)`, `(model default)`, `(server default)`) so you always know where the value came from. Layered resolver: `preset > last-params > yaml arch_defaults > built-in table > llama-server`.
+- **Named presets, favorites, last-params recall.** Save tuned launch profiles per model (`coding`, `long-ctx`, `fast`), star anything you launch often, and have your last successful launch params pre-populated next time.
+
+### A TUI that doesn't get in your way
+
+- **Keyboard-driven everywhere.** Vim-style navigation (`hjkl`), `/` filter, `f` favorite, `u`/`c`/`p` yank URL / curl / path, `t` cycle theme, `?` contextual help. Mouse is optional polish.
+- **Right pane is your smoke test.** Tab-driven Logs / Chat / Embed / Rerank that hits the same OpenAI-compatible endpoints any external client would use — `<think>` blocks collapse in Chat; Embed shows vectors and optional cosine similarity; Rerank stages a query + candidate list. A successful smoke test proves the model is also usable from any external client.
+- **In-TUI HuggingFace browser.** `d` opens a three-state modal — Search → File picker → Confirm — over the live HuggingFace `/api/models` endpoint. Search, sort by Downloads / Likes / Recently Updated / Trending, page-by-page pagination. The file picker collapses shard sets and marks per-file hardware fit (`✓` / `⚠` / `✗`). A pinned download strip surfaces progress and throughput; `Ctrl+X` cancels mid-chunk; `Ctrl+D` deletes a cached repo from disk.
+- **Theming and rebinding.** Five built-in themes (Catppuccin Macchiato default + Latte, Gruvbox Dark, Solarized Dark, Monochrome) plus a `custom_theme` block accepting hex or ANSI names. Every TUI action is rebindable via a `keybindings:` block with a kdash-style key-spec dialect (`ctrl+q`, `shift+tab`, `f1`, …).
+- **Accessible by default.** Status indicators are dual-encoded (color + glyph) so the UI stays legible on monochrome terminals.
+
+### First-class CLI for agents and scripts
+
+- **Subcommands cover every TUI capability.** `list`, `start`, `stop`, `status`, `logs`, `presets`, `favorites`, `last-params`, `daemon`, `init`, `doctor`, `pull`, `recommend` — every read+mutation command supports `--json` as the agent contract. `--no-spawn` opts out of the daemon auto-spawn for scripts that want to fail fast.
+- **Documented exit codes per failure class.** `66` for ambiguous model reference, `67` for launch failure, `69` for `pull` failure, `70` for missing `llama-server`, `72`/`73`/`74` for init phases — pin against numbers, not message text.
+- **Colored TTY output, byte-stable TSV when piped.** Padded + colored tables on a terminal; tab-separated rows when stdout isn't a TTY. `--no-colors` / `NO_COLOR=1` honored. `--json` output is byte-stable regardless.
+- **`llamastash pull <hf-repo>` — standalone HF fetch.** Same `hf-hub`-backed primitive the wizard and the TUI dialog use; honors `HF_TOKEN`, refuses world-readable token files, does a disk-space precheck.
+- **`llamastash recommend` — hardware-aware picks in your shell.** The wizard's recommender without the install / download / config-write steps. Pipe to `jq`.
+- **Reproducible pulls via `--revision <SHA>`.** Pin HF downloads to a specific commit for agent and CI workflows.
+
+### Built to be safe to run
+
+- **Unix-socket peercred auth (`0600`).** Only your own UID can drive the daemon. No tokens to manage; no network surface in v1.
+- **Hardened fetch substrate.** HTTPS-only with a host allowlist, redirect cap, body-size cap, IP-literal refusal. Used for benchmark snapshot fetch, GH Releases install, and HF API calls. `--offline` / `LLAMASTASH_OFFLINE` short-circuits before any DNS.
+- **Archive-bomb defenses on installers.** Entry-count cap, total-size cap, compression-ratio cap; refuses hardlink, symlink, absolute-path, or `..` entries. SHA-256 verified before extract from the GitHub Releases asset's `digest` field.
+- **Atomic, mode-checked config + state writes.** Temp-file + rename, refuses symlinks and group/world-writable parents, `0600` final mode. Corrupt `state.json` is quarantined to `state.json.broken-<ts>` and the daemon boots clean rather than refusing to start.
+- **Side-by-side daemons.** `LLAMASTASH_STATE_DIR` / `LLAMASTASH_CONFIG_DIR` / `LLAMASTASH_CACHE_DIR` / `LLAMASTASH_SOCKET` let you run isolated instances without colliding on persisted state.
 
 ## Configuration
 
@@ -154,18 +142,47 @@ When `model_paths` and `--model-path` are empty, LlamaStash walks these caches a
 
 Files anywhere under these roots that end in `.gguf` (and aren't `.gguf.part`) get parsed and added to the catalog.
 
+## CLI exit codes
+
+Every non-interactive subcommand returns a documented exit code so agent scripts can branch on failure class. Pin against numbers, not message text — they are the public contract.
+
+| Code | Meaning                                                                                                                                                                                                        |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`  | Success                                                                                                                                                                                                        |
+| `64` | Usage error (missing required arg, invalid combination — clap-emitted)                                                                                                                                         |
+| `65` | Daemon unreachable (socket missing, peer hung up, timeout)                                                                                                                                                     |
+| `66` | Model reference matched zero or multiple models (stderr lists candidates)                                                                                                                                      |
+| `67` | `start_model` failed at the supervisor (probe timeout, port allocation failure)                                                                                                                                |
+| `68` | `stop_model` / `stop_all` failed                                                                                                                                                                               |
+| `69` | `pull` download failed (transport, checksum, or HF cache write)                                                                                                                                                |
+| `70` | `llama-server` binary not found (`--llama-server`, `LLAMASTASH_LLAMA_SERVER`, or `$PATH`)                                                                                                                      |
+| `71` | Unexpected error (catch-all)                                                                                                                                                                                   |
+| `72` | `init` aborted before substantive work — failed precondition, integrity check, or rate-limited GH API. Safe to re-run.                                                                                         |
+| `73` | `init` download failed mid-step — disk space, transport, or HF cache write. Partial state recorded; re-run picks up where it stopped.                                                                          |
+| `74` | `init` smoke-launch failed — phase-1 dry-run exceeded VRAM ceiling, or `--version` probe returned non-zero. Binary is installed; re-run smoke with `init --only smoke` or use `llamastash doctor` to diagnose. |
+
+> **Note on sysexits.h**: the numbers above are deliberately reused from `<sysexits.h>` for familiarity, but LlamaStash's _meanings_ diverge from the standard ones. Scripts that import `EX_NOHOST` (68) expecting "host unreachable" will get our "stop failed"; `EX_DATAERR` (65) is reused for "daemon unreachable", not "data error". Branch on LlamaStash's table above, not the libc constants.
+
 ## Platforms
 
-Linux (x86_64, aarch64) and macOS (Apple Silicon, Intel). Windows is out of scope for v1.
+Linux (x86_64, aarch64) and macOS (Apple Silicon, Intel). Windows support is on the roadmap.
 
-## Related projects
+## Roadmap
 
-- [`kdash`](https://github.com/kdash-rs/kdash) — Kubernetes dashboard TUI by the same author. LlamaStash borrows its engineering and release scaffolding from kdash: the org layout (`llamastash/llamastash`, `llamastash/homebrew-llamastash`, `llamastash/llamastash.github.io`), the brew-tap structure, the `cli.rs` subdomain setup, and the release-on-tag workflow shape. The product itself is independent.
-- [`jwt-ui`](https://github.com/jwt-rs/jwt-ui) — JWT decoder / encoder TUI by the same author.
+Tracked in detail in [`TODO.md`](TODO.md). The headline items on deck after the first release:
+
+- **llama.cpp version pinning** — prevent silent drift / incompatibility on `brew upgrade`.
+- **HTTP and MCP server surfaces** — drive the daemon over the network and through the Model Context Protocol, not just the Unix socket.
+- **Anthropic API compatibility** — `/v1/messages` shim on top of the existing OpenAI-compatible endpoints.
+- **Per-PID VRAM attribution** via NVML's `nvmlDeviceGetComputeRunningProcesses`. Today the right pane shows per-model RAM + CPU%; VRAM is reported only at the host level.
+- **GPU/CPU offload split UI** — first-class control over which layers go where.
+- **Windows support** — first-class platform, not a port.
+- **MLX and vLLM backends** — if the surface area lands cheaply alongside llama.cpp.
+- **Docker-ready packaging** — official images plus a documented `docker run` path.
 
 ## Contributing
 
-Bug reports, design discussion, and PRs welcome. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) and the implementation plan referenced at the top of this file.
+Bug reports, design discussion, and PRs welcome. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## AI Usage
 
@@ -174,3 +191,19 @@ Multiple AI Coding Harnesses and LLMs were heavily used to create this project.
 ## License
 
 MIT © Deepu K Sasidharan
+
+## Terms of use
+
+- The Software shall be used for Good, not Evil.
+- This software shall not be used for any military purposes including intelligence agencies.
+
+## Related projects
+
+- [`kdash`](https://github.com/kdash-rs/kdash) — Kubernetes dashboard TUI by the same author. LlamaStash borrows its engineering and release scaffolding from kdash: the org layout (`llamastash/llamastash`, `llamastash/homebrew-llamastash`, `llamastash/llamastash.github.io`), the brew-tap structure, the `cli.rs` subdomain setup, and the release-on-tag workflow shape. The product itself is independent.
+- [`jwt-ui`](https://github.com/jwt-rs/jwt-ui) — JWT decoder / encoder TUI by the same author.
+
+## Star history
+
+If LlamaStash is useful to you, a star helps other people find it.
+
+[![Star History Chart](https://api.star-history.com/svg?repos=llamastash/llamastash&type=Date)](https://star-history.com/#llamastash/llamastash&Date)

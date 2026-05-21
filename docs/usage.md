@@ -121,7 +121,7 @@ Override semantics mirror kdash: the action's existing default binding(s) are re
 | `open_launch_picker` | `Enter` | List |
 | `submit` | `Enter` | Filter, picker, inline edit |
 | `cancel` | `Esc` | Picker, inline edit |
-| `yank_url` / `yank_curl` / `yank_path` | `y` / `Y` / `p` | List |
+| `yank_url` / `yank_curl` / `yank_path` | `u` / `c` / `p` | List |
 | `cycle_theme` | `t` | List |
 | `toggle_help` | `?` | List, right pane |
 | `stop_model` | `s` | List |
