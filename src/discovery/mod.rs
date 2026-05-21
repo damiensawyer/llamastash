@@ -41,7 +41,7 @@ pub struct DiscoveredModel {
   /// sets this is shard 1; for singles it's the file itself.
   pub path: PathBuf,
   /// Directory the file (or shard set) lives in. Discovery groups by
-  /// parent for the TUI's "Models / <dir>" rendering.
+  /// parent for the TUI's "Models / `dir`" rendering.
   pub parent: PathBuf,
   /// Source cache the file was discovered through, if any. `None` for
   /// user-configured `--model-path` roots that don't match a known

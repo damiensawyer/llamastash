@@ -96,12 +96,13 @@ jobs:
 
   msrv:
     # Ensures the declared MSRV (Cargo.toml rust-version) stays honest.
-    # Uses `cargo check --locked` so a dep bump past 1.80 is caught here.
-    name: msrv (1.80)
+    # Uses `cargo check --locked` so a dep bump past the declared MSRV
+    # is caught here.
+    name: msrv (1.85)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.80
+      - uses: dtolnay/rust-toolchain@1.85
       - uses: Swatinem/rust-cache@v2
       - name: cargo check --locked
         run: cargo check --locked

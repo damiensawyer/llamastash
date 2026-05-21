@@ -4,7 +4,7 @@
 //! subcommand handler runs. The three OR-ed off-conditions are:
 //!
 //! 1. `--no-colors` global flag,
-//! 2. `NO_COLOR` env var present and non-empty (per https://no-color.org),
+//! 2. `NO_COLOR` env var present and non-empty (per <https://no-color.org>),
 //! 3. stdout is not attached to a terminal (piped / redirected).
 //!
 //! Any one of these silences ANSI escapes for every helper here and

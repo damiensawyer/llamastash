@@ -54,7 +54,7 @@ pub struct Cli {
 
   /// Disable ANSI color output. Color is also disabled automatically
   /// when `NO_COLOR` is set in the environment (any non-empty value;
-  /// see https://no-color.org) or when stdout is not a terminal
+  /// see <https://no-color.org>) or when stdout is not a terminal
   /// (piped / redirected). `--json` output is never colored.
   #[arg(long, global = true, action = ArgAction::SetTrue)]
   pub no_colors: bool,
