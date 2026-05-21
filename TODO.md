@@ -23,28 +23,32 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 ### Blockers
 
 - [x] ~~Init does not hand off to TUI after all steps.~~ — `init` now prompts to launch the TUI on success (auto-launch with `--recommended`, skip with `--no-tui`).
-- [ ] Some HF downloaded models fail to start??
-- [ ] random HF download failure ◓  Downloading 1/1 `Qwen_Qwen3.6-27B-Q8_0.gguf` (~27767.6 MiB)                                                                     ✗ init download: hf-hub: request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): client error (SendRequest): connection error: Connection timed out (os error 110)
-- [ ] copy action should show a visual confirmation.
+- [ ] Add copy feature for logs pane. When in log pane, c should copy the full log text to clipboard and show a visual confirmation (e.g. a toast or temporary message in the UI).
+- [ ] copy actions(url,path,curl,logs) should show a visual confirmation (e.g. a toast or temporary message in the UI).
+- [x] ~~The UI here in `init` doesn't look nice. Make those info inline with remaining UI.~~ — summary now renders via `cliclack::note` so every line keeps the panel border, then a single-line `outro` closes the session.
+
+- [ ] **In progress**: Proxy router that maps a single endpoint to running models by model name. If the model isn't running, start it; if launch fails, fall back to a running model when one is available; otherwise error. Keep it OpenCode / π compatible so agents and tools can hit one URL.
 
 ### Release checklist
 
-- [ ] **Need brainstorm/plan**: Benchmark against ollama, LMStudio and other popular options.
+- [ ] **In progress**: Benchmark against ollama, LMStudio and other popular options.
+- [ ] **In progress**: Update Readme, repo, org and website properly
 - [ ] Audit (binary size, dependencies, test coverage, security, etc.).
-- [ ] Update Readme, repo, org and website properly
 - [ ] Check and sync all docs, validate all repo docs
 - [ ] Release setup validation (website/CI/CD etc).
 - [ ] Add llamastash to cli.rs https://github.com/zackify/cli.rs/pull/1/changes — Unit 7 cutover step, post-org-bootstrap.
 - [ ] Add Agent Skills.
-
-### Follow-up
-
-- [ ] **Need brainstorm/plan**: Proxy router that maps a single endpoint to running models by model name. If the model isn't running, start it; if launch fails, fall back to a running model when one is available; otherwise error. Keep it OpenCode / π compatible so agents and tools can hit one URL.
-- [ ] **Release pipeline ops** — secret/token plumbing around `release.yml` and the org bootstrap.
-  - [ ] Write `docs/runbooks/secret-rotation.md` — operational steps for rotating `CRATES_IO_TOKEN` + `GH_BUMP_TOKEN`. Referenced from [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md) §"Token rotation cadence".
 - [ ] **R1 launch promotion** — telling the world about v0.0.1.
   - [ ] **Need brainstorm/plan**: Release blog.
   - [ ] **Need brainstorm/research/plan**: Social promotion — research an approach for max reach.
+
+### Follow-up
+
+- [ ] **Release pipeline ops** — secret/token plumbing around `release.yml` and the org bootstrap.
+  - [ ] Write `docs/runbooks/secret-rotation.md` — operational steps for rotating `CRATES_IO_TOKEN` + `GH_BUMP_TOKEN`. Referenced from [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md) §"Token rotation cadence".
+- [ ] Some HF downloaded models fail to start??
+- [ ] random HF download failure ◓ Downloading 1/1 `Qwen_Qwen3.6-27B-Q8_0.gguf` (~27767.6 MiB) ✗ init download: hf-hub: request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): client error (SendRequest): connection error: Connection timed out (os error 110)
+- [ ]
 
 ### Good to have
 

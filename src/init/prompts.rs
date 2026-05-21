@@ -211,15 +211,23 @@ pub fn intro(hardware: &HardwareSnapshot) {
 
 /// Render the cliclack outro panel with the summary's headline plus
 /// the "what landed" lines from the existing `print_handoff` body.
+///
+/// The multi-line "what landed" block goes through `cliclack::note`
+/// so every line picks up the bordered-panel chrome (otherwise only
+/// the first line gets the `└  ` prefix and the rest escape the
+/// visual frame). A single-line `cliclack::outro` closes the session.
 pub fn outro(summary: &InitSummary) {
   let mut body = String::new();
-  body.push_str(&format!("steps_ran: {:?}\n", summary.steps_ran));
+  body.push_str(&format!("steps_ran:     {:?}", summary.steps_ran));
   if !summary.steps_skipped.is_empty() {
-    body.push_str(&format!("steps_skipped: {:?}\n", summary.steps_skipped));
+    body.push_str(&format!(
+      "\nsteps_skipped: {:?}",
+      summary.steps_skipped
+    ));
   }
   if let Some(install) = &summary.install {
     body.push_str(&format!(
-      "install: {} → {}\n",
+      "\ninstall:       {} → {}",
       install.method,
       install.path.display()
     ));
@@ -227,7 +235,7 @@ pub fn outro(summary: &InitSummary) {
   if let Some(model) = &summary.model {
     if !model.repo.is_empty() {
       body.push_str(&format!(
-        "model: {} ({:.1} MiB across {} file(s))\n",
+        "\nmodel:         {} ({:.1} MiB across {} file(s))",
         model.repo,
         model.total_bytes as f64 / (1024.0 * 1024.0),
         model.files.len()
@@ -236,15 +244,15 @@ pub fn outro(summary: &InitSummary) {
   }
   if let Some(cfg) = &summary.config {
     body.push_str(&format!(
-      "config: wrote {} bytes to {}\n",
+      "\nconfig:        wrote {} bytes to {}",
       cfg.written_bytes,
       cfg.path.display()
     ));
   }
-  body.push_str(
+  let _ = cliclack::note("init summary", body);
+  let _ = cliclack::outro(
     "Next: run `llamastash` to enter the TUI, or `llamastash list` to see discovered models.",
   );
-  let _ = cliclack::outro(body);
 }
 
 /// Pre-formatted "detected: …" block used by both `intro` and the
