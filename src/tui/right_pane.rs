@@ -245,6 +245,34 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
             chips.push(chip);
           }
         }
+        // Surface `e:edit` so the extras row (and numeric / enum
+        // knobs) is discoverable. Without this chip, `e` looked like
+        // a no-op on the editable form because nothing in the hint
+        // strip pointed at it. Leads the cycle chips because edit is
+        // the primary mutation verb on this form. While a row's
+        // inline edit buffer is open (numeric/enum typing or the
+        // extras free-text field), the chip flips to the bound
+        // `exit_edit` key (default `Esc`) so the escape hatch from
+        // the captured-input mode is visible. The lookup rides on
+        // `Focus::ChatInput` because `handle_settings_inline_edit`
+        // resolves the cancel key through the same focus — keep the
+        // chip and the handler in lockstep so rebinds flow through.
+        let inline_editing = app
+          .launch_picker
+          .as_ref()
+          .map(|p| p.inline_edit.is_open() || p.extras_editing)
+          .unwrap_or(false);
+        if inline_editing {
+          push(
+            &mut chips,
+            app.hint_with(Focus::ChatInput, Action::ExitEdit, "clear"),
+          );
+        } else {
+          push(
+            &mut chips,
+            app.hint_with(Focus::RightPane, Action::EnterEdit, "edit"),
+          );
+        }
         if let (Some(down), Some(up)) = (
           app.hint_with(Focus::RightPane, Action::MoveDown, "cycle fields"),
           app.hint_with(Focus::RightPane, Action::MoveUp, "cycle fields"),
@@ -257,14 +285,6 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
         ) {
           chips.push(bidirectional_chip(&prev, &next, "cycle value"));
         }
-        // Surface `e:edit` so the extras row (and numeric / enum
-        // knobs) is discoverable. Without this chip, `e` looked like
-        // a no-op on the editable form because nothing in the hint
-        // strip pointed at it.
-        push(
-          &mut chips,
-          app.hint_with(Focus::RightPane, Action::EnterEdit, "edit"),
-        );
         push(&mut chips, app.hint(Focus::RightPane, Action::YankPath));
       }
     }
@@ -649,6 +669,80 @@ mod tests {
     assert!(chips.contains(&"p:path".to_string()));
     assert!(!chips.iter().any(|c| c.contains("u:url")));
     assert!(!chips.iter().any(|c| c.contains("c:curl")));
+  }
+
+  #[test]
+  fn settings_bottom_chips_flip_e_edit_to_esc_clear_while_editing() {
+    // When a knob row's inline edit (or the extras buffer) is open,
+    // global keys are captured by the editor — surface `Esc:clear`
+    // instead of `e:edit` so the escape hatch is visible.
+    use crate::tui::keybindings::Focus;
+    use crate::tui::launch_picker::PickerField;
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake_model()];
+    app.list_cursor = 2;
+    app.focus = Focus::RightPane;
+    app.right_tab = RightTab::Settings;
+    app.open_launch_picker();
+    // Baseline: picker open, no inline edit → e:edit visible.
+    let baseline = bottom_hint_chips(&app);
+    assert!(baseline.contains(&"e:edit".to_string()));
+    assert!(!baseline.contains(&"Esc:clear".to_string()));
+    // Open inline edit on a numeric field — chip flips.
+    {
+      let picker = app.launch_picker.as_mut().unwrap();
+      picker.inline_edit.open(
+        PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx),
+        String::new(),
+      );
+    }
+    let inline = bottom_hint_chips(&app);
+    assert!(inline.contains(&"Esc:clear".to_string()));
+    assert!(!inline.contains(&"e:edit".to_string()));
+    // Close inline edit, switch to extras editing — chip still flips.
+    {
+      let picker = app.launch_picker.as_mut().unwrap();
+      picker.inline_edit.close();
+      picker.extras_editing = true;
+    }
+    let extras = bottom_hint_chips(&app);
+    assert!(extras.contains(&"Esc:clear".to_string()));
+    assert!(!extras.contains(&"e:edit".to_string()));
+  }
+
+  #[test]
+  fn settings_inline_edit_clear_chip_follows_exit_edit_override() {
+    // Rebinding `chat_input.exit_edit` (the canonical home for the
+    // `ExitEdit` action) must flow through to the inline-edit chip
+    // strip — same lookup, same focus, so the chip stays honest.
+    use crate::tui::keybindings::{Focus, KeyMap};
+    use crate::tui::launch_picker::PickerField;
+    use std::collections::BTreeMap;
+    let mut keymap = KeyMap::default();
+    let overrides: BTreeMap<String, String> = [(String::from("exit_edit"), String::from("ctrl+x"))]
+      .into_iter()
+      .collect();
+    let warnings = keymap.apply_overrides(&overrides);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let mut app = App::new(AppOptions {
+      keymap,
+      ..AppOptions::default()
+    });
+    app.models = vec![fake_model()];
+    app.list_cursor = 2;
+    app.focus = Focus::RightPane;
+    app.right_tab = RightTab::Settings;
+    app.open_launch_picker();
+    let picker = app.launch_picker.as_mut().unwrap();
+    picker.inline_edit.open(
+      PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx),
+      String::new(),
+    );
+    let chips = bottom_hint_chips(&app);
+    assert!(
+      chips.iter().any(|c| c == "Ctrl+x:clear"),
+      "expected rebound chip, got {chips:?}"
+    );
   }
 
   #[test]

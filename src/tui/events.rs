@@ -344,20 +344,30 @@ fn settings_inline_edit_open(app: &App) -> bool {
 }
 
 fn handle_settings_inline_edit(app: &mut App, key: KeyEvent) {
+  // Resolve the cancel key through the chat-input bindings so custom
+  // `exit_edit` overrides (the same lever the chip strip surfaces)
+  // flow through to behaviour here too. Default keymap binds
+  // `ChatInput::ExitEdit` to `Esc`, matching the legacy hardcode.
+  let is_exit_edit = matches!(
+    app.action_for(Focus::ChatInput, key.code, key.modifiers),
+    Some(Action::ExitEdit)
+  );
   let Some(picker) = app.launch_picker.as_mut() else {
     return;
   };
-  // Esc cancels the inline edit; Backspace deletes; Char inserts.
-  match key.code {
-    KeyCode::Esc => {
-      if picker.extras_editing {
-        picker.extras_editing = false;
-        picker.extras_buffer.clear();
-        picker.extras_cursor = 0;
-      } else {
-        picker.inline_edit.close();
-      }
+  if is_exit_edit {
+    if picker.extras_editing {
+      picker.extras_editing = false;
+      picker.extras_buffer.clear();
+      picker.extras_cursor = 0;
+    } else {
+      picker.inline_edit.close();
     }
+    return;
+  }
+  // Backspace deletes; Char inserts. Other keys are swallowed so the
+  // buffer doesn't see global hotkeys like arrows.
+  match key.code {
     KeyCode::Backspace => {
       if picker.extras_editing {
         if picker.extras_cursor > 0 {
@@ -712,14 +722,18 @@ fn apply_arrow_in_pane(app: &mut App, dir: ArrowDir) {
       RightTab::Settings => match dir {
         ArrowDir::Up => {
           if running_view_is_locked(app) {
-            app.running_view_scroll = app.running_view_scroll.saturating_sub(1);
+            app
+              .running_view_scroll
+              .set(app.running_view_scroll.get().saturating_sub(1));
           } else {
             apply_prev_field(app)
           }
         }
         ArrowDir::Down => {
           if running_view_is_locked(app) {
-            app.running_view_scroll = app.running_view_scroll.saturating_add(1);
+            app
+              .running_view_scroll
+              .set(app.running_view_scroll.get().saturating_add(1));
           } else {
             apply_next_field(app)
           }
@@ -3862,16 +3876,20 @@ mod tests {
     app.go_top();
     app.focus = Focus::RightPane;
     app.right_tab = RightTab::Settings;
-    assert_eq!(app.running_view_scroll, 0);
+    assert_eq!(app.running_view_scroll.get(), 0);
     pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(app.running_view_scroll, 1, "↓ must scroll one row down");
+    assert_eq!(
+      app.running_view_scroll.get(),
+      1,
+      "↓ must scroll one row down"
+    );
     pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(app.running_view_scroll, 2);
+    assert_eq!(app.running_view_scroll.get(), 2);
     pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
-    assert_eq!(app.running_view_scroll, 1, "↑ must scroll one row up");
+    assert_eq!(app.running_view_scroll.get(), 1, "↑ must scroll one row up");
     pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
     pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
-    assert_eq!(app.running_view_scroll, 0, "↑ saturates at 0");
+    assert_eq!(app.running_view_scroll.get(), 0, "↑ saturates at 0");
   }
 
   #[test]

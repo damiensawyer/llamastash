@@ -5,6 +5,7 @@
 //! the TestBackend smoke test and the inline unit tests assert
 //! behaviour without spinning up tokio.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -188,7 +189,15 @@ pub struct App {
   /// typed knobs, extras, footer); on a short viewport the user
   /// scrolls with ↑/↓. Resets on model-list nav and when the picker
   /// opens or closes.
-  pub running_view_scroll: u16,
+  ///
+  /// `Cell` so the render path (which holds `&App`) can write back
+  /// the clamped value when the stored offset drifts past
+  /// `max_scroll` — without writeback, holding ↓ past the bottom
+  /// would inflate the stored offset and the next ↑ press would
+  /// appear to do nothing until the value dropped back below
+  /// `max_scroll`. Same pattern as
+  /// [`LaunchPickerState::scroll_offset`].
+  pub running_view_scroll: Cell<u16>,
   pub toast: Option<(String, Instant)>,
   pub daemon_connected: bool,
   /// Snapshot of the daemon-side metadata block from the most recent
@@ -298,7 +307,7 @@ impl App {
       list_cursor: 0,
       filter_input: crate::tui::input_field::InputField::new(),
       launch_picker: None,
-      running_view_scroll: 0,
+      running_view_scroll: Cell::new(0),
       toast: None,
       daemon_connected: false,
       daemon_info: DaemonInfo::default(),
@@ -841,7 +850,7 @@ impl App {
     if before != after {
       // Scroll offset is per-focused-model; clear it on cursor moves
       // so the new model's running-launch view opens at the top.
-      self.running_view_scroll = 0;
+      self.running_view_scroll.set(0);
     }
     if self.launch_picker.is_none() {
       return;
@@ -1032,14 +1041,14 @@ impl App {
       }
     }
     self.launch_picker = Some(picker);
-    self.running_view_scroll = 0;
+    self.running_view_scroll.set(0);
     self.right_tab = RightTab::Settings;
     self.focus = Focus::RightPane;
   }
 
   pub fn close_launch_picker(&mut self) {
     self.launch_picker = None;
-    self.running_view_scroll = 0;
+    self.running_view_scroll.set(0);
     self.focus = Focus::List;
     self.right_tab = RightTab::Settings;
   }

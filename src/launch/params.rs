@@ -57,6 +57,15 @@ fn is_secret_head(head: &str) -> bool {
 /// Callers must never display the *raw* extras list — only the
 /// redacted strings returned here — so a typo'd secret can't land in
 /// scrollback or daemon error logs.
+///
+/// Only the equals-form (`--api-key=foo`) needs explicit redaction
+/// here: space-form values (`["--api-key", "foo"]`) arrive as their
+/// own free-standing tokens, and `"foo"` on its own doesn't match
+/// any forbidden head — so it's silently passed through this filter.
+/// The launch is still refused on the basis of the `--api-key` head
+/// alone, and the value never lands in the returned banned list.
+/// `redact_for_display` does the peek-and-redact for space-form
+/// because compose echoes the *full* extras tail back to the user.
 pub fn forbidden_in_extras(extras: &[OsString]) -> Vec<String> {
   extras
     .iter()
@@ -127,11 +136,24 @@ pub struct LaunchParams {
   pub mode: LaunchMode,
   /// Context length. `None` lets `llama-server` use the GGUF's
   /// native value (no `-c` flag).
+  ///
+  /// **Persistence note:** on a running launch this holds the
+  /// *resolved* ctx the supervisor argv-ified (after the
+  /// `user > last_used > arch_defaults > builtin > model_default`
+  /// chain). It may differ from `knobs.ctx`, which holds the
+  /// *user-supplied delta* — the field the editor seeds `user_knobs`
+  /// from on return. Read `knobs.ctx` for source-chip semantics;
+  /// read this for what actually shipped on the wire.
   pub ctx: Option<u32>,
   /// Listening port. `None` leaves port allocation to the supervisor.
   pub port: Option<u16>,
   /// Reasoning bundle on/off. When `true`, supervisor appends
   /// `--jinja --reasoning-format deepseek` to the argv.
+  ///
+  /// **Persistence note:** like `ctx` above, this is the *resolved*
+  /// value collapsed to a bool (`None`/`Some(false)` → `false`).
+  /// May differ from `knobs.reasoning`, which keeps the tri-state
+  /// `Option<bool>` the user actually supplied.
   pub reasoning: bool,
   /// Resolved typed knobs — argvified before `extras` in canonical
   /// flag order. `None`-fields are skipped (no flag emitted).

@@ -60,8 +60,13 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
       // window resize doesn't leave the view blanked. The stored
       // scroll is bumped freely by ↑/↓ event handlers — this is the
       // single point that ensures the rendered offset is in-bounds.
+      // Write the clamped value back so over-scrolling past the
+      // bottom doesn't inflate the stored offset (which would make a
+      // subsequent ↑ press feel unresponsive until the offset
+      // dropped back below `max_scroll`).
       let max_scroll = (lines.len() as u16).saturating_sub(area.height);
-      let scroll = app.running_view_scroll.min(max_scroll);
+      let scroll = app.running_view_scroll.get().min(max_scroll);
+      app.running_view_scroll.set(scroll);
       frame.render_widget(
         Paragraph::new(lines)
           .scroll((scroll, 0))

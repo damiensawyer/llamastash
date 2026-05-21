@@ -478,6 +478,146 @@ async fn start_model_refuses_forbidden_extras_without_leaking_secret_values() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn last_params_persists_only_user_supplied_knob_deltas() {
+  // Source-chip semantics on the editor depend on a precise contract:
+  // `last_params.params.knobs` holds the *user-supplied delta*, not
+  // the resolved knob set. A knob the user never touched must stay
+  // `None` on disk so the next launch can re-resolve it from yaml /
+  // built-in / model default and surface the correct chip; freezing
+  // it as `(last used)` would silently erode the chain.
+  //
+  // We exercise the contract end-to-end by doing two starts: the
+  // first stamps `last_used`, the second supplies a *different*
+  // user delta. The resolver will pull the first call's `threads`
+  // into call 2's resolved knobs (via the `last_used` layer), but
+  // the persisted entry for call 2 must only carry the new delta
+  // (`mlock = true`), not the carried-over `threads`.
+  let state = unique_temp("last-params-delta");
+  let model_dir = unique_temp("last-params-delta-models");
+  let model_path = model_dir.join("m.gguf");
+  std::fs::write(&model_path, build_minimal_gguf("llama")).unwrap();
+  let model_path_canon = std::fs::canonicalize(&model_path).unwrap();
+
+  // Two-port range so the second start has somewhere to land after
+  // the first call's socket releases.
+  let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+  let p0 = probe.local_addr().unwrap().port();
+  drop(probe);
+  let probe2 = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+  let p1 = probe2.local_addr().unwrap().port();
+  drop(probe2);
+  let (lo, hi) = if p0 < p1 { (p0, p1) } else { (p1, p0) };
+
+  let opts = DaemonOptions {
+    binary: Some(fake_binary()),
+    port_range: PortRange { start: lo, end: hi },
+    ..DaemonOptions::rooted_at(state.clone())
+  };
+  let socket = opts.socket_path.clone();
+  let state_dir = opts.state_dir.clone();
+  let daemon = tokio::spawn(async move { run_foreground(opts).await });
+  wait_for_socket(&socket).await;
+  let mut client = Client::connect(&socket).await.expect("connect");
+
+  // Call 1: user supplies `threads = 4`. After Ready, the recorder
+  // task persists this entry so call 2's resolver sees it under the
+  // `LastUsed` layer.
+  let first = client
+    .call(
+      "start_model",
+      Some(json!({
+        "model_path": &model_path_canon,
+        "knobs": {"threads": 4},
+      })),
+    )
+    .await
+    .expect("start_model call 1");
+  let first_launch = first["launch_id"].as_str().unwrap().to_string();
+
+  // Wait for call 1's persistence to land before issuing call 2.
+  let deadline = std::time::Instant::now() + Duration::from_secs(5);
+  loop {
+    let s = state_store::load(&state_dir).expect("load state");
+    if !s.last_params.is_empty() && s.last_params[0].params.knobs.threads == Some(4) {
+      break;
+    }
+    if std::time::Instant::now() > deadline {
+      panic!("call 1 last_params.threads never persisted");
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+  }
+
+  // Stop call 1 so its port is free and the second start doesn't
+  // collide.
+  let _ = client
+    .call(
+      "stop_model",
+      Some(json!({"launch_id": &first_launch, "grace_secs": 5})),
+    )
+    .await
+    .expect("stop_model");
+
+  // Call 2: user supplies a *different* delta (`mlock = true`). The
+  // resolver will inherit `threads = 4` from `last_used`, but the
+  // *persisted* knobs for call 2 must NOT carry it forward — only
+  // the new user-supplied `mlock` belongs in the delta.
+  let _ = client
+    .call(
+      "start_model",
+      Some(json!({
+        "model_path": &model_path_canon,
+        "knobs": {"mlock": true},
+      })),
+    )
+    .await
+    .expect("start_model call 2");
+
+  // Poll for call 2's persistence — upsert promotes the entry to the
+  // front of the Vec, so once `mlock == Some(true)` lands at index 0
+  // we know the recorder fired for call 2.
+  let deadline = std::time::Instant::now() + Duration::from_secs(5);
+  let knobs = loop {
+    let s = state_store::load(&state_dir).expect("load state");
+    if let Some(entry) = s.last_params.first() {
+      if entry.params.knobs.mlock == Some(true) {
+        break entry.params.knobs.clone();
+      }
+    }
+    if std::time::Instant::now() > deadline {
+      panic!("call 2 last_params.mlock never persisted");
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+  };
+
+  // The contract: only the call-2 delta survives on disk.
+  assert_eq!(
+    knobs.mlock,
+    Some(true),
+    "user-supplied mlock must persist verbatim"
+  );
+  assert_eq!(
+    knobs.threads, None,
+    "threads came from `last_used` resolver layer, NOT user input on \
+     call 2 — persistence must drop it so the source chip can stay \
+     `(last used)` on the next launch rather than collapsing to \
+     `(user)`. Got: {:?}",
+    knobs.threads
+  );
+  // Spot-check a few other fields that the resolver might fill (GPU
+  // backends seed `n_gpu_layers`; some arches seed `flash_attn`).
+  // Whatever the resolver decided, none of it is in the user delta.
+  assert_eq!(knobs.n_gpu_layers, None);
+  assert_eq!(knobs.flash_attn, None);
+  assert_eq!(knobs.ctx, None);
+  assert_eq!(knobs.reasoning, None);
+
+  let _ = client.call("shutdown", None).await;
+  let _ = timeout(Duration::from_secs(3), daemon).await;
+  std::fs::remove_dir_all(&state).ok();
+  std::fs::remove_dir_all(&model_dir).ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_model_returns_error_when_binary_unconfigured() {
   // Production daemon resolves the binary at startup; if it wasn't
   // resolved (e.g. user has no `llama-server` on PATH), `start_model`
