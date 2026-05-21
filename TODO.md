@@ -19,15 +19,14 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 ## v1+ release blockers
 
 - [ ] Download fails for many models in `init --only models` (for example -> init download: HF tree listing for `Qwen/Qwen3-Next-80B-A3B-Instruct` returned zero matching files)
-- [ ] Remap Shift+Q to Ctrl+Q for killing deamon.
-- [ ] Remove Ctrl+R, Ctrl+Q from top bar hints.
+- [x] Remap Shift+Q to Ctrl+Q for killing deamon.
+- [x] Remove Ctrl+R, Ctrl+Q from top bar hints.
 - [x] **In progress**: init should show progress and text descriptions of what its doing (like installing llama.cpp via brew, Installed llama.cpp, downloading models, download complete, etc.) instead of just a blinking line.
 - [x] **In progress**: Init install method doesnt offer custom path as option.
 - [x] ~~Better/colorful/formatted CLI output for commands (daemon, list, status, presets, doctor etc).~~ Shipped via [`docs/plans/2026-05-20-002-feat-colorful-cli-output-plan.md`](docs/plans/2026-05-20-002-feat-colorful-cli-output-plan.md).
 - [ ] **In progress**: Built in architecture defaults for all popular architectures, a default for all others. Advanced modal - replace free-text editor with typed key/value fields like settings; Its should be populated with architecture defaults for the model. keys = advanced options for the model, values = last settings or architecture default; pre-populate from the model's last params or architecture defaults and let users edit before launch. Requires a refactor of the advanced modal to support dynamic fields. Consider showing this inline in settings pane instead of a modal dialog, unless you think thats not good idea. Also provide a free text fields where user can enter arbitrary extra params that we won't show in the UI, for power users who want to use features we don't yet support in the UI.
 - [ ] **In progress**: HuggingFace pull TUI dialog with search / sort / pagination (origin: R46, [`docs/plans/2026-05-13-001-feat-llamatui-v1-launcher-plan.md`](docs/plans/2026-05-13-001-feat-llamatui-v1-launcher-plan.md)).
-- [ ] **In progress**: Built in architecture defaults for all popular architectures, a default for all others. Advanced modal - replace free-text editor with typed key/value fields like settings; Its should be populated with architecture defaults for the model. keys = advanced options for the model, values = last settings or architecture default; pre-populate from the model's last params or architecture defaults and let users edit before launch. Requires a refactor of the advanced modal to support dynamic fields. Consider showing this inline in settings pane instead of a modal dialog, unless you think thats not good idea. Also provide a free text fields where user can enter arbitrary extra params that we won't show in the UI, for power users who want to use features we don't yet support in the UI.
-  - [ ] **In progress**: Models downloaded from HF has cryptic names; we should rename them to something human friendly and show that in the UI instead of the HF ID.
+- [ ] **In progress**: Models downloaded from HF has cryptic names; we should rename them to something human friendly and show that in the UI instead of the HF ID.
 - [x] ~~if `--llama-server` is passed, add it as fallback in config file and use it when llama-server is not on path.~~ Shipped 2026-05-20 — `cli::dispatch` writes the resolved path to `config.yaml`'s `llama_server_path` key whenever the flag differs from the configured value (best-effort).
 - [x] ~~best-model (find nicer alias) command. reuse `init --models` and just download the best model for current setup/hardware~~ Shipped 2026-05-20 — `llamastash recommend` wraps `init --only models --recommended` with the same `--json` / `--offline` / `--model` / `--revision` surface.
 - [x] ~~`R:restart` daemon hotkey.~~ Shipped 2026-05-20 — `R` (Shift+r) triggers a confirmation popup, then the TUI's writer task issues `shutdown` and `start_detached`s a fresh daemon with the same `DaemonOptions` the parent CLI resolved.
@@ -44,7 +43,6 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 - [ ] Release setup validation (website/CI/CD etc)
 - [ ] Add llamastash to cli.rs https://github.com/zackify/cli.rs/pull/1/changes — Unit 7 cutover step, post-org-bootstrap.
 - [ ] Write `docs/runbooks/secret-rotation.md` — operational steps for rotating `CRATES_IO_TOKEN` + `GH_BUMP_TOKEN`. Referenced from [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md) §"Token rotation cadence".
-- [ ] **Need brainstorm/plan**: Migrate release pipeline secrets from PATs to a scoped GitHub App with OIDC. Eliminates `GH_BUMP_TOKEN` rotation and shrinks token blast radius. Deferred from 0.0.1 per the release-setup plan §"Token rotation surface".
 - [ ] **Need brainstorm/plan**: Release blog.
 - [ ] **Need brainstorm/research/plan**:Social promotion — research an approach for max reach.
 - [x] ~~Release setup: website, brew tap, etc. (KDash-style).~~ shipped via [`docs/plans/2026-05-19-003-feat-0.2.0-release-setup-plan.md`](docs/plans/2026-05-19-003-feat-0.2.0-release-setup-plan.md) + [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md). Org-admin bootstrap (creating repos, secrets, Pages) still pending — see runbook.
@@ -52,6 +50,7 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 
 ## v2+ roadmap
 
+- [ ] **Need brainstorm/plan**: Migrate release pipeline secrets from PATs to a scoped GitHub App with OIDC. Eliminates `GH_BUMP_TOKEN` rotation and shrinks token blast radius. Deferred from 0.0.1 per the release-setup plan §"Token rotation surface".
 - [ ] **Need brainstorm/plan**: Plan to prevent llama.cpp version drift/incompatibility issues. Should we bundle/fix version.
 - [ ] **Need brainstorm/plan**: Windows support.
 - [ ] **Need brainstorm/plan**: HTTP and MCP surfaces (origin: R34).
