@@ -14,7 +14,6 @@ the harness is uniform across tools by sticking to the shim.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
@@ -31,7 +30,6 @@ from .base import (
   Mode,
   NormalizedKnobs,
   ReadinessTimeoutError,
-  ToolNotFoundError,
   file_sha256,
   ready_timeout_from_env,
   require_on_path,

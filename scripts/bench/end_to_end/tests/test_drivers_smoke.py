@@ -25,9 +25,7 @@ from scripts.bench.end_to_end.drivers import (
 )
 from scripts.bench.end_to_end.drivers.base import (
   DEFAULT_PORT_BASE,
-  ImportIntegrityError,
   Mode,
-  ModelHandle,
   NormalizedKnobs,
   ReadinessTimeoutError,
   ToolNotFoundError,

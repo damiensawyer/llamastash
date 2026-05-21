@@ -196,7 +196,7 @@ overhead/orchestrator.py
 
 ## Implementation Units
 
-- [ ] **Unit 1: Bench harness skeleton + JSON schema + provenance**
+- [x] **Unit 1: Bench harness skeleton + JSON schema + provenance**
 
 **Goal:** Lay down the shared package skeleton, the R134 schema, and host/tool provenance capture. Establishes the entry shape both suites consume.
 
@@ -238,7 +238,7 @@ overhead/orchestrator.py
 
 ---
 
-- [ ] **Unit 2: Per-tool drivers (llamastash, llamacpp, ollama, lmstudio)**
+- [x] **Unit 2: Per-tool drivers (llamastash, llamacpp, ollama, lmstudio)**
 
 **Goal:** Implement the four `Driver` Protocol conformers. Each driver knows how to find its tool, declare its version, prepare a GGUF for loading, start it on a free port with defaults or normalized settings, and stop it cleanly.
 
@@ -283,7 +283,7 @@ overhead/orchestrator.py
 
 ---
 
-- [ ] **Unit 3: Workload runners + metrics + GPU sampling (shared module refactor)**
+- [x] **Unit 3: Workload runners + metrics + GPU sampling (shared module refactor)**
 
 **Goal:** The four workloads (R131), the metric calculators (R132), the fairness self-check (R141), and a refactor of the per-backend GPU samplers out of `scripts/measure-overhead-band.py` into a shared module.
 
@@ -326,7 +326,7 @@ overhead/orchestrator.py
 
 ---
 
-- [ ] **Unit 4: LlamaStash env-var hook (`LLAMASTASH_BENCH_DISABLE_DEFAULTS`)**
+- [x] **Unit 4: LlamaStash env-var hook (`LLAMASTASH_BENCH_DISABLE_DEFAULTS`)**
 
 **Goal:** When the env var is set, the launch resolver chain (`user > last_used > arch_defaults > builtin > model_default`) collapses to "user only" — presets, last-params, arch-defaults table, and built-in defaults all skip. The Rust hook the bench script depends on.
 
@@ -364,7 +364,7 @@ overhead/orchestrator.py
 
 ---
 
-- [ ] **Unit 5: Aggregation + rendering pipeline (variance gate, charts, dated results pages)**
+- [x] **Unit 5: Aggregation + rendering pipeline (variance gate, charts, dated results pages)**
 
 **Goal:** Read all `docs/benchmarks/runs/**/*.json`, apply the R140 variance gate, render Markdown tables + SVG charts, write a dated results page, and update the benchmarks index.
 
@@ -402,7 +402,7 @@ overhead/orchestrator.py
 
 ---
 
-- [ ] **Unit 6: Suite A overhead orchestrator + two-tier threshold harness**
+- [x] **Unit 6: Suite A overhead orchestrator + two-tier threshold harness**
 
 **Goal:** The `llamastash start <model>` vs raw `llama-server` overhead suite. Reuses Units 1–5 modules; adds the orchestrator, thresholds JSON, bash wrapper, and run procedure documentation.
 
@@ -442,7 +442,7 @@ overhead/orchestrator.py
 
 ---
 
-- [ ] **Unit 7: Methodology doc + benchmarks index + README "Benchmarks" section**
+- [x] **Unit 7: Methodology doc + benchmarks index + README "Benchmarks" section**
 
 **Goal:** The unconditional-ship docs that explain what the harness does, how to re-run it, and the per-tool fairness notes. Lands before any results page so the methodology has a stable home from day one.
 

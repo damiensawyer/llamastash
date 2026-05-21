@@ -28,7 +28,6 @@ from .base import (
   Mode,
   NormalizedKnobs,
   ReadinessTimeoutError,
-  ToolNotFoundError,
   ready_timeout_from_env,
   require_on_path,
   wait_for_http_200,
