@@ -1,10 +1,10 @@
-//! Settings tab — launch-parameter form for the focused model.
+//! Settings tab — typed-knob launch editor for the focused model.
 //!
-//! Renders the editable form fields when no managed launch exists
-//! for the focused model, or the live params when a launch is
-//! running (read-only). Field-editing state lives in
-//! `LaunchPickerState` — round-6 dropped the centred picker overlay
-//! and these helpers paint the same state inline in the right pane.
+//! Renders a vertical list of rows: `ctx`, `reasoning`, every
+//! `TypedKnobs` field with a per-row source label, and an `extras`
+//! free-text row at the bottom. When the focused model has a
+//! running launch and the picker isn't open, shows the live params
+//! (read-only).
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -12,64 +12,38 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
+use crate::launch::flag_aliases::{knob_specs, KnobField};
 use crate::theme::Palette;
 use crate::tui::app::App;
 use crate::tui::keybindings::{Action, Focus};
 use crate::tui::launch_picker::{LaunchPickerState, PickerField};
 
-/// Render the Settings tab body into `area`. The caller (right
-/// pane) owns the surrounding block.
+/// Render the Settings tab body into `area`.
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   let mut lines: Vec<Line<'_>> = Vec::new();
 
-  // If the user explicitly opened the picker (via Enter on a row or
-  // the launch chip), show the editable form even when a managed
-  // launch already exists for the focused path — they're staging a
-  // *new* launch (v1 supports duplicate instances on fresh ports).
-  // The duplicate-launch heads-up rendered below keys off
-  // `picker_view.active_instances`.
-  //
-  // If a managed launch is running and the picker isn't open, show
-  // what params were used.
   if app.launch_picker.is_none() {
     if let Some(m) = app.focused_managed() {
       lines.push(heading("Running launch", palette));
       lines.push(kv("launch", m.launch_id.clone(), palette));
-      lines.push(kv("port", format!(":{}", m.port), palette));
-      lines.push(kv(
-        "state",
-        crate::tui::status_icons::label_for(m.state).to_string(),
-        palette,
-      ));
-      if let Some(rss) = m.rss_bytes {
-        lines.push(kv("rss", crate::tui::fmt::format_bytes(rss), palette));
-      }
-      if let Some(cpu) = m.cpu_pct {
-        lines.push(kv("cpu", format!("{cpu:.0}%"), palette));
-      }
-      // Surface the last-known launch parameters (ctx, reasoning,
-      // advanced argv) when the daemon's last_params_list snapshot
-      // covers this model. Falls back to "—" rows so the user still
-      // sees the field labels and knows the slot exists.
+      // port / state / rss / cpu already render in the header info
+      // row above the divider — dropping them here removes the
+      // duplication that bloated the running-launch view.
       let last = app.last_params.get(&m.path);
-      lines.push(Line::default());
-      lines.push(heading("Launch params", palette));
-      let ctx_value = last
-        .and_then(|p| p.ctx)
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "native".into());
-      lines.push(kv("ctx", ctx_value, palette));
-      let reasoning_value = last.map(|p| p.reasoning).unwrap_or(false);
-      lines.push(kv(
-        "reasoning",
-        if reasoning_value { "on" } else { "off" }.into(),
-        palette,
-      ));
-      let advanced: String = last
-        .map(|p| p.advanced.join(" "))
+      let empty_knobs = crate::config::TypedKnobs::default();
+      let persisted_knobs = last.map(|p| &p.knobs).unwrap_or(&empty_knobs);
+      for spec in knob_specs() {
+        lines.push(kv(
+          knob_label(spec.field),
+          format_persisted_knob_value(persisted_knobs, spec.field),
+          palette,
+        ));
+      }
+      let extras: String = last
+        .map(|p| p.extras.join(" "))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "(none)".into());
-      lines.push(kv("advanced", advanced, palette));
+      lines.push(kv("extras", extras, palette));
       lines.push(Line::default());
       let edit_chip = app
         .hint_with(Focus::RightPane, Action::EnterEdit, "edit for launch")
@@ -82,22 +56,28 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
         )
         .into(),
       );
-      frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+      // Clamp scroll to the actual line count vs viewport height so a
+      // window resize doesn't leave the view blanked. The stored
+      // scroll is bumped freely by ↑/↓ event handlers — this is the
+      // single point that ensures the rendered offset is in-bounds.
+      // Write the clamped value back so over-scrolling past the
+      // bottom doesn't inflate the stored offset (which would make a
+      // subsequent ↑ press feel unresponsive until the offset
+      // dropped back below `max_scroll`).
+      let max_scroll = (lines.len() as u16).saturating_sub(area.height);
+      let scroll = app.running_view_scroll.get().min(max_scroll);
+      app.running_view_scroll.set(scroll);
+      frame.render_widget(
+        Paragraph::new(lines)
+          .scroll((scroll, 0))
+          .wrap(Wrap { trim: false }),
+        area,
+      );
       return;
     }
   }
 
-  // Otherwise show the editable form. When the user hasn't opened
-  // the picker yet, derive the would-be-default contents from
-  // `App::build_default_picker` so the form already reflects
-  // persisted `last_params` (ctx / reasoning / preset) on first
-  // landing — without this, ctx and reasoning silently read as
-  // `native` / `model default` until the user taps an arrow or
-  // presses Enter, which surprised users who expected the last-
-  // used values to show up immediately on selection.
-  // Audit §F4.1 #1: borrow the live picker when one exists so the
-  // Settings tab doesn't pay a `LaunchPickerState::clone()` per
-  // frame; only materialise the default when the picker is absent.
+  // Editable form.
   let default_picker: LaunchPickerState;
   let picker_view: &LaunchPickerState = match app.launch_picker.as_ref() {
     Some(p) => p,
@@ -120,42 +100,10 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     palette,
   ));
   lines.push(kv("model", picker_view.model_name.clone(), palette));
-  let ctx_value = match picker_view.ctx {
-    Some(n) => format!("{n}"),
-    None => "native (GGUF default)".to_string(),
-  };
-  lines.push(kv_focused(
-    "ctx",
-    ctx_value,
-    picker_view.field == PickerField::Ctx,
-    true,
-    palette,
-  ));
-  lines.push(kv_focused(
-    "reasoning",
-    picker_view.reasoning.label().to_string(),
-    picker_view.field == PickerField::Reasoning,
-    true,
-    palette,
-  ));
-  let advanced_hint = app
-    .hint(Focus::RightPane, Action::OpenAdvancedPanel)
-    .map(|chip| format!("(open with `{}`)", chip_label(&chip)))
-    .unwrap_or_else(|| "(advanced binding removed)".to_string());
-  lines.push(kv_focused(
-    "advanced",
-    advanced_hint,
-    picker_view.field == PickerField::Advanced,
-    // Advanced opens a separate editor; Up/Down don't cycle a
-    // value here, so the `◀ … ▶` glyphs would be misleading.
-    false,
-    palette,
-  ));
-  lines.push(Line::default());
-  // Heads-up when a launch already exists for this model. The
-  // picker still happily spawns another instance on a fresh port —
-  // duplicate launches are a v1 feature — but the user shouldn't
-  // be surprised by it.
+
+  // Duplicate-launch heads-up. Surfaces at the top of the panel so
+  // it remains visible even when the typed-knob list (12 rows) pushes
+  // the launch-chip footer below the viewport.
   if picker_view.active_instances > 0 {
     lines.push(
       Span::styled(
@@ -174,8 +122,96 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
       )
       .into(),
     );
-    lines.push(Line::default());
   }
+
+  let show_source = area.width >= 50;
+  let row_for = |field: PickerField| picker_view.field == field;
+  // Track the line index of the focused row so we can adjust the
+  // scroll offset below — on tall viewports nothing scrolls; on
+  // short ones the focused row stays visible with ≥1 row of context.
+  let mut focused_line: Option<u16> = None;
+
+  // Every typed knob — including ctx and reasoning — flows through
+  // the same `value (chip)` shape. Empty rows render `default` as
+  // the value; the chip names the layer that would supply it.
+  for spec in knob_specs() {
+    let field = spec.field;
+    let focused = row_for(PickerField::Knob(field));
+    if focused {
+      focused_line = Some(lines.len() as u16);
+    }
+    if picker_view.inline_edit.is_open()
+      && picker_view.inline_edit.field == Some(PickerField::Knob(field))
+    {
+      lines.push(inline_edit_row(
+        knob_label(field),
+        picker_view.inline_edit.input.buffer(),
+        focused,
+        palette,
+      ));
+      if let Some(err) = &picker_view.inline_edit.error {
+        lines.push(inline_warning_row(err, palette));
+      }
+    } else {
+      let value = format_knob_value(picker_view, field);
+      let source = picker_view.source_for(field).label();
+      lines.push(kv_focused(
+        knob_label(field),
+        value,
+        Some(source),
+        focused,
+        true,
+        palette,
+        show_source,
+      ));
+    }
+  }
+
+  // extras row
+  let extras_focused = row_for(PickerField::Extras);
+  if extras_focused {
+    focused_line = Some(lines.len() as u16);
+  }
+  if picker_view.extras_input.is_editing() {
+    lines.push(inline_edit_row(
+      "extras",
+      picker_view.extras_input.buffer(),
+      extras_focused,
+      palette,
+    ));
+  } else {
+    let extras_text = if picker_view.extras.is_empty() {
+      "(none)".to_string()
+    } else {
+      picker_view
+        .extras
+        .iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
+    };
+    lines.push(kv_focused(
+      "extras",
+      extras_text,
+      None,
+      extras_focused,
+      false,
+      palette,
+      show_source,
+    ));
+  }
+
+  // Forbidden-flag warning under extras row.
+  let banned = crate::launch::params::forbidden_in_extras(&picker_view.extras);
+  if !banned.is_empty() {
+    let redacted = crate::launch::params::redact_for_display(&picker_view.extras);
+    lines.push(inline_warning_row(
+      &format!("forbidden: {redacted}"),
+      palette,
+    ));
+  }
+
+  lines.push(Line::default());
   let launch_chip = app
     .hint_with(Focus::RightPane, Action::Submit, "launch")
     .map(|chip| {
@@ -197,12 +233,158 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     .into(),
   );
 
-  // Round-9: the in-body chip strip moved to the right pane's
-  // bottom border. Settings here owns its prose and form rows; the
-  // bottom border owns the contextual key hints. Saves a row of
-  // vertical space and stops duplicate-chip noise.
+  // Minimal-scroll-with-margin policy: keep ≥1 row of context above
+  // and below the focused row so the user sees what's adjacent. When
+  // the focused row crosses an edge, scroll just enough to restore
+  // the margin — no jumping to top/bottom, no centring. Recomputed
+  // every render so window resizes self-correct.
+  let scroll = clamp_scroll_with_margin(
+    picker_view.scroll_offset.get(),
+    focused_line.unwrap_or(0),
+    area.height,
+    lines.len() as u16,
+  );
+  picker_view.scroll_offset.set(scroll);
 
-  frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+  frame.render_widget(
+    Paragraph::new(lines)
+      .scroll((scroll, 0))
+      .wrap(Wrap { trim: false }),
+    area,
+  );
+}
+
+/// Minimal scroll with margin: keep the focused row visible with
+/// `MARGIN` rows of context above and below where possible. Returns
+/// the new scroll offset. Clamped to `[0, max_scroll]`.
+fn clamp_scroll_with_margin(current: u16, focused: u16, viewport: u16, total: u16) -> u16 {
+  const MARGIN: u16 = 1;
+  let max_scroll = total.saturating_sub(viewport);
+  if viewport == 0 {
+    return 0;
+  }
+  // Scroll up so focused is at least MARGIN rows below the top.
+  let upper_bound = focused.saturating_sub(MARGIN);
+  // Scroll down so focused is at least MARGIN rows above the bottom.
+  let lower_bound = focused.saturating_add(MARGIN + 1).saturating_sub(viewport);
+  let mut next = current;
+  if next > upper_bound {
+    next = upper_bound;
+  }
+  if next < lower_bound {
+    next = lower_bound;
+  }
+  next.min(max_scroll)
+}
+
+fn knob_label(field: KnobField) -> &'static str {
+  match field {
+    KnobField::Ctx => "ctx",
+    KnobField::Reasoning => "reasoning",
+    KnobField::NGpuLayers => "n_gpu_layers",
+    KnobField::Threads => "threads",
+    KnobField::CacheTypeK => "cache_type_k",
+    KnobField::CacheTypeV => "cache_type_v",
+    KnobField::FlashAttn => "flash_attn",
+    KnobField::Mlock => "mlock",
+    KnobField::NoMmap => "no_mmap",
+    KnobField::Parallel => "parallel",
+    KnobField::BatchSize => "batch_size",
+    KnobField::UbatchSize => "ubatch_size",
+    KnobField::RopeFreqScale => "rope_freq_scale",
+    KnobField::Keep => "keep",
+  }
+}
+
+/// Read-only formatter for the running-launch view. Same vocabulary
+/// as `format_knob_value` (value or `default` / `on` / `off`) but
+/// reads straight from a persisted `TypedKnobs` instead of a picker
+/// state. Untouched fields render `default` — the user can open the
+/// editor (`e`) to see the resolved chip.
+fn format_persisted_knob_value(knobs: &crate::config::TypedKnobs, field: KnobField) -> String {
+  match field {
+    KnobField::Ctx => knobs
+      .ctx
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::NGpuLayers => knobs
+      .n_gpu_layers
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::Threads => knobs
+      .threads
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::Parallel => knobs
+      .parallel
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::BatchSize => knobs
+      .batch_size
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::UbatchSize => knobs
+      .ubatch_size
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::Keep => knobs
+      .keep
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::RopeFreqScale => knobs
+      .rope_freq_scale
+      .map(|v| format!("{v}"))
+      .unwrap_or_else(|| "default".into()),
+    KnobField::CacheTypeK => knobs
+      .cache_type_k
+      .clone()
+      .unwrap_or_else(|| "default".into()),
+    KnobField::CacheTypeV => knobs
+      .cache_type_v
+      .clone()
+      .unwrap_or_else(|| "default".into()),
+    KnobField::Reasoning => bool_label(knobs.reasoning),
+    KnobField::FlashAttn => bool_label(knobs.flash_attn),
+    KnobField::Mlock => bool_label(knobs.mlock),
+    KnobField::NoMmap => bool_label(knobs.no_mmap),
+  }
+}
+
+fn bool_label(v: Option<bool>) -> String {
+  match v {
+    Some(true) => "on".into(),
+    Some(false) => "off".into(),
+    None => "default".into(),
+  }
+}
+
+fn format_knob_value(state: &LaunchPickerState, field: KnobField) -> String {
+  match field {
+    KnobField::Ctx
+    | KnobField::NGpuLayers
+    | KnobField::Threads
+    | KnobField::Parallel
+    | KnobField::BatchSize
+    | KnobField::UbatchSize
+    | KnobField::Keep => state
+      .effective_u32(field)
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::RopeFreqScale => state
+      .effective_f32(field)
+      .map(|v| format!("{v}"))
+      .unwrap_or_else(|| "default".into()),
+    KnobField::CacheTypeK | KnobField::CacheTypeV => state
+      .effective_str(field)
+      .unwrap_or_else(|| "default".into()),
+    KnobField::Reasoning | KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => {
+      match state.effective_bool(field) {
+        Some(true) => "on".into(),
+        Some(false) => "off".into(),
+        None => "default".into(),
+      }
+    }
+  }
 }
 
 fn heading<'a>(text: &'a str, palette: &Palette) -> Line<'a> {
@@ -214,11 +396,7 @@ fn heading<'a>(text: &'a str, palette: &Palette) -> Line<'a> {
   ))
 }
 
-/// Width of the label column in `kv` / `kv_focused` rows. Wide
-/// enough to fit the longest label (`reasoning`, `advanced`, `ctx`,
-/// `model`) plus one trailing space gap so values never kiss the
-/// label.
-const LABEL_W: usize = 12;
+const LABEL_W: usize = 16;
 
 fn kv(label: &str, value: String, palette: &Palette) -> Line<'static> {
   Line::from(vec![
@@ -230,23 +408,23 @@ fn kv(label: &str, value: String, palette: &Palette) -> Line<'static> {
   ])
 }
 
-/// Strip the `:description` suffix off a chip string, leaving just
-/// the key label (e.g. `"a:advanced"` → `"a"`). Used by inline
-/// hints that want a bare keycap, not a full `key:label` chip.
 fn chip_label(chip: &str) -> &str {
   chip.split(':').next().unwrap_or(chip)
 }
 
-/// Render an editable form row. When focused **and** the field is
-/// cyclable (`cyclable = true`), the value is wrapped in `◀ … ▶`
-/// so the user sees that Up/Down change it. Non-cyclable focused
-/// rows (Advanced) just get the `→` cursor without arrow glyphs.
+/// Editable form row. When focused and `cyclable`, the value is
+/// wrapped in `◀ … ▶` so the user sees that Left/Right change it.
+/// When `source_label` is `Some` and `show_source` is true, a
+/// right-aligned `(<label>)` chip is appended.
+#[allow(clippy::too_many_arguments)]
 fn kv_focused(
   label: &str,
   value: String,
+  source_label: Option<&str>,
   focused: bool,
   cyclable: bool,
   palette: &Palette,
+  show_source: bool,
 ) -> Line<'static> {
   let marker = if focused { "→ " } else { "  " };
   let label_style = if focused {
@@ -256,7 +434,7 @@ fn kv_focused(
   } else {
     palette.muted_style()
   };
-  let mut spans: Vec<Span<'static>> = Vec::with_capacity(5);
+  let mut spans: Vec<Span<'static>> = Vec::with_capacity(6);
   spans.push(Span::styled(
     format!("{marker}{label:<width$}", width = LABEL_W),
     label_style,
@@ -268,7 +446,36 @@ fn kv_focused(
   } else {
     spans.push(Span::styled(value, palette.text_style()));
   }
+  if let (true, Some(src)) = (show_source, source_label) {
+    spans.push(Span::styled(format!("  ({src})"), palette.muted_style()));
+  }
   Line::from(spans)
+}
+
+fn inline_edit_row(label: &str, buffer: &str, focused: bool, palette: &Palette) -> Line<'static> {
+  let marker = if focused { "→ " } else { "  " };
+  let label_style = Style::default()
+    .fg(palette.accent)
+    .add_modifier(Modifier::BOLD);
+  Line::from(vec![
+    Span::styled(
+      format!("{marker}{label:<width$}", width = LABEL_W),
+      label_style,
+    ),
+    Span::styled("[ ".to_string(), palette.muted_style()),
+    Span::styled(buffer.to_string(), palette.text_style()),
+    crate::tui::fmt::caret(palette),
+    Span::styled(" ]".to_string(), palette.muted_style()),
+  ])
+}
+
+fn inline_warning_row(message: &str, palette: &Palette) -> Line<'static> {
+  Line::from(Span::styled(
+    format!("    ⚠ {message}"),
+    Style::default()
+      .fg(palette.warning)
+      .add_modifier(Modifier::BOLD),
+  ))
 }
 
 #[cfg(test)]
@@ -276,6 +483,24 @@ mod tests {
   use super::*;
   use crate::tui::app::{App, AppOptions};
   use std::path::PathBuf;
+
+  #[test]
+  fn clamp_scroll_keeps_focused_visible_with_margin() {
+    // Focused row inside the viewport — no change.
+    assert_eq!(clamp_scroll_with_margin(0, 5, 20, 30), 0);
+    // Focused below the viewport bottom — scroll just enough to land
+    // with one row of margin below.
+    assert_eq!(clamp_scroll_with_margin(0, 19, 10, 30), 11);
+    // Focused above the viewport top — scroll up to land one row
+    // below the top edge.
+    assert_eq!(clamp_scroll_with_margin(15, 5, 10, 30), 4);
+    // Focused at index 0 with no margin available — saturate at 0.
+    assert_eq!(clamp_scroll_with_margin(5, 0, 10, 30), 0);
+    // Viewport bigger than content — never scroll.
+    assert_eq!(clamp_scroll_with_margin(0, 5, 50, 10), 0);
+    // Zero viewport returns 0 (would otherwise underflow).
+    assert_eq!(clamp_scroll_with_margin(5, 5, 0, 30), 0);
+  }
 
   fn fake_model(path: &str, parent: &str) -> crate::discovery::DiscoveredModel {
     crate::discovery::DiscoveredModel {
@@ -290,13 +515,6 @@ mod tests {
 
   #[test]
   fn settings_form_reflects_last_params_on_first_render() {
-    // User-reported bug: ctx / reasoning fields rendered as the
-    // hard defaults (`native`, `model default`) until the user
-    // pressed Enter or an arrow to materialise the picker. The
-    // Settings tab now derives its default-render contents from
-    // `App::build_default_picker`, which seeds from persisted
-    // `last_params` — so the form shows the user's previous choices
-    // the moment they highlight the model, without interaction.
     use crate::tui::app::LastParamsRow;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -309,17 +527,24 @@ mod tests {
       LastParamsRow {
         ctx: Some(16384),
         reasoning: true,
-        advanced: vec!["--flash-attn".into()],
+        // ctx/reasoning now live inside `knobs`; the picker seeds
+        // `user_knobs` straight from `knobs` so a returning user
+        // sees their last-shipped values with `(user)` chips.
+        knobs: crate::config::TypedKnobs {
+          ctx: Some(16384),
+          reasoning: Some(true),
+          ..Default::default()
+        },
+        extras: vec!["--rope-freq-base".into(), "10000".into()],
         port: Some(41100),
       },
     );
     app.list_cursor = 2;
-    // No picker staged; no arrow key pressed.
     assert!(app.launch_picker.is_none());
     let palette = app.palette();
-    let mut term = Terminal::new(TestBackend::new(60, 24)).unwrap();
+    let mut term = Terminal::new(TestBackend::new(60, 32)).unwrap();
     term
-      .draw(|f| render(f, Rect::new(0, 0, 60, 24), &app, palette))
+      .draw(|f| render(f, Rect::new(0, 0, 60, 32), &app, palette))
       .unwrap();
     let buf = term.backend().buffer().clone();
     let mut joined = String::new();
@@ -329,22 +554,12 @@ mod tests {
       }
       joined.push('\n');
     }
-    assert!(
-      joined.contains("16384"),
-      "ctx must reflect persisted last_params on first render: {joined}"
-    );
-    assert!(
-      joined.contains("on"),
-      "reasoning must reflect persisted last_params on first render: {joined}"
-    );
+    assert!(joined.contains("16384"), "{joined}");
+    assert!(joined.contains("on"), "{joined}");
   }
 
   #[test]
   fn launch_hint_reads_press_enter_again_to_launch() {
-    // The Settings tab confirms the two-step launch flow ("Enter
-    // first stages the picker, Enter again dispatches") via the
-    // muted hint line under the form. Tab → Enter must read like
-    // a *re-press*, not the first press.
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::Terminal;
@@ -352,9 +567,9 @@ mod tests {
     app.models = vec![fake_model("/m/qwen.gguf", "/m")];
     app.list_cursor = 2;
     let palette = app.palette();
-    let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
+    let mut term = Terminal::new(TestBackend::new(70, 36)).unwrap();
     term
-      .draw(|f| render(f, Rect::new(0, 0, 60, 20), &app, palette))
+      .draw(|f| render(f, Rect::new(0, 0, 70, 36), &app, palette))
       .unwrap();
     let buf = term.backend().buffer().clone();
     let mut joined = String::new();
@@ -366,7 +581,7 @@ mod tests {
     }
     assert!(
       joined.contains("Enter again to launch with these settings."),
-      "launch hint must read 'Enter again to launch': {joined}"
+      "{joined}"
     );
   }
 }

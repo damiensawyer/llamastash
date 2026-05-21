@@ -48,23 +48,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(8);
 #[derive(Debug, Clone)]
 pub enum WriterCmd {
   /// `start_model` — launch the focused model with the picker's
-  /// ctx / reasoning / advanced / mode fields. `reasoning: None`
-  /// (round-8) means "omit the field"; the daemon then falls back
-  /// to whatever the model's metadata implies.
+  /// ctx / reasoning / typed-knob overrides / extras / mode fields.
+  /// `reasoning: None` means "omit the field"; the daemon then falls
+  /// back to whatever the model's metadata implies.
   StartModel {
     model_path: PathBuf,
     ctx: Option<u32>,
     reasoning: Option<bool>,
-    advanced: Vec<String>,
-    /// Catalog-derived mode hint (chat/embedding/rerank). `None`
-    /// keeps the daemon's `Chat` default — preserves backwards
-    /// compatibility for the picker until catalog plumbing is
-    /// wired through.
+    knobs: crate::config::TypedKnobs,
+    extras: Vec<String>,
     mode: Option<crate::launch::mode::LaunchMode>,
-    /// Soft port preference. Emitted as `prefer_port` on the wire;
-    /// the daemon honours when free and falls back to allocate
-    /// otherwise. Seeded from `last_params[path].port` so a
-    /// returning user lands on the same port.
     prefer_port: Option<u16>,
   },
   /// `stop_model` — graceful shutdown of the supplied launch.
@@ -160,6 +153,18 @@ fn handle_key(app: &mut App, key: KeyEvent, writer: Option<&mpsc::Sender<WriterC
     }
     return;
   }
+  // An open Settings inline edit owns input. All keys route to the
+  // editor (so `Esc` cancels the edit, `e` inserts a literal `e`,
+  // arrows do nothing rather than firing global actions, etc.) — only
+  // `Enter` falls through so `Action::Submit` can run its
+  // commit-then-launch flow in one place.
+  if app.focus == Focus::RightPane
+    && settings_inline_edit_open(app)
+    && !matches!(key.code, KeyCode::Enter)
+  {
+    handle_settings_inline_edit(app, key);
+    return;
+  }
   // Resolve the bound action first; if a focus doesn't have a binding
   // for this keypress *and* it's a text-input focus, fall through to
   // the per-focus character handler so alphanumerics extend the
@@ -167,8 +172,10 @@ fn handle_key(app: &mut App, key: KeyEvent, writer: Option<&mpsc::Sender<WriterC
   let bound = app.action_for(app.focus, key.code, key.modifiers);
   match app.focus {
     Focus::Filter => handle_filter_input(app, key),
-    Focus::AdvancedPanel => handle_advanced_input(app, key),
     Focus::HfDialog => handle_hf_dialog_input(app, key, writer),
+    Focus::RightPane if settings_inline_edit_open(app) && bound.is_none() => {
+      handle_settings_inline_edit(app, key);
+    }
     Focus::ChatInput | Focus::EmbedInput | Focus::RerankInput => {
       // Modal text-input focuses give the field first crack at every
       // key so the `Esc` walk-back (exit-edit → clear → close) wins
@@ -184,6 +191,223 @@ fn handle_key(app: &mut App, key: KeyEvent, writer: Option<&mpsc::Sender<WriterC
     _ => {
       if let Some(action) = bound {
         apply_action(app, action, writer);
+      }
+    }
+  }
+}
+
+/// Open the inline edit on the focused Settings row. Numeric / enum
+/// knob rows seed the buffer with the current effective value;
+/// `extras` opens the free-text horizontal-scroll buffer. Boolean
+/// rows have no editable buffer (cycle handles them) so this is a
+/// no-op there — gated by [`PickerField::is_editable`].
+fn open_focused_inline_edit(app: &mut App) {
+  use crate::launch::flag_aliases::KnobField;
+  use crate::tui::launch_picker::PickerField;
+  let Some(picker) = app.launch_picker.as_mut() else {
+    return;
+  };
+  if !picker.field.is_editable() {
+    return;
+  }
+  match picker.field {
+    PickerField::Knob(field) => {
+      // Seed from the resolved effective value so the user types from
+      // the current row content, not from blank.
+      let initial = match field {
+        KnobField::Ctx
+        | KnobField::NGpuLayers
+        | KnobField::Threads
+        | KnobField::Parallel
+        | KnobField::BatchSize
+        | KnobField::UbatchSize
+        | KnobField::Keep => picker
+          .effective_u32(field)
+          .map(|v| v.to_string())
+          .unwrap_or_default(),
+        KnobField::RopeFreqScale => picker
+          .effective_f32(field)
+          .map(|v| format!("{v}"))
+          .unwrap_or_default(),
+        KnobField::CacheTypeK | KnobField::CacheTypeV => {
+          picker.effective_str(field).unwrap_or_default()
+        }
+        // Booleans are filtered out by the `is_editable` guard above.
+        // The match has to stay exhaustive on `KnobField`; reaching
+        // this arm means `is_editable` and `KnobField` drifted apart.
+        KnobField::Reasoning | KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => {
+          debug_assert!(
+            false,
+            "boolean knob {field:?} reached open_focused_inline_edit despite is_editable() guard"
+          );
+          return;
+        }
+      };
+      picker.inline_edit.open(PickerField::Knob(field), initial);
+    }
+    PickerField::Extras => {
+      let joined = picker
+        .extras
+        .iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+      picker.extras_input.set_text(joined);
+      picker.extras_input.enter_edit();
+    }
+  }
+}
+
+/// Commit the open inline edit. Returns true when a commit closed
+/// the editor — caller can then proceed to a `Submit` action.
+fn commit_inline_edit(app: &mut App) -> bool {
+  use crate::launch::flag_aliases::{KnobField, KV_CACHE_TYPES};
+  use crate::tui::launch_picker::PickerField;
+  let Some(picker) = app.launch_picker.as_mut() else {
+    return false;
+  };
+  if picker.extras_input.is_editing() {
+    let extras: Vec<std::ffi::OsString> = picker
+      .extras_input
+      .buffer()
+      .split_whitespace()
+      .map(std::ffi::OsString::from)
+      .collect();
+    picker.extras = extras;
+    picker.extras_input.clear();
+    picker.extras_input.exit_edit();
+    return true;
+  }
+  let Some(field) = picker.inline_edit.field else {
+    return false;
+  };
+  let buffer = picker.inline_edit.input.buffer().trim().to_string();
+  // Empty buffer == "reset this row to inherit from the resolver
+  // chain" — the same semantics as Backspace on the row, just reached
+  // through `e → delete → Enter` instead of a single keypress. We
+  // clear *all* user-override slots for the field rather than only
+  // the one matching the row's type so the row falls back cleanly
+  // regardless of which slot the user had populated.
+  if buffer.is_empty() {
+    if let PickerField::Knob(k) = field {
+      picker.set_user_u32(k, None);
+      picker.set_user_f32(k, None);
+      picker.set_user_str(k, None);
+      picker.set_user_bool(k, None);
+    }
+    picker.inline_edit.close();
+    return true;
+  }
+  // Exhaustive on `KnobField` (no wildcard) so adding a new knob
+  // fails to compile here instead of silently swallowing commits
+  // through a `_ => Ok(())` arm — the bug `ctx` hit before this
+  // refactor, where the u32 list missed `Ctx` and Enter quietly
+  // dropped the typed value.
+  let result: Result<(), String> = match field {
+    PickerField::Knob(k) => match k {
+      KnobField::Ctx
+      | KnobField::NGpuLayers
+      | KnobField::Threads
+      | KnobField::Parallel
+      | KnobField::BatchSize
+      | KnobField::UbatchSize
+      | KnobField::Keep => match buffer.parse::<u32>() {
+        Ok(v) => {
+          picker.set_user_u32(k, Some(v));
+          Ok(())
+        }
+        Err(_) => Err("expected u32".into()),
+      },
+      KnobField::RopeFreqScale => match buffer.parse::<f32>() {
+        Ok(v) => {
+          picker.set_user_f32(k, Some(v));
+          Ok(())
+        }
+        Err(_) => Err("expected float".into()),
+      },
+      KnobField::CacheTypeK | KnobField::CacheTypeV => {
+        if KV_CACHE_TYPES.iter().any(|t| *t == buffer) {
+          picker.set_user_str(k, Some(buffer.clone()));
+          Ok(())
+        } else {
+          Err(format!("expected one of {}", KV_CACHE_TYPES.join(", ")))
+        }
+      }
+      // Booleans don't have an editable buffer (the `is_editable()`
+      // guard in `open_focused_inline_edit` blocks `e:edit` on these
+      // rows). Reaching here means that guard drifted out of sync.
+      KnobField::Reasoning | KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => {
+        debug_assert!(
+          false,
+          "boolean knob {k:?} reached commit_inline_edit despite is_editable() guard"
+        );
+        Ok(())
+      }
+    },
+    PickerField::Extras => Ok(()),
+  };
+  match result {
+    Ok(()) => {
+      picker.inline_edit.close();
+      true
+    }
+    Err(msg) => {
+      picker.inline_edit.error = Some(msg);
+      false
+    }
+  }
+}
+
+fn settings_inline_edit_open(app: &App) -> bool {
+  app.right_tab == RightTab::Settings
+    && app
+      .launch_picker
+      .as_ref()
+      .map(|p| p.inline_edit.is_open() || p.extras_input.is_editing())
+      .unwrap_or(false)
+}
+
+fn handle_settings_inline_edit(app: &mut App, key: KeyEvent) {
+  use crate::tui::input_field::InputOutcome;
+  let Some(picker) = app.launch_picker.as_mut() else {
+    return;
+  };
+  // Route the key through the same `InputField` modal state machine
+  // that drives chat / embed / rerank / HF search / filter — so the
+  // typed-knob inline edit honours the same `e:edit / Esc:walk-back /
+  // Enter:Submit` contract uniformly.
+  //
+  // The error field is sticky from the previous commit attempt;
+  // any keystroke that the input handles (a fresh char, backspace,
+  // exit-edit) clears it so the user sees their next attempt
+  // unobstructed.
+  let outcome = if picker.extras_input.is_editing() {
+    picker.extras_input.handle_key(key)
+  } else {
+    let r = picker.inline_edit.input.handle_key(key);
+    if matches!(r, InputOutcome::Handled) {
+      picker.inline_edit.error = None;
+    }
+    r
+  };
+  match outcome {
+    InputOutcome::Handled => {}
+    InputOutcome::Submit => {
+      commit_inline_edit(app);
+    }
+    InputOutcome::PassThrough => {
+      // `InputField` reports PassThrough for `Esc` once the buffer
+      // is empty / edit mode is already off — for the picker that
+      // means "close the inline edit entirely". The extras row also
+      // walks back to the picker, not to the model list, since the
+      // picker is still staged.
+      if matches!(key.code, KeyCode::Esc) {
+        if picker.extras_input.is_editing() {
+          picker.extras_input.exit_edit();
+          picker.extras_input.clear();
+        } else {
+          picker.inline_edit.close();
+        }
       }
     }
   }
@@ -268,25 +492,6 @@ fn handle_filter_input(app: &mut App, key: KeyEvent) {
   }
 }
 
-fn handle_advanced_input(app: &mut App, key: KeyEvent) {
-  use crate::tui::input_field::InputOutcome;
-  let outcome = match app.advanced_panel.as_mut() {
-    Some(panel) => panel.buffer.handle_key(key),
-    None => return,
-  };
-  match outcome {
-    InputOutcome::Handled => {}
-    InputOutcome::Submit => app.close_advanced_panel(),
-    InputOutcome::PassThrough => {
-      // Field decided not to handle: Esc walks back at the panel
-      // level (close), other keys are unbound.
-      if matches!(key.code, KeyCode::Esc) {
-        app.close_advanced_panel();
-      }
-    }
-  }
-}
-
 fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<WriterCmd>>) {
   match action {
     Action::Quit => app.should_exit = true,
@@ -300,16 +505,22 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
     Action::ClearFilter => app.clear_filter(),
     Action::ToggleFavorite => apply_toggle_favorite(app, writer),
     Action::OpenLaunchPicker => app.open_launch_picker(),
-    Action::OpenAdvancedPanel => app.open_advanced_panel(),
     Action::OpenHfDialog => apply_open_hf_dialog(app),
     Action::Submit => match app.focus {
-      Focus::AdvancedPanel => app.close_advanced_panel(),
       Focus::EmbedInput => apply_embed_submit(app),
       Focus::RerankInput => apply_rerank_submit(app),
-      // The Settings tab drives launch submission from inside the
-      // right pane. The launch_picker state object is still the
-      // form's source of truth.
       Focus::RightPane if app.right_tab == RightTab::Settings => {
+        // If an inline edit is open, Enter commits it first. Only
+        // proceed to launch when the commit succeeded (otherwise the
+        // edit stays open with the inline error visible).
+        if settings_inline_edit_open(app) {
+          if commit_inline_edit(app) {
+            // Commit closed the edit; the user can press Enter
+            // again to launch with the new value.
+            return;
+          }
+          return;
+        }
         apply_launch_submit(app, writer);
       }
       _ => {}
@@ -317,18 +528,11 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
     Action::Cancel => {
       if app.show_help {
         app.show_help = false;
-      } else if app.focus == Focus::AdvancedPanel {
-        app.close_advanced_panel();
       } else if app.focus == Focus::RightPane
         && app.right_tab == RightTab::Settings
         && app.launch_picker.is_some()
         && app.focused_managed().is_some()
       {
-        // `e` staged the edit-for-launch picker over a running
-        // model's read-only view. Esc dismisses the picker back to
-        // the live params display without leaving the Settings tab.
-        // Direct null (rather than `close_launch_picker`) because
-        // that helper would also flip focus back to the Models list.
         app.launch_picker = None;
       }
     }
@@ -413,11 +617,13 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
       //    so subsequent keystrokes go to the prompt. The field
       //    itself enters edit mode so typing works immediately and
       //    the `Esc` walk-back is wired up.
-      //  - Settings on a running launch: stage the launch picker so
-      //    the user can edit next-launch params over the live
-      //    read-only view (the arrow-keys path no longer
-      //    auto-stages — `e` is the explicit gate).
-      //  - Anywhere else: no-op.
+      //  - Settings on a running launch with no picker yet: stage
+      //    the launch picker so the user can edit next-launch params
+      //    over the live read-only view (the arrow-keys path no
+      //    longer auto-stages — `e` is the explicit gate).
+      //  - Settings on the editable form: open the focused row's
+      //    inline edit (numeric / enum row → typing buffer; extras
+      //    row → free-text horizontal-scroll buffer).
       if let Some(target) = edit_focus_for_tab(app.right_tab) {
         app.focus = target;
         match target {
@@ -429,11 +635,15 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
           },
           _ => {}
         }
-      } else if app.right_tab == RightTab::Settings && app.launch_picker.is_none() {
-        if app.focused_path().is_some() {
-          app.open_launch_picker();
+      } else if app.right_tab == RightTab::Settings {
+        if app.launch_picker.is_none() {
+          if app.focused_path().is_some() {
+            app.open_launch_picker();
+          } else {
+            app.show_toast("no model focused");
+          }
         } else {
-          app.show_toast("no model focused");
+          open_focused_inline_edit(app);
         }
       }
     }
@@ -517,12 +727,31 @@ fn apply_arrow_in_pane(app: &mut App, dir: ArrowDir) {
         ArrowDir::Up => app.logs_state.scroll_up(),
         ArrowDir::Down => app.logs_state.scroll_down(),
       },
-      // Settings: cycle the form's fields (ctx → reasoning →
-      // advanced). The picker materialisation happens in
-      // `apply_next_field` / `apply_prev_field`.
+      // Settings: cycle the form's fields when the picker is
+      // editable; scroll the read-only running-launch view when the
+      // focused model has a managed launch and no picker is staged.
+      // Arrows have no field semantics in the running view, so
+      // claiming them for scroll is collision-free and more
+      // discoverable than asking users to remember PageUp/PageDown.
       RightTab::Settings => match dir {
-        ArrowDir::Up => apply_prev_field(app),
-        ArrowDir::Down => apply_next_field(app),
+        ArrowDir::Up => {
+          if running_view_is_locked(app) {
+            app
+              .running_view_scroll
+              .set(app.running_view_scroll.get().saturating_sub(1));
+          } else {
+            apply_prev_field(app)
+          }
+        }
+        ArrowDir::Down => {
+          if running_view_is_locked(app) {
+            app
+              .running_view_scroll
+              .set(app.running_view_scroll.get().saturating_add(1));
+          } else {
+            apply_next_field(app)
+          }
+        }
       },
       // Round-8: Chat/Embed/Rerank output viewports scroll on the
       // same arrow keys as Logs while focus stays on the right
@@ -915,7 +1144,8 @@ fn apply_confirmed(app: &mut App, action: ConfirmAction, writer: Option<&mpsc::S
       model_path,
       ctx,
       reasoning,
-      advanced,
+      knobs,
+      extras,
       mode,
       prefer_port,
       ..
@@ -924,7 +1154,8 @@ fn apply_confirmed(app: &mut App, action: ConfirmAction, writer: Option<&mpsc::S
         model_path,
         ctx,
         reasoning,
-        advanced,
+        knobs,
+        extras,
         mode,
         prefer_port,
       };
@@ -1198,26 +1429,14 @@ fn apply_launch_submit(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) 
     Some(p) => p.clone(),
     None => return,
   };
-  let advanced: Vec<String> = app
-    .advanced_panel
-    .as_ref()
-    .map(|panel| {
-      panel
-        .argv()
-        .iter()
-        .map(|s| s.to_string_lossy().into_owned())
-        .collect()
-    })
-    .unwrap_or_default();
+  let knobs = picker.user_knobs.clone();
+  let extras: Vec<String> = picker
+    .extras
+    .iter()
+    .map(|s| s.to_string_lossy().into_owned())
+    .collect();
 
-  // Forward the catalog's mode hint so an embedding / rerank GGUF
-  // launched from the picker reaches llama-server with the right
-  // mode flag. Without this the daemon defaulted to Chat for every
-  // launch regardless of the catalog's classification.
   use crate::launch::mode::LaunchMode;
-  // Delegate to the canonical `LaunchMode::resolve` rather than
-  // re-implementing the `ModeHint -> LaunchMode` table inline — keeps
-  // the TUI in lockstep with whatever the CLI / IPC paths use.
   let mode = app
     .models
     .iter()
@@ -1225,20 +1444,19 @@ fn apply_launch_submit(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) 
     .and_then(|m| m.metadata.as_ref())
     .and_then(|md| LaunchMode::resolve(None, md.mode_hint));
 
+  // ctx and reasoning ride inside `knobs` now; the wire payload also
+  // carries dedicated top-level fields for backward compat with
+  // scripted clients, so project them out of `knobs` for the call.
   let cmd = WriterCmd::StartModel {
     model_path: path.clone(),
-    ctx: picker.ctx,
-    // Round-8: ModelDefault → omit the field over the wire.
-    reasoning: picker.reasoning.as_wire(),
-    advanced: advanced.clone(),
+    ctx: knobs.ctx,
+    reasoning: knobs.reasoning,
+    knobs: knobs.clone(),
+    extras: extras.clone(),
     mode,
     prefer_port: picker.prefer_port,
   };
 
-  // Round-8: a Submit on a model that already has managed
-  // instances stages a confirm popup instead of dispatching
-  // immediately. v1 supports duplicate launches on fresh ports,
-  // but a fat-finger shouldn't silently triple-launch a 14B model.
   let active_instances = app.managed.iter().filter(|m| m.path == path).count();
   if active_instances > 0 {
     let name = crate::util::paths::model_display_name(&path);
@@ -1246,9 +1464,10 @@ fn apply_launch_submit(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) 
       name,
       active_instances,
       model_path: path,
-      ctx: picker.ctx,
-      reasoning: picker.reasoning.as_wire(),
-      advanced,
+      ctx: knobs.ctx,
+      reasoning: knobs.reasoning,
+      knobs,
+      extras,
       mode,
       prefer_port: picker.prefer_port,
     });
@@ -1463,7 +1682,8 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
       model_path,
       ctx,
       reasoning,
-      advanced,
+      knobs,
+      extras,
       mode,
       prefer_port,
     } => {
@@ -1472,17 +1692,14 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
         crate::launch::mode::LaunchMode::Embedding => "embedding",
         crate::launch::mode::LaunchMode::Rerank => "rerank",
       });
-      // `reasoning: None` (round-8 ModelDefault) serialises as
-      // JSON null, which the daemon's `Option<bool>` parser treats
-      // the same as a missing key — falling back to the model's
-      // own reasoning hint.
       (
         "start_model",
         json!({
           "model_path": model_path,
           "ctx": ctx,
           "reasoning": reasoning,
-          "advanced": advanced,
+          "knobs": knobs,
+          "extras": extras,
           "mode": mode_str,
           "prefer_port": prefer_port,
         }),
@@ -3103,6 +3320,7 @@ mod tests {
   fn submit_in_launch_picker_sends_start_model_through_writer() {
     use crate::discovery::{DiscoveredModel, ModelSource};
     use crate::gguf::metadata::{ModeHint, ModelMetadata, Quant};
+    use crate::tui::launch_picker::PickerField;
 
     let mut app = App::new(Default::default());
     app.models = vec![DiscoveredModel {
@@ -3129,10 +3347,12 @@ mod tests {
     // arrive on the wire.
     app.open_launch_picker();
     let p = app.launch_picker.as_mut().unwrap();
-    p.cycle_ctx_preset();
-    let expected_ctx = p.ctx;
-    // Round-8: tri-state cycle — ModelDefault → On.
-    p.cycle_reasoning_next();
+    p.field = PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx);
+    p.cycle_focused_value_next();
+    let expected_ctx = p.user_knobs.ctx;
+    // Round-8: tri-state cycle — None → Some(true).
+    p.field = PickerField::Knob(crate::launch::flag_aliases::KnobField::Reasoning);
+    p.cycle_focused_value_next();
 
     let (tx, mut rx) = mpsc::channel::<WriterCmd>(8);
     pump_input_with_writer(&mut app, key(KeyCode::Enter, KeyModifiers::NONE), Some(&tx));
@@ -3570,12 +3790,15 @@ mod tests {
       .as_ref()
       .map(|p| p.field)
       .expect("↓ in Settings should materialise the picker form");
-    assert_eq!(field, PickerField::Reasoning);
+    assert_eq!(
+      field,
+      PickerField::Knob(crate::launch::flag_aliases::KnobField::Reasoning)
+    );
 
     pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(
       app.launch_picker.as_ref().unwrap().field,
-      PickerField::Advanced
+      PickerField::Knob(crate::launch::flag_aliases::KnobField::NGpuLayers)
     );
   }
 
@@ -3590,9 +3813,10 @@ mod tests {
 
     pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(app.focus, Focus::RightPane);
+    // Up from Ctx wraps to the last row (Extras).
     assert_eq!(
       app.launch_picker.as_ref().expect("picker").field,
-      PickerField::Advanced
+      PickerField::Extras
     );
   }
 
@@ -3611,12 +3835,19 @@ mod tests {
     // Auto-stages the picker on first key; cursor lands on Ctx.
     pump_input(&mut app, key(KeyCode::Right, KeyModifiers::NONE));
     let p = app.launch_picker.as_ref().expect("picker auto-staged");
-    assert_eq!(p.field, PickerField::Ctx);
-    assert_eq!(p.ctx, Some(CTX_PRESETS[0]), "→ advances Ctx preset");
+    assert_eq!(
+      p.field,
+      PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx)
+    );
+    assert_eq!(
+      p.user_knobs.ctx,
+      Some(CTX_PRESETS[0]),
+      "→ advances Ctx preset"
+    );
 
     pump_input(&mut app, key(KeyCode::Left, KeyModifiers::NONE));
     assert_eq!(
-      app.launch_picker.as_ref().unwrap().ctx,
+      app.launch_picker.as_ref().unwrap().user_knobs.ctx,
       None,
       "← walks Ctx back to native"
     );
@@ -3630,8 +3861,9 @@ mod tests {
     // staged, any arrow key used to silently call `with_picker` and
     // swap the read-only "Running launch" pane for the editable
     // form. That hid the live params behind the form and surprised
-    // users. Arrows must now be a no-op in this state; `e` is the
-    // explicit gate.
+    // users. ↑/↓ now scroll the read-only view (the running-launch
+    // panel has ~17 rows and can overflow short viewports); ←/→
+    // remain no-ops. `e` is the explicit gate to start editing.
     let mut app = App::new(Default::default());
     app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
     app.managed = vec![ready_managed_for_events("/m/qwen.gguf", 41100)];
@@ -3645,6 +3877,33 @@ mod tests {
         "{code:?} must not stage a picker while a managed launch is focused"
       );
     }
+  }
+
+  #[test]
+  fn arrows_in_settings_scroll_read_only_running_view() {
+    // ↑/↓ over a running launch with no picker staged now drive the
+    // read-only view's scroll offset so the user can walk past
+    // viewport-clipped knob rows without `e`-staging the editor.
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    app.managed = vec![ready_managed_for_events("/m/qwen.gguf", 41100)];
+    app.go_top();
+    app.focus = Focus::RightPane;
+    app.right_tab = RightTab::Settings;
+    assert_eq!(app.running_view_scroll.get(), 0);
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(
+      app.running_view_scroll.get(),
+      1,
+      "↓ must scroll one row down"
+    );
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.running_view_scroll.get(), 2);
+    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.running_view_scroll.get(), 1, "↑ must scroll one row up");
+    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.running_view_scroll.get(), 0, "↑ saturates at 0");
   }
 
   #[test]
@@ -3667,6 +3926,46 @@ mod tests {
       "`e` on Settings must stage the launch picker over a running launch"
     );
     assert_eq!(app.focus, Focus::RightPane, "focus must stay on the pane");
+  }
+
+  #[test]
+  fn enter_after_editing_ctx_writes_typed_value_to_user_knobs() {
+    // Regression: ctx commit silently dropped the typed value because
+    // the u32 parse arm in `commit_inline_edit` missed `KnobField::Ctx`
+    // — it fell through to the catch-all `_ => Ok(())` arm, the edit
+    // closed, and the picker re-rendered the resolved (default) value.
+    // The fix makes the inner match exhaustive on `KnobField` so a
+    // future drift fails to compile rather than silently swallowing
+    // user input.
+    use crate::tui::launch_picker::PickerField;
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    app.go_top();
+    pump_input(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+      app.launch_picker.as_ref().expect("picker").field,
+      PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx),
+      "default focus lands on the ctx row"
+    );
+    // `e` opens inline edit; type a fresh value; Enter commits.
+    pump_input(&mut app, key(KeyCode::Char('e'), KeyModifiers::NONE));
+    {
+      let edit = &mut app.launch_picker.as_mut().expect("picker open").inline_edit;
+      edit.input.clear();
+      edit.input.set_text("65536");
+      edit.input.enter_edit();
+    }
+    pump_input(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
+    let committed = app.launch_picker.as_ref().expect("picker still staged");
+    assert_eq!(
+      committed.user_knobs.ctx,
+      Some(65536),
+      "ctx commit must write the typed value to user_knobs, not silently drop it"
+    );
+    assert!(
+      !committed.inline_edit.is_open(),
+      "successful commit closes the inline edit"
+    );
   }
 
   #[test]

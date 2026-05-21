@@ -167,13 +167,16 @@ fn enter_on_model_opens_inline_launch_picker_in_settings_tab() {
   assert_eq!(app.focus, Focus::RightPane);
   assert_eq!(app.right_tab, RightTab::Settings);
   assert!(app.launch_picker.is_some(), "picker state must materialise");
-  let frame = render_to_string(&mut app, 120, 24);
+  // Bumped to 40 rows so the full inline picker (ctx, reasoning, the
+  // 12 typed-knob rows, extras, and the launch-chip footer) fits in a
+  // single frame without the bottom rows scrolling off-screen.
+  let frame = render_to_string(&mut app, 120, 40);
   assert!(
     frame.contains("Launch settings"),
     "Settings tab heading missing: {frame}"
   );
   assert!(
-    frame.contains("ctx") && frame.contains("reasoning") && frame.contains("advanced"),
+    frame.contains("ctx") && frame.contains("reasoning") && frame.contains("extras"),
     "inline picker fields missing: {frame}"
   );
 }
@@ -181,8 +184,9 @@ fn enter_on_model_opens_inline_launch_picker_in_settings_tab() {
 #[test]
 fn arrows_in_settings_tab_cycle_fields_and_values() {
   // Round-7 navigation model: ↑/↓ in the Settings tab cycle the
-  // form's fields (ctx → reasoning → advanced), and ←/→ cycle
+  // form's fields (ctx → reasoning → typed knobs → extras), and ←/→ cycle
   // the focused field's value. Tab cycles panes universally.
+  use llamastash::launch::flag_aliases::KnobField;
   use llamastash::tui::keybindings::Focus;
   use llamastash::tui::launch_picker::PickerField;
   use llamastash::tui::launch_picker::CTX_PRESETS;
@@ -194,29 +198,31 @@ fn arrows_in_settings_tab_cycle_fields_and_values() {
   assert_eq!(app.focus, Focus::RightPane);
   assert_eq!(app.right_tab, RightTab::Settings);
   let picker = app.launch_picker.as_ref().expect("picker");
-  assert_eq!(picker.field, PickerField::Ctx);
-  assert_eq!(picker.ctx, None, "ctx defaults to native");
+  assert_eq!(picker.field, PickerField::Knob(KnobField::Ctx));
+  assert_eq!(
+    picker.user_knobs.ctx, None,
+    "ctx defaults to native (no user override)"
+  );
   // → advances the focused field's value.
   pump_input(&mut app, key(KeyCode::Right, KeyModifiers::NONE));
   assert_eq!(
-    app.launch_picker.as_ref().unwrap().ctx,
+    app.launch_picker.as_ref().unwrap().user_knobs.ctx,
     Some(CTX_PRESETS[0])
   );
   // ← walks it back to native.
   pump_input(&mut app, key(KeyCode::Left, KeyModifiers::NONE));
-  assert_eq!(app.launch_picker.as_ref().unwrap().ctx, None);
+  assert_eq!(app.launch_picker.as_ref().unwrap().user_knobs.ctx, None);
   // ↓ moves the cursor to the next field.
   pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
   assert_eq!(
     app.launch_picker.as_ref().unwrap().field,
-    PickerField::Reasoning
+    PickerField::Knob(KnobField::Reasoning)
   );
-  // → walks the reasoning tri-state forward (ModelDefault → On).
+  // → walks the reasoning tri-state forward (None → Some(true)).
   pump_input(&mut app, key(KeyCode::Right, KeyModifiers::NONE));
-  use llamastash::tui::launch_picker::ReasoningSetting;
   assert_eq!(
-    app.launch_picker.as_ref().unwrap().reasoning,
-    ReasoningSetting::On
+    app.launch_picker.as_ref().unwrap().user_knobs.reasoning,
+    Some(true)
   );
 }
 
@@ -400,32 +406,28 @@ fn launch_picker_seeds_from_persisted_last_params() {
         "mode": "chat",
         "ctx": 8192,
         "reasoning": true,
-        "advanced": ["--threads", "8"],
+        "knobs": {"ctx": 8192, "reasoning": true, "threads": 8},
+        "extras": ["--rope-freq-base", "10000"],
       },
     }],
   }));
   app.go_top();
   app.open_launch_picker();
   let picker = app.launch_picker.as_ref().expect("picker open");
-  assert_eq!(picker.ctx, Some(8192));
-  // Round-8: persisted `reasoning: true` lands on the explicit
-  // `On` tri-state, not on the `ModelDefault` neutral slot.
-  use llamastash::tui::launch_picker::ReasoningSetting;
+  assert_eq!(picker.user_knobs.ctx, Some(8192));
   assert_eq!(
-    picker.reasoning,
-    ReasoningSetting::On,
-    "reasoning toggle must seed from last_params"
+    picker.user_knobs.reasoning,
+    Some(true),
+    "reasoning toggle must seed from last_params via user_knobs"
   );
-  let advanced = app
-    .advanced_panel
-    .as_ref()
-    .expect("advanced panel seeded")
-    .buffer
-    .buffer()
-    .to_string();
+  let extras: Vec<String> = picker
+    .extras
+    .iter()
+    .map(|s| s.to_string_lossy().into_owned())
+    .collect();
   assert!(
-    advanced.contains("--threads"),
-    "advanced flags must seed from last_params: {advanced}"
+    extras.iter().any(|s| s == "--rope-freq-base"),
+    "extras must seed from last_params: {extras:?}"
   );
 }
 

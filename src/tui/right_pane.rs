@@ -211,6 +211,15 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
           &mut chips,
           app.hint_with(Focus::RightPane, Action::ToggleAutoScroll, "stop"),
         );
+        // ↑/↓ scroll the read-only running-launch view (~17 rows).
+        // Surface the chip so users discover the affordance — without
+        // it, arrows look like a no-op.
+        if let (Some(down), Some(up)) = (
+          app.hint_with(Focus::RightPane, Action::MoveDown, "scroll"),
+          app.hint_with(Focus::RightPane, Action::MoveUp, "scroll"),
+        ) {
+          chips.push(bidirectional_chip(&up, &down, "scroll"));
+        }
         push(&mut chips, app.hint(Focus::RightPane, Action::YankPath));
         push(&mut chips, app.hint(Focus::RightPane, Action::YankUrl));
         push(&mut chips, app.hint(Focus::RightPane, Action::YankCurl));
@@ -236,10 +245,41 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
             chips.push(chip);
           }
         }
-        push(
-          &mut chips,
-          app.hint(Focus::RightPane, Action::OpenAdvancedPanel),
-        );
+        // Surface `e:edit` so the extras row (and numeric / enum
+        // knobs) is discoverable. Without this chip, `e` looked like
+        // a no-op on the editable form because nothing in the hint
+        // strip pointed at it. Leads the cycle chips because edit is
+        // the primary mutation verb on this form. While a row's
+        // inline edit buffer is open (numeric/enum typing or the
+        // extras free-text field), the chip flips to the bound
+        // `exit_edit` key (default `Esc`) so the escape hatch from
+        // the captured-input mode is visible. The lookup rides on
+        // `Focus::ChatInput` because `handle_settings_inline_edit`
+        // resolves the cancel key through the same focus — keep the
+        // chip and the handler in lockstep so rebinds flow through.
+        //
+        // The chip only appears when the focused row is *actually*
+        // editable. Boolean rows (reasoning, flash_attn, mlock,
+        // no_mmap) are cycled with ←/→ and `e` is a no-op there —
+        // showing `e:edit` on those rows would be a lying affordance.
+        // `PickerField::is_editable` is the shared rule with
+        // `open_focused_inline_edit`.
+        let picker_ref = app.launch_picker.as_ref();
+        let inline_editing = picker_ref
+          .map(|p| p.inline_edit.is_open() || p.extras_input.is_editing())
+          .unwrap_or(false);
+        let focused_editable = picker_ref.map(|p| p.field.is_editable()).unwrap_or(false);
+        if inline_editing {
+          push(
+            &mut chips,
+            app.hint_with(Focus::ChatInput, Action::ExitEdit, "clear"),
+          );
+        } else if focused_editable {
+          push(
+            &mut chips,
+            app.hint_with(Focus::RightPane, Action::EnterEdit, "edit"),
+          );
+        }
         if let (Some(down), Some(up)) = (
           app.hint_with(Focus::RightPane, Action::MoveDown, "cycle fields"),
           app.hint_with(Focus::RightPane, Action::MoveUp, "cycle fields"),
@@ -366,6 +406,13 @@ fn render_header_stats(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &P
       let label_style = palette.label_style();
       let value_style = palette.text_style();
       Line::from(vec![
+        // `ID:L9` prefix surfaces the launch id alongside the port so
+        // it's visible without diving into the Settings tab. The
+        // label tone matches `RAM` / `CPU` so the trio reads as one
+        // styled-label cadence.
+        Span::styled("ID:", label_style),
+        Span::styled(m.launch_id.clone(), value_style),
+        Span::styled("  ", Style::default()),
         Span::styled(format!(":{}  ", m.port), palette.muted_style()),
         Span::styled(
           format!("{} ", glyph_for(m.state)),
@@ -612,23 +659,136 @@ mod tests {
       vec![
         "e:edit for launch".to_string(),
         "s:stop".to_string(),
+        "↑↓:scroll".to_string(),
         "p:path".to_string(),
         "u:url".to_string(),
         "c:curl".to_string(),
       ]
     );
     // Open the picker — the user is now editing a staged launch.
-    // Chips switch to launch+cycle+advanced. u/c are intentionally
-    // omitted on the editable form.
+    // Chips switch to launch+cycle. u/c are intentionally omitted
+    // on the editable form.
     app.open_launch_picker();
     let chips = bottom_hint_chips(&app);
     assert!(chips.contains(&"Enter:launch".to_string()));
-    assert!(chips.contains(&"a:advanced".to_string()));
     assert!(chips.contains(&"↑↓:cycle fields".to_string()));
     assert!(chips.contains(&"←→:cycle value".to_string()));
     assert!(chips.contains(&"p:path".to_string()));
     assert!(!chips.iter().any(|c| c.contains("u:url")));
     assert!(!chips.iter().any(|c| c.contains("c:curl")));
+  }
+
+  #[test]
+  fn settings_bottom_chips_hide_e_edit_when_focused_row_is_a_boolean() {
+    // `e:edit` opens an inline buffer on numeric / enum / extras rows
+    // but is a no-op on booleans (which are cycled with ←/→). The
+    // chip must hide on boolean rows so the affordance doesn't lie —
+    // `PickerField::is_editable` is the shared rule.
+    use crate::tui::keybindings::Focus;
+    use crate::tui::launch_picker::PickerField;
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake_model()];
+    app.list_cursor = 2;
+    app.focus = Focus::RightPane;
+    app.right_tab = RightTab::Settings;
+    app.open_launch_picker();
+    // Default focus lands on Ctx (editable) — baseline chip visible.
+    let baseline = bottom_hint_chips(&app);
+    assert!(baseline.contains(&"e:edit".to_string()));
+    // Move focus onto a boolean knob — chip disappears.
+    {
+      let picker = app.launch_picker.as_mut().unwrap();
+      picker.field = PickerField::Knob(crate::launch::flag_aliases::KnobField::FlashAttn);
+    }
+    let on_bool = bottom_hint_chips(&app);
+    assert!(
+      !on_bool.contains(&"e:edit".to_string()),
+      "e:edit must hide on boolean row: {on_bool:?}"
+    );
+    // Move to the extras row (editable) — chip is back.
+    {
+      let picker = app.launch_picker.as_mut().unwrap();
+      picker.field = PickerField::Extras;
+    }
+    let on_extras = bottom_hint_chips(&app);
+    assert!(
+      on_extras.contains(&"e:edit".to_string()),
+      "e:edit must reappear on the editable Extras row: {on_extras:?}"
+    );
+  }
+
+  #[test]
+  fn settings_bottom_chips_flip_e_edit_to_esc_clear_while_editing() {
+    // When a knob row's inline edit (or the extras buffer) is open,
+    // global keys are captured by the editor — surface `Esc:clear`
+    // instead of `e:edit` so the escape hatch is visible.
+    use crate::tui::keybindings::Focus;
+    use crate::tui::launch_picker::PickerField;
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake_model()];
+    app.list_cursor = 2;
+    app.focus = Focus::RightPane;
+    app.right_tab = RightTab::Settings;
+    app.open_launch_picker();
+    // Baseline: picker open, no inline edit → e:edit visible.
+    let baseline = bottom_hint_chips(&app);
+    assert!(baseline.contains(&"e:edit".to_string()));
+    assert!(!baseline.contains(&"Esc:clear".to_string()));
+    // Open inline edit on a numeric field — chip flips.
+    {
+      let picker = app.launch_picker.as_mut().unwrap();
+      picker.inline_edit.open(
+        PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx),
+        String::new(),
+      );
+    }
+    let inline = bottom_hint_chips(&app);
+    assert!(inline.contains(&"Esc:clear".to_string()));
+    assert!(!inline.contains(&"e:edit".to_string()));
+    // Close inline edit, switch to extras editing — chip still flips.
+    {
+      let picker = app.launch_picker.as_mut().unwrap();
+      picker.inline_edit.close();
+      picker.extras_input.enter_edit();
+    }
+    let extras = bottom_hint_chips(&app);
+    assert!(extras.contains(&"Esc:clear".to_string()));
+    assert!(!extras.contains(&"e:edit".to_string()));
+  }
+
+  #[test]
+  fn settings_inline_edit_clear_chip_follows_exit_edit_override() {
+    // Rebinding `chat_input.exit_edit` (the canonical home for the
+    // `ExitEdit` action) must flow through to the inline-edit chip
+    // strip — same lookup, same focus, so the chip stays honest.
+    use crate::tui::keybindings::{Focus, KeyMap};
+    use crate::tui::launch_picker::PickerField;
+    use std::collections::BTreeMap;
+    let mut keymap = KeyMap::default();
+    let overrides: BTreeMap<String, String> = [(String::from("exit_edit"), String::from("ctrl+x"))]
+      .into_iter()
+      .collect();
+    let warnings = keymap.apply_overrides(&overrides);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let mut app = App::new(AppOptions {
+      keymap,
+      ..AppOptions::default()
+    });
+    app.models = vec![fake_model()];
+    app.list_cursor = 2;
+    app.focus = Focus::RightPane;
+    app.right_tab = RightTab::Settings;
+    app.open_launch_picker();
+    let picker = app.launch_picker.as_mut().unwrap();
+    picker.inline_edit.open(
+      PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx),
+      String::new(),
+    );
+    let chips = bottom_hint_chips(&app);
+    assert!(
+      chips.iter().any(|c| c == "Ctrl+x:clear"),
+      "expected rebound chip, got {chips:?}"
+    );
   }
 
   #[test]
@@ -643,7 +803,6 @@ mod tests {
     app.right_tab = RightTab::Settings;
     let chips = bottom_hint_chips(&app);
     assert!(chips.contains(&"Enter:launch".to_string()));
-    assert!(chips.contains(&"a:advanced".to_string()));
     assert!(chips.contains(&"p:path".to_string()));
     assert!(!chips.iter().any(|c| c.contains("u:url")));
   }

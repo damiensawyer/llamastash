@@ -1,219 +1,554 @@
-//! Launch picker form state.
+//! Launch picker form state — the typed-knob editor.
 //!
-//! Three-field form (context length / reasoning / advanced) the
-//! Settings tab renders inline in the right pane. Originally lived
-//! in a centred modal overlay; round-5 (kdash-style polish) moved
-//! the rendering into `tabs::settings` so the form sits side-by-side
-//! with the models list. This module is the form's data carrier —
-//! cursor (`field`), values (`ctx`, `reasoning`), and metadata
-//! (`active_instances`, `prefer_port`).
-//!
-//! `Enter` on Settings dispatches `start_model` against the daemon;
-//! `Esc` from `Focus::RightPane` snaps back to the model list.
+//! The Settings tab renders a vertical list of rows: every
+//! `TypedKnobs` field (ctx, reasoning, n_gpu_layers, … in
+//! `knob_specs()` order) with a per-row source label (`(user)`,
+//! `(last used)`, `(arch default)`, `(model default)`,
+//! `(server default)`), plus an `extras` free-text row at the
+//! bottom. Up/Down moves between rows; Left/Right cycles the focused
+//! row's value; `e` enters inline edit; Enter launches (or commits
+//! an open edit); Backspace resets the focused row.
 
-/// Pre-canned context-length presets surfaced as quick picks.
-/// Plan reference R12. Custom values flow through the same field
-/// when the user types digits.
+use std::cell::Cell;
+use std::collections::BTreeMap;
+use std::sync::LazyLock;
+
+use crate::config::TypedKnobs;
+use crate::launch::flag_aliases::{KnobField, KV_CACHE_TYPES};
+use crate::launch::params::LayerLabel;
+
+/// Pre-canned context-length presets surfaced as quick picks. Custom
+/// values flow through the same field when the user types digits.
 pub const CTX_PRESETS: &[u32] = &[2048, 4096, 8192, 16384, 32768, 65536, 131072];
 
-/// Tri-state reasoning selector (round-8). `ModelDefault` means
-/// "don't send the reasoning flag at all" — the daemon falls back
-/// to whatever the model's metadata implies. `On` / `Off` are
-/// explicit user choices.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReasoningSetting {
-  /// Don't pass `--reasoning` (or its disable counterpart). The
-  /// daemon decides based on the GGUF's `reasoning_hint`. Round-8
-  /// default for a fresh picker so a user who never touches the
-  /// field doesn't silently override the model's expectation.
-  #[default]
-  ModelDefault,
-  On,
-  Off,
+/// Which row the cursor is on. The editor renders top-to-bottom in
+/// [`PickerField::all`] order so it doubles as the vertical-navigation
+/// order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerField {
+  Knob(KnobField),
+  Extras,
 }
 
-impl ReasoningSetting {
-  /// Human-readable label rendered in the Settings tab.
-  pub fn label(self) -> &'static str {
-    match self {
-      ReasoningSetting::ModelDefault => "model default",
-      ReasoningSetting::On => "on",
-      ReasoningSetting::Off => "off",
-    }
+/// Lazily-built navigation order — every knob in `knob_specs()`
+/// order (ctx, reasoning, n_gpu_layers, …), followed by `Extras`.
+/// Built once on first access so per-keypress navigation does no
+/// allocation.
+static ALL_FIELDS: LazyLock<Box<[PickerField]>> = LazyLock::new(|| {
+  let mut v: Vec<PickerField> = Vec::new();
+  for spec in crate::launch::flag_aliases::knob_specs() {
+    v.push(PickerField::Knob(spec.field));
+  }
+  v.push(PickerField::Extras);
+  v.into_boxed_slice()
+});
+
+impl PickerField {
+  /// All rows in render / navigation order. Returns a static slice so
+  /// `next_field` / `prev_field` don't allocate on each keypress.
+  pub fn all() -> &'static [PickerField] {
+    &ALL_FIELDS
   }
 
-  /// Wire-side encoding. `None` means "omit the field" (model
-  /// default); the daemon then falls back to its own logic.
-  pub fn as_wire(self) -> Option<bool> {
+  /// Whether `e:edit` opens an inline buffer on this row.
+  ///
+  /// - Numeric / float / enum knobs and the free-text `Extras` row
+  ///   open an `InputField` for typing.
+  /// - Boolean knobs (reasoning, flash_attn, mlock, no_mmap) don't —
+  ///   they're cycled with ←/→. Surfacing `e:edit` on a boolean row
+  ///   would be a no-op chip and a misleading affordance.
+  ///
+  /// Shared between [`crate::tui::events::open_focused_inline_edit`]
+  /// (which early-returns on booleans) and the right-pane hint strip
+  /// (which hides the chip on those rows) so the chip and the
+  /// handler stay in lockstep.
+  pub fn is_editable(self) -> bool {
     match self {
-      ReasoningSetting::ModelDefault => None,
-      ReasoningSetting::On => Some(true),
-      ReasoningSetting::Off => Some(false),
-    }
-  }
-
-  /// Cycle forward: ModelDefault → On → Off → wrap.
-  pub fn next(self) -> Self {
-    match self {
-      ReasoningSetting::ModelDefault => ReasoningSetting::On,
-      ReasoningSetting::On => ReasoningSetting::Off,
-      ReasoningSetting::Off => ReasoningSetting::ModelDefault,
-    }
-  }
-
-  /// Cycle backward — symmetric inverse of [`Self::next`].
-  pub fn prev(self) -> Self {
-    match self {
-      ReasoningSetting::ModelDefault => ReasoningSetting::Off,
-      ReasoningSetting::On => ReasoningSetting::ModelDefault,
-      ReasoningSetting::Off => ReasoningSetting::On,
-    }
-  }
-
-  /// Seed from the daemon's persisted `last_params.reasoning: bool`.
-  /// Used by `open_launch_picker` so a returning user lands back
-  /// on the exact value they shipped previously.
-  pub fn from_persisted(prev: bool) -> Self {
-    if prev {
-      ReasoningSetting::On
-    } else {
-      ReasoningSetting::Off
+      PickerField::Extras => true,
+      PickerField::Knob(k) => match k {
+        KnobField::Reasoning | KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => false,
+        KnobField::Ctx
+        | KnobField::NGpuLayers
+        | KnobField::Threads
+        | KnobField::Parallel
+        | KnobField::BatchSize
+        | KnobField::UbatchSize
+        | KnobField::Keep
+        | KnobField::RopeFreqScale
+        | KnobField::CacheTypeK
+        | KnobField::CacheTypeV => true,
+      },
     }
   }
 }
 
-/// State of the launch picker. Cheap to clone — the App owns one
-/// and rebuilds it whenever the focus opens onto a new model.
+/// Inline-edit state owned by [`LaunchPickerState`].
+///
+/// The buffer and modal `editing` flag live in `inline_edit`
+/// ([`InputField`]) so the typed-knob editor shares the
+/// `e:edit / Esc:walk-back / Enter:Submit` contract with every
+/// other text input in the TUI. The wrapper carries the two extra
+/// pieces of state `InputField` doesn't model:
+///
+/// - `field` — which `PickerField` the open edit is editing (numeric
+///   / enum knob or the extras row), so `commit_inline_edit` knows
+///   where to write the parsed value.
+/// - `error` — the inline parse / validation error rendered under
+///   the row when commit fails.
+///
+/// Both reset when the edit closes (either via successful commit
+/// or `Esc` walk-back).
+#[derive(Debug, Clone, Default)]
+pub struct InlineEdit {
+  pub field: Option<PickerField>,
+  pub input: crate::tui::input_field::InputField,
+  pub error: Option<String>,
+}
+
+impl InlineEdit {
+  /// Open the edit on `field`, seed the buffer with `initial`, and
+  /// enter edit mode so subsequent keystrokes append to the buffer.
+  pub fn open(&mut self, field: PickerField, initial: String) {
+    self.field = Some(field);
+    self.input.set_text(initial);
+    self.input.enter_edit();
+    self.error = None;
+  }
+
+  /// Close the edit — clear the field marker, drop the buffer, exit
+  /// edit mode, and clear any stale error.
+  pub fn close(&mut self) {
+    self.field = None;
+    self.input.clear();
+    self.input.exit_edit();
+    self.error = None;
+  }
+
+  /// True while the user is actively typing into the buffer (the
+  /// edit is open *and* `InputField` reports edit mode). Used by
+  /// the event router to send keys to the input instead of the
+  /// outer keymap.
+  pub fn is_open(&self) -> bool {
+    self.field.is_some() && self.input.is_editing()
+  }
+}
+
+/// State of the launch picker.
 #[derive(Debug, Clone)]
 pub struct LaunchPickerState {
   /// Display name of the focused model (rendered in the title).
   pub model_name: String,
-  /// Selected ctx length. `None` lets the supervisor honour the
-  /// GGUF's native `context_length` (no `-c` flag).
-  pub ctx: Option<u32>,
-  /// Reasoning bundle: model-default / on / off (round-8 tri-state).
-  pub reasoning: ReasoningSetting,
-  /// Index into CTX_PRESETS for cycling via Tab. `None` means
-  /// custom (free-form input or `native`).
-  pub preset_idx: Option<usize>,
-  /// Currently focused field (cycles via Tab).
+  /// User-supplied typed knobs (only fields the user explicitly set;
+  /// every other field stays `None` and inherits from the resolved
+  /// chain on render). Includes `ctx` and `reasoning`.
+  pub user_knobs: TypedKnobs,
+  /// Resolved knobs after applying the layered resolver — what the
+  /// editor shows for each row.
+  pub resolved: TypedKnobs,
+  /// Per-knob source labels for the right-aligned origin chip.
+  pub sources: BTreeMap<KnobField, LayerLabel>,
+  /// Free-form argv tail forwarded to llama-server.
+  pub extras: Vec<std::ffi::OsString>,
+  /// Modal text-input for the extras row (`is_editing()` replaces
+  /// the bespoke `extras_editing` bool; `buffer()` replaces the raw
+  /// string + cursor pair). Shares the `e:edit / Esc:walk-back /
+  /// Enter:Submit` contract with every other text input in the TUI.
+  pub extras_input: crate::tui::input_field::InputField,
+  /// Inline edit state for numeric / enum rows. Wraps an
+  /// [`InputField`] plus the `PickerField` marker so the commit path
+  /// knows which row to write back to, and an optional parse-error
+  /// string rendered under the row.
+  pub inline_edit: InlineEdit,
   pub field: PickerField,
-  /// Count of active `ManagedRow`s for the focused model. v1 does
-  /// not block duplicate launches — submitting just spins up a new
-  /// instance on a fresh port — but the picker surfaces a heads-up
-  /// so the user isn't surprised.
   pub active_instances: usize,
-  /// Soft port preference seeded from the daemon's `last_params`
-  /// snapshot. Submitted as `prefer_port` so the daemon honours it
-  /// when free and falls back to range allocation otherwise.
   pub prefer_port: Option<u16>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PickerField {
-  Ctx,
-  Reasoning,
-  Advanced,
+  /// Row offset clipped from the top of the rendered line list so the
+  /// focused row stays visible on small viewports. Recomputed on each
+  /// render using the actual area height — the `Cell` lets the
+  /// read-only render path (which only has `&App`) update the cached
+  /// offset without taking a mutable borrow.
+  pub scroll_offset: Cell<u16>,
 }
 
 impl LaunchPickerState {
   pub fn for_model(model_name: impl Into<String>) -> Self {
     Self {
       model_name: model_name.into(),
-      ctx: None,
-      reasoning: ReasoningSetting::default(),
-      preset_idx: None,
-      field: PickerField::Ctx,
+      user_knobs: TypedKnobs::default(),
+      resolved: TypedKnobs::default(),
+      sources: BTreeMap::new(),
+      extras: Vec::new(),
+      extras_input: crate::tui::input_field::InputField::default(),
+      inline_edit: InlineEdit::default(),
+      field: PickerField::Knob(KnobField::Ctx),
       active_instances: 0,
       prefer_port: None,
+      scroll_offset: Cell::new(0),
     }
   }
 
-  /// Cycle to the next ctx preset, wrapping around. Pressing the
-  /// cycle key with `ctx = None` jumps to the first preset.
-  pub fn cycle_ctx_preset(&mut self) {
-    let next = match self.preset_idx {
-      Some(i) if i + 1 < CTX_PRESETS.len() => Some(i + 1),
-      Some(_) => None,
-      None => Some(0),
-    };
-    self.preset_idx = next;
-    self.ctx = next.map(|i| CTX_PRESETS[i]);
+  /// Seed the resolved knobs + source map from the layered resolver
+  /// output. The user-knobs layer is empty on a freshly-opened
+  /// editor — the rows show inherited values.
+  pub fn set_resolved(&mut self, resolved: TypedKnobs, sources: BTreeMap<KnobField, LayerLabel>) {
+    self.resolved = resolved;
+    self.sources = sources;
   }
 
-  /// Cycle backward through ctx presets. Symmetric inverse of
-  /// [`Self::cycle_ctx_preset`] so `Up` walks the list opposite to
-  /// `Down`. The `None` (native) slot sits at the boundary: pressing
-  /// Up on the first preset lands on `None`, then on the last preset.
-  pub fn cycle_ctx_preset_prev(&mut self) {
-    let next = match self.preset_idx {
-      Some(0) => None,
-      Some(i) => Some(i - 1),
-      None => Some(CTX_PRESETS.len() - 1),
-    };
-    self.preset_idx = next;
-    self.ctx = next.map(|i| CTX_PRESETS[i]);
-  }
-
-  /// Advance the reasoning tri-state: ModelDefault → On → Off → wrap.
-  pub fn cycle_reasoning_next(&mut self) {
-    self.reasoning = self.reasoning.next();
-  }
-
-  /// Walk the reasoning tri-state backwards.
-  pub fn cycle_reasoning_prev(&mut self) {
-    self.reasoning = self.reasoning.prev();
-  }
-
-  /// Cycle the focused field's value forward (Down arrow).
-  /// - `Ctx` cycles through the preset list.
-  /// - `Reasoning` walks the tri-state.
-  /// - `Advanced` is a no-op here; the dedicated `a` keystroke
-  ///   opens the flag editor since "next value" is meaningless for
-  ///   free-form text.
+  /// Cycle the focused field's value forward (Right arrow).
   pub fn cycle_focused_value_next(&mut self) {
     match self.field {
-      PickerField::Ctx => self.cycle_ctx_preset(),
-      PickerField::Reasoning => self.cycle_reasoning_next(),
-      PickerField::Advanced => {}
+      PickerField::Knob(k) => self.cycle_knob(k, true),
+      PickerField::Extras => {}
     }
   }
 
-  /// Cycle the focused field's value backward (Up arrow). Mirrors
-  /// [`Self::cycle_focused_value_next`].
+  /// Cycle the focused field's value backward (Left arrow).
   pub fn cycle_focused_value_prev(&mut self) {
     match self.field {
-      PickerField::Ctx => self.cycle_ctx_preset_prev(),
-      PickerField::Reasoning => self.cycle_reasoning_prev(),
-      PickerField::Advanced => {}
+      PickerField::Knob(k) => self.cycle_knob(k, false),
+      PickerField::Extras => {}
     }
   }
 
-  /// True when the focused field has at least one alternate value
-  /// the user can cycle to. Lets the dispatcher distinguish a real
-  /// no-op (`Advanced`) from a silent value cycle so the help chip
-  /// strip and toasts can be honest about what `←/→` will do.
-  pub fn focused_field_is_cyclable(&self) -> bool {
-    !matches!(self.field, PickerField::Advanced)
+  fn cycle_knob(&mut self, field: KnobField, forward: bool) {
+    match field {
+      KnobField::Ctx => self.cycle_u32(field, CTX_PRESETS, forward),
+      KnobField::Reasoning => self.cycle_bool(field, forward),
+      KnobField::NGpuLayers => self.cycle_u32(field, &[0, 16, 32, 64, 99], forward),
+      KnobField::Threads => self.cycle_u32(field, &[1, 2, 4, 6, 8, 12, 16, 24], forward),
+      KnobField::Parallel => self.cycle_u32(field, &[1, 2, 4, 8, 16], forward),
+      KnobField::BatchSize => self.cycle_u32(field, &[256, 512, 1024, 2048, 4096], forward),
+      KnobField::UbatchSize => self.cycle_u32(field, &[128, 256, 512, 1024], forward),
+      KnobField::Keep => self.cycle_u32(field, &[0, 64, 128, 256, 512, 1024], forward),
+      KnobField::RopeFreqScale => self.cycle_f32(field, &[0.5, 1.0, 2.0, 4.0], forward),
+      KnobField::CacheTypeK | KnobField::CacheTypeV => self.cycle_enum(field, forward),
+      KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => {
+        self.cycle_bool(field, forward)
+      }
+    }
   }
 
+  fn cycle_u32(&mut self, field: KnobField, presets: &[u32], forward: bool) {
+    let current = self.user_value_u32(field);
+    let next = cycle_through(current, presets, forward);
+    self.set_user_u32(field, next);
+  }
+
+  fn cycle_f32(&mut self, field: KnobField, presets: &[f32], forward: bool) {
+    let current = self.user_value_f32(field);
+    let next = cycle_through(current, presets, forward);
+    self.set_user_f32(field, next);
+  }
+
+  fn cycle_enum(&mut self, field: KnobField, forward: bool) {
+    // Find the current user-set value inside the `&'static [&'static str]`
+    // catalog so cycle_through's `T = &'static str` lifetime detaches
+    // from `&self` — that lets us call `set_user_str(&mut self, ...)`
+    // immediately after without dragging a borrow. Avoids the prior
+    // `Vec<String>` + `Vec<&str>` allocation pair on every keypress.
+    let current: Option<&'static str> = self
+      .user_value_str(field)
+      .and_then(|s| KV_CACHE_TYPES.iter().copied().find(|t| *t == s));
+    let next = cycle_through(current, KV_CACHE_TYPES, forward);
+    self.set_user_str(field, next.map(|s| s.to_string()));
+  }
+
+  fn cycle_bool(&mut self, field: KnobField, forward: bool) {
+    // Tri-state: default ↔ on ↔ off (wrap).
+    let current = self.user_value_bool(field);
+    let next = if forward {
+      match current {
+        None => Some(true),
+        Some(true) => Some(false),
+        Some(false) => None,
+      }
+    } else {
+      match current {
+        None => Some(false),
+        Some(false) => Some(true),
+        Some(true) => None,
+      }
+    };
+    self.set_user_bool(field, next);
+  }
+
+  /// Backspace on a focused row: clear the user override and re-
+  /// inherit from the resolver chain.
+  pub fn reset_focused_row(&mut self) {
+    match self.field {
+      PickerField::Knob(k) => self.clear_user(k),
+      PickerField::Extras => {
+        self.extras.clear();
+      }
+    }
+  }
+
+  /// Move cursor to the next row.
   pub fn next_field(&mut self) {
-    self.field = match self.field {
-      PickerField::Ctx => PickerField::Reasoning,
-      PickerField::Reasoning => PickerField::Advanced,
-      PickerField::Advanced => PickerField::Ctx,
-    };
+    let all = PickerField::all();
+    if let Some(i) = all.iter().position(|f| *f == self.field) {
+      self.field = all[(i + 1) % all.len()];
+    }
   }
 
-  /// Cycle backward through the field set. Symmetric inverse of
-  /// [`Self::next_field`] so `Shift+Tab` walks the form in the
-  /// opposite direction.
   pub fn prev_field(&mut self) {
-    self.field = match self.field {
-      PickerField::Ctx => PickerField::Advanced,
-      PickerField::Reasoning => PickerField::Ctx,
-      PickerField::Advanced => PickerField::Reasoning,
-    };
+    let all = PickerField::all();
+    if let Some(i) = all.iter().position(|f| *f == self.field) {
+      let n = all.len();
+      self.field = all[(i + n - 1) % n];
+    }
+  }
+
+  /// True when the focused row is cyclable (Up/Down would change
+  /// the value). `Extras` is non-cyclable; the rest are.
+  pub fn focused_field_is_cyclable(&self) -> bool {
+    !matches!(self.field, PickerField::Extras)
+  }
+
+  /// Read the value the editor row should display, taking the user
+  /// override first and the resolver-chain value otherwise.
+  pub fn effective_u32(&self, field: KnobField) -> Option<u32> {
+    self.user_value_u32(field).or(self.resolved_u32(field))
+  }
+
+  pub fn effective_f32(&self, field: KnobField) -> Option<f32> {
+    self.user_value_f32(field).or(self.resolved_f32(field))
+  }
+
+  pub fn effective_str(&self, field: KnobField) -> Option<String> {
+    self
+      .user_value_str(field)
+      .map(str::to_string)
+      .or_else(|| self.resolved_str(field).map(str::to_string))
+  }
+
+  pub fn effective_bool(&self, field: KnobField) -> Option<bool> {
+    self.user_value_bool(field).or(self.resolved_bool(field))
+  }
+
+  /// Source label for `field`. Returns `LayerLabel::User` when the
+  /// user has an explicit override; falls back to the resolver's
+  /// source map otherwise, then to the spec's `fallback_label` when
+  /// the resolver hasn't populated the map yet (freshly-opened
+  /// editor before the first resolve).
+  pub fn source_for(&self, field: KnobField) -> LayerLabel {
+    if self.user_has(field) {
+      LayerLabel::User
+    } else {
+      self
+        .sources
+        .get(&field)
+        .copied()
+        .unwrap_or_else(|| crate::launch::flag_aliases::spec_for(field).fallback_label)
+    }
+  }
+
+  fn user_has(&self, field: KnobField) -> bool {
+    match field {
+      KnobField::Ctx => self.user_knobs.ctx.is_some(),
+      KnobField::Reasoning => self.user_knobs.reasoning.is_some(),
+      KnobField::NGpuLayers => self.user_knobs.n_gpu_layers.is_some(),
+      KnobField::Threads => self.user_knobs.threads.is_some(),
+      KnobField::CacheTypeK => self.user_knobs.cache_type_k.is_some(),
+      KnobField::CacheTypeV => self.user_knobs.cache_type_v.is_some(),
+      KnobField::FlashAttn => self.user_knobs.flash_attn.is_some(),
+      KnobField::Mlock => self.user_knobs.mlock.is_some(),
+      KnobField::NoMmap => self.user_knobs.no_mmap.is_some(),
+      KnobField::Parallel => self.user_knobs.parallel.is_some(),
+      KnobField::BatchSize => self.user_knobs.batch_size.is_some(),
+      KnobField::UbatchSize => self.user_knobs.ubatch_size.is_some(),
+      KnobField::RopeFreqScale => self.user_knobs.rope_freq_scale.is_some(),
+      KnobField::Keep => self.user_knobs.keep.is_some(),
+    }
+  }
+
+  fn user_value_u32(&self, field: KnobField) -> Option<u32> {
+    match field {
+      KnobField::Ctx => self.user_knobs.ctx,
+      KnobField::NGpuLayers => self.user_knobs.n_gpu_layers,
+      KnobField::Threads => self.user_knobs.threads,
+      KnobField::Parallel => self.user_knobs.parallel,
+      KnobField::BatchSize => self.user_knobs.batch_size,
+      KnobField::UbatchSize => self.user_knobs.ubatch_size,
+      KnobField::Keep => self.user_knobs.keep,
+      _ => None,
+    }
+  }
+
+  fn user_value_f32(&self, field: KnobField) -> Option<f32> {
+    match field {
+      KnobField::RopeFreqScale => self.user_knobs.rope_freq_scale,
+      _ => None,
+    }
+  }
+
+  fn user_value_str(&self, field: KnobField) -> Option<&str> {
+    match field {
+      KnobField::CacheTypeK => self.user_knobs.cache_type_k.as_deref(),
+      KnobField::CacheTypeV => self.user_knobs.cache_type_v.as_deref(),
+      _ => None,
+    }
+  }
+
+  fn user_value_bool(&self, field: KnobField) -> Option<bool> {
+    match field {
+      KnobField::Reasoning => self.user_knobs.reasoning,
+      KnobField::FlashAttn => self.user_knobs.flash_attn,
+      KnobField::Mlock => self.user_knobs.mlock,
+      KnobField::NoMmap => self.user_knobs.no_mmap,
+      _ => None,
+    }
+  }
+
+  fn resolved_u32(&self, field: KnobField) -> Option<u32> {
+    match field {
+      KnobField::Ctx => self.resolved.ctx,
+      KnobField::NGpuLayers => self.resolved.n_gpu_layers,
+      KnobField::Threads => self.resolved.threads,
+      KnobField::Parallel => self.resolved.parallel,
+      KnobField::BatchSize => self.resolved.batch_size,
+      KnobField::UbatchSize => self.resolved.ubatch_size,
+      KnobField::Keep => self.resolved.keep,
+      _ => None,
+    }
+  }
+
+  fn resolved_f32(&self, field: KnobField) -> Option<f32> {
+    match field {
+      KnobField::RopeFreqScale => self.resolved.rope_freq_scale,
+      _ => None,
+    }
+  }
+
+  fn resolved_str(&self, field: KnobField) -> Option<&str> {
+    match field {
+      KnobField::CacheTypeK => self.resolved.cache_type_k.as_deref(),
+      KnobField::CacheTypeV => self.resolved.cache_type_v.as_deref(),
+      _ => None,
+    }
+  }
+
+  fn resolved_bool(&self, field: KnobField) -> Option<bool> {
+    match field {
+      KnobField::Reasoning => self.resolved.reasoning,
+      KnobField::FlashAttn => self.resolved.flash_attn,
+      KnobField::Mlock => self.resolved.mlock,
+      KnobField::NoMmap => self.resolved.no_mmap,
+      _ => None,
+    }
+  }
+
+  pub fn set_user_u32(&mut self, field: KnobField, value: Option<u32>) {
+    match field {
+      KnobField::Ctx => self.user_knobs.ctx = value,
+      KnobField::NGpuLayers => self.user_knobs.n_gpu_layers = value,
+      KnobField::Threads => self.user_knobs.threads = value,
+      KnobField::Parallel => self.user_knobs.parallel = value,
+      KnobField::BatchSize => self.user_knobs.batch_size = value,
+      KnobField::UbatchSize => self.user_knobs.ubatch_size = value,
+      KnobField::Keep => self.user_knobs.keep = value,
+      _ => {}
+    }
+  }
+
+  pub fn set_user_f32(&mut self, field: KnobField, value: Option<f32>) {
+    if matches!(field, KnobField::RopeFreqScale) {
+      self.user_knobs.rope_freq_scale = value;
+    }
+  }
+
+  pub fn set_user_str(&mut self, field: KnobField, value: Option<String>) {
+    match field {
+      KnobField::CacheTypeK => self.user_knobs.cache_type_k = value,
+      KnobField::CacheTypeV => self.user_knobs.cache_type_v = value,
+      _ => {}
+    }
+  }
+
+  pub fn set_user_bool(&mut self, field: KnobField, value: Option<bool>) {
+    match field {
+      KnobField::Reasoning => self.user_knobs.reasoning = value,
+      KnobField::FlashAttn => self.user_knobs.flash_attn = value,
+      KnobField::Mlock => self.user_knobs.mlock = value,
+      KnobField::NoMmap => self.user_knobs.no_mmap = value,
+      _ => {}
+    }
+  }
+
+  fn clear_user(&mut self, field: KnobField) {
+    self.set_user_u32(field, None);
+    self.set_user_f32(field, None);
+    self.set_user_str(field, None);
+    self.set_user_bool(field, None);
+  }
+}
+
+/// Cycle through `presets` from `current`. Behaviour by case:
+///
+/// - **`current == None`** (row is on the inherited default): wrap to
+///   the first preset (forward) or the last preset (backward).
+/// - **`current` matches a preset exactly**: advance / reverse one
+///   slot. Falling off either end wraps back to `None` so the row
+///   re-inherits.
+/// - **`current` sits between presets** (e.g. user typed a custom
+///   value via `e`): snap to the nearest preset *in the chosen
+///   direction* — pressing `→` jumps to the smallest preset strictly
+///   greater than `current`; pressing `←` jumps to the largest one
+///   strictly less. This keeps cycling consistent with the visible
+///   direction of travel; the previous behaviour of jumping to
+///   `presets[0]` was a footgun on custom values mid-list.
+///
+/// `presets` is assumed to be sorted in ascending order — every
+/// caller in [`LaunchPickerState::cycle_knob`] passes a hand-curated
+/// ascending list.
+fn cycle_through<T: PartialEq + PartialOrd + Copy>(
+  current: Option<T>,
+  presets: &[T],
+  forward: bool,
+) -> Option<T> {
+  if presets.is_empty() {
+    return None;
+  }
+  match current {
+    None => Some(if forward {
+      presets[0]
+    } else {
+      presets[presets.len() - 1]
+    }),
+    Some(v) => {
+      if let Some(i) = presets.iter().position(|p| *p == v) {
+        return if forward {
+          if i + 1 >= presets.len() {
+            None
+          } else {
+            Some(presets[i + 1])
+          }
+        } else if i == 0 {
+          None
+        } else {
+          Some(presets[i - 1])
+        };
+      }
+      // Off-preset custom value: snap to the nearest preset in the
+      // direction the user pressed. Falls back to first/last when
+      // every preset sits on the other side of `current` (e.g. user
+      // typed something smaller than `presets[0]` then pressed ←).
+      if forward {
+        presets
+          .iter()
+          .find(|p| **p > v)
+          .copied()
+          .or(Some(presets[presets.len() - 1]))
+      } else {
+        presets
+          .iter()
+          .rev()
+          .find(|p| **p < v)
+          .copied()
+          .or(Some(presets[0]))
+      }
+    }
   }
 }
 
@@ -224,156 +559,130 @@ mod tests {
   #[test]
   fn cycle_ctx_walks_through_presets_then_returns_to_native() {
     let mut s = LaunchPickerState::for_model("qwen");
-    assert_eq!(s.ctx, None);
-    s.cycle_ctx_preset();
-    assert_eq!(s.ctx, Some(CTX_PRESETS[0]));
+    s.field = PickerField::Knob(KnobField::Ctx);
+    assert_eq!(s.user_knobs.ctx, None);
+    s.cycle_focused_value_next();
+    assert_eq!(s.user_knobs.ctx, Some(CTX_PRESETS[0]));
     for preset in CTX_PRESETS.iter().skip(1) {
-      s.cycle_ctx_preset();
-      assert_eq!(s.ctx, Some(*preset));
+      s.cycle_focused_value_next();
+      assert_eq!(s.user_knobs.ctx, Some(*preset));
     }
-    s.cycle_ctx_preset();
-    assert_eq!(s.ctx, None, "wraps back to native");
-  }
-
-  #[test]
-  fn reasoning_default_for_new_picker_is_model_default() {
-    // Round-8: a fresh picker shows "model default" rather than
-    // the legacy `off` — opening the form for a chat model with a
-    // reasoning hint won't silently turn it off.
-    let s = LaunchPickerState::for_model("qwen");
-    assert_eq!(s.reasoning, ReasoningSetting::ModelDefault);
-    assert_eq!(s.reasoning.label(), "model default");
-    assert_eq!(s.reasoning.as_wire(), None);
+    s.cycle_focused_value_next();
+    assert_eq!(s.user_knobs.ctx, None, "wraps back to native");
   }
 
   #[test]
   fn reasoning_cycle_walks_tri_state_in_both_directions() {
     let mut s = LaunchPickerState::for_model("qwen");
-    // Forward: ModelDefault → On → Off → wrap.
-    s.cycle_reasoning_next();
-    assert_eq!(s.reasoning, ReasoningSetting::On);
-    s.cycle_reasoning_next();
-    assert_eq!(s.reasoning, ReasoningSetting::Off);
-    s.cycle_reasoning_next();
-    assert_eq!(s.reasoning, ReasoningSetting::ModelDefault);
-    // Backward: ModelDefault → Off → On → wrap.
-    s.cycle_reasoning_prev();
-    assert_eq!(s.reasoning, ReasoningSetting::Off);
-    s.cycle_reasoning_prev();
-    assert_eq!(s.reasoning, ReasoningSetting::On);
-    s.cycle_reasoning_prev();
-    assert_eq!(s.reasoning, ReasoningSetting::ModelDefault);
+    s.field = PickerField::Knob(KnobField::Reasoning);
+    s.cycle_focused_value_next();
+    assert_eq!(s.user_knobs.reasoning, Some(true));
+    s.cycle_focused_value_next();
+    assert_eq!(s.user_knobs.reasoning, Some(false));
+    s.cycle_focused_value_next();
+    assert_eq!(s.user_knobs.reasoning, None);
   }
 
   #[test]
-  fn reasoning_setting_wire_encoding_omits_model_default() {
-    assert_eq!(ReasoningSetting::ModelDefault.as_wire(), None);
-    assert_eq!(ReasoningSetting::On.as_wire(), Some(true));
-    assert_eq!(ReasoningSetting::Off.as_wire(), Some(false));
-  }
-
-  #[test]
-  fn reasoning_setting_from_persisted_maps_bool_round_trip() {
-    assert_eq!(ReasoningSetting::from_persisted(true), ReasoningSetting::On);
-    assert_eq!(
-      ReasoningSetting::from_persisted(false),
-      ReasoningSetting::Off
+  fn next_field_iterates_every_picker_row() {
+    let mut s = LaunchPickerState::for_model("qwen");
+    let all = PickerField::all();
+    assert!(
+      all.len() > 14,
+      "should cover ctx + reasoning + 12 knobs + extras"
     );
-  }
-
-  #[test]
-  fn next_field_cycles_three_fields() {
-    let mut s = LaunchPickerState::for_model("qwen");
-    assert_eq!(s.field, PickerField::Ctx);
-    s.next_field();
-    assert_eq!(s.field, PickerField::Reasoning);
-    s.next_field();
-    assert_eq!(s.field, PickerField::Advanced);
-    s.next_field();
-    assert_eq!(s.field, PickerField::Ctx);
-  }
-
-  #[test]
-  fn cycle_ctx_preset_prev_is_inverse_of_cycle_ctx_preset() {
-    // Up should walk the preset list in reverse. `None` (native)
-    // sits at the boundary so a fresh state with `None` jumps to
-    // the last preset on Up, then walks down to the first, then
-    // back to `None` on the next Up.
-    let mut s = LaunchPickerState::for_model("qwen");
-    assert_eq!(s.ctx, None);
-    s.cycle_ctx_preset_prev();
-    assert_eq!(s.ctx, Some(*CTX_PRESETS.last().unwrap()));
-    for preset in CTX_PRESETS.iter().rev().skip(1) {
-      s.cycle_ctx_preset_prev();
-      assert_eq!(s.ctx, Some(*preset));
+    for expected in all.iter().skip(1).chain(std::iter::once(&all[0])) {
+      s.next_field();
+      assert_eq!(s.field, *expected);
     }
-    s.cycle_ctx_preset_prev();
-    assert_eq!(s.ctx, None, "wraps back to native after the first preset");
   }
 
   #[test]
-  fn cycle_focused_value_walks_ctx_when_ctx_focused() {
+  fn cycle_knob_n_gpu_layers_walks_presets() {
     let mut s = LaunchPickerState::for_model("qwen");
-    assert_eq!(s.field, PickerField::Ctx);
+    s.field = PickerField::Knob(KnobField::NGpuLayers);
     s.cycle_focused_value_next();
-    assert_eq!(
-      s.ctx,
-      Some(CTX_PRESETS[0]),
-      "Down on Ctx should advance the preset"
-    );
-    s.cycle_focused_value_prev();
-    assert_eq!(s.ctx, None, "Up on Ctx returns to native");
-  }
-
-  #[test]
-  fn cycle_focused_value_walks_reasoning_tri_state_when_reasoning_focused() {
-    // Round-8: Reasoning is now ModelDefault → On → Off → wrap.
-    let mut s = LaunchPickerState::for_model("qwen");
-    s.field = PickerField::Reasoning;
-    assert_eq!(s.reasoning, ReasoningSetting::ModelDefault);
+    assert_eq!(s.user_knobs.n_gpu_layers, Some(0));
     s.cycle_focused_value_next();
-    assert_eq!(
-      s.reasoning,
-      ReasoningSetting::On,
-      "Down on Reasoning walks to On"
-    );
-    s.cycle_focused_value_prev();
-    assert_eq!(
-      s.reasoning,
-      ReasoningSetting::ModelDefault,
-      "Up on Reasoning walks back to ModelDefault"
-    );
+    assert_eq!(s.user_knobs.n_gpu_layers, Some(16));
   }
 
   #[test]
-  fn cycle_focused_value_is_noop_when_advanced_focused() {
-    // Advanced is free-form text edited in a separate panel —
-    // "next value" has no meaning here, so Up/Down stay inert and
-    // the user opens the editor with `a`.
+  fn cycle_knob_flash_attn_walks_tristate() {
     let mut s = LaunchPickerState::for_model("qwen");
-    s.field = PickerField::Advanced;
-    let snapshot = (s.ctx, s.reasoning);
+    s.field = PickerField::Knob(KnobField::FlashAttn);
     s.cycle_focused_value_next();
-    s.cycle_focused_value_prev();
-    assert_eq!(
-      (s.ctx, s.reasoning),
-      snapshot,
-      "Advanced field must not bleed into Ctx/Reasoning state"
-    );
+    assert_eq!(s.user_knobs.flash_attn, Some(true));
+    s.cycle_focused_value_next();
+    assert_eq!(s.user_knobs.flash_attn, Some(false));
+    s.cycle_focused_value_next();
+    assert_eq!(s.user_knobs.flash_attn, None);
   }
 
   #[test]
-  fn prev_field_is_inverse_of_next_field() {
-    // Shift+Tab walks the form in reverse — Ctx → Advanced →
-    // Reasoning → Ctx — so three calls land back on the start. This
-    // is what makes the picker form feel reversible.
+  fn reset_focused_row_clears_user_override() {
     let mut s = LaunchPickerState::for_model("qwen");
-    assert_eq!(s.field, PickerField::Ctx);
-    s.prev_field();
-    assert_eq!(s.field, PickerField::Advanced);
-    s.prev_field();
-    assert_eq!(s.field, PickerField::Reasoning);
-    s.prev_field();
-    assert_eq!(s.field, PickerField::Ctx);
+    s.field = PickerField::Knob(KnobField::Threads);
+    s.cycle_focused_value_next();
+    assert!(s.user_knobs.threads.is_some());
+    s.reset_focused_row();
+    assert!(s.user_knobs.threads.is_none());
+  }
+
+  #[test]
+  fn source_for_falls_through_to_resolver_when_no_user_override() {
+    let mut s = LaunchPickerState::for_model("qwen");
+    let mut sources = BTreeMap::new();
+    sources.insert(KnobField::NGpuLayers, LayerLabel::ArchDefault);
+    s.set_resolved(
+      TypedKnobs {
+        n_gpu_layers: Some(99),
+        ..TypedKnobs::default()
+      },
+      sources,
+    );
+    assert_eq!(s.source_for(KnobField::NGpuLayers), LayerLabel::ArchDefault);
+    // User override flips the source to User.
+    s.user_knobs.n_gpu_layers = Some(32);
+    assert_eq!(s.source_for(KnobField::NGpuLayers), LayerLabel::User);
+  }
+
+  #[test]
+  fn cycle_through_starts_at_first_preset_when_current_is_none() {
+    assert_eq!(cycle_through::<u32>(None, &[1, 2, 3], true), Some(1));
+    assert_eq!(cycle_through::<u32>(None, &[1, 2, 3], false), Some(3));
+  }
+
+  #[test]
+  fn cycle_through_wraps_to_none_at_the_end() {
+    assert_eq!(cycle_through::<u32>(Some(3), &[1, 2, 3], true), None);
+    assert_eq!(cycle_through::<u32>(Some(1), &[1, 2, 3], false), None);
+  }
+
+  #[test]
+  fn cycle_through_off_preset_snaps_to_nearest_in_direction() {
+    // User typed `n_gpu_layers=42` via `e`, then presses →.
+    let presets = &[0, 16, 32, 64, 99];
+    assert_eq!(cycle_through(Some(42_u32), presets, true), Some(64));
+    assert_eq!(cycle_through(Some(42_u32), presets, false), Some(32));
+  }
+
+  #[test]
+  fn cycle_through_off_preset_below_first_snaps_to_first_going_forward() {
+    let presets = &[10, 20, 30];
+    // Forward from a value below presets[0] → first preset > current = 10.
+    assert_eq!(cycle_through(Some(5_u32), presets, true), Some(10));
+    // Backward from below presets[0] has nothing smaller → fall back
+    // to first preset.
+    assert_eq!(cycle_through(Some(5_u32), presets, false), Some(10));
+  }
+
+  #[test]
+  fn cycle_through_off_preset_above_last_snaps_to_last_going_backward() {
+    let presets = &[10, 20, 30];
+    assert_eq!(cycle_through(Some(99_u32), presets, false), Some(30));
+    // Forward from above presets[last] has nothing greater → fall back
+    // to last preset.
+    assert_eq!(cycle_through(Some(99_u32), presets, true), Some(30));
   }
 }

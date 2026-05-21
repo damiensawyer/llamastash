@@ -5,6 +5,7 @@
 //! the TestBackend smoke test and the inline unit tests assert
 //! behaviour without spinning up tokio.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -14,7 +15,6 @@ use serde_json::Value;
 use crate::daemon::host_metrics::HostMetricsSnapshot;
 use crate::discovery::DiscoveredModel;
 use crate::theme::{palette_for, Palette, ThemeName};
-use crate::tui::advanced_panel::AdvancedPanelState;
 use crate::tui::filter::rank;
 use crate::tui::keybindings::{Action, Focus, KeyMap};
 use crate::tui::launch_picker::LaunchPickerState;
@@ -76,7 +76,15 @@ pub struct ManagedRow {
 pub struct LastParamsRow {
   pub ctx: Option<u32>,
   pub reasoning: bool,
-  pub advanced: Vec<String>,
+  /// User-supplied typed-knob deltas from the last successful launch
+  /// (the *user's* contribution, not the resolved set). The editor
+  /// seeds its `user_knobs` row directly from this so a returning
+  /// user lands on the same overrides; rows the user never touched
+  /// re-resolve from yaml / built-in / model default.
+  pub knobs: crate::config::TypedKnobs,
+  /// Free-form argv tail that landed on `--`. Surfaces back in the
+  /// editor's `extras` row.
+  pub extras: Vec<String>,
   /// Port the model was last successfully bound on. The picker
   /// passes this back as a soft preference (`prefer_port`) so a
   /// returning user lands on the same port if it's still free.
@@ -176,7 +184,20 @@ pub struct App {
   /// enters edit on `open_filter` so the user can type immediately.
   pub filter_input: crate::tui::input_field::InputField,
   pub launch_picker: Option<LaunchPickerState>,
-  pub advanced_panel: Option<AdvancedPanelState>,
+  /// Vertical scroll offset for the Settings tab's read-only
+  /// running-launch view. The view shows ~17 rows (launch id, 14
+  /// typed knobs, extras, footer); on a short viewport the user
+  /// scrolls with ↑/↓. Resets on model-list nav and when the picker
+  /// opens or closes.
+  ///
+  /// `Cell` so the render path (which holds `&App`) can write back
+  /// the clamped value when the stored offset drifts past
+  /// `max_scroll` — without writeback, holding ↓ past the bottom
+  /// would inflate the stored offset and the next ↑ press would
+  /// appear to do nothing until the value dropped back below
+  /// `max_scroll`. Same pattern as
+  /// [`LaunchPickerState::scroll_offset`].
+  pub running_view_scroll: Cell<u16>,
   pub toast: Option<(String, Instant)>,
   pub daemon_connected: bool,
   /// Snapshot of the daemon-side metadata block from the most recent
@@ -260,7 +281,8 @@ pub enum ConfirmAction {
     model_path: PathBuf,
     ctx: Option<u32>,
     reasoning: Option<bool>,
-    advanced: Vec<String>,
+    knobs: crate::config::TypedKnobs,
+    extras: Vec<String>,
     mode: Option<crate::launch::mode::LaunchMode>,
     prefer_port: Option<u16>,
   },
@@ -285,7 +307,7 @@ impl App {
       list_cursor: 0,
       filter_input: crate::tui::input_field::InputField::new(),
       launch_picker: None,
-      advanced_panel: None,
+      running_view_scroll: Cell::new(0),
       toast: None,
       daemon_connected: false,
       daemon_info: DaemonInfo::default(),
@@ -637,8 +659,12 @@ impl App {
           .get("reasoning")
           .and_then(Value::as_bool)
           .unwrap_or(false);
-        let advanced = params
-          .get("advanced")
+        let knobs = params
+          .get("knobs")
+          .and_then(|v| serde_json::from_value(v.clone()).ok())
+          .unwrap_or_default();
+        let extras = params
+          .get("extras")
           .and_then(Value::as_array)
           .map(|items| {
             items
@@ -659,7 +685,8 @@ impl App {
           LastParamsRow {
             ctx,
             reasoning,
-            advanced,
+            knobs,
+            extras,
             port,
           },
         );
@@ -819,10 +846,15 @@ impl App {
   /// path *before* the move so we can compare against the path
   /// *after*.
   fn sync_picker_to_focus(&mut self, before: Option<PathBuf>) {
+    let after = self.focused_path();
+    if before != after {
+      // Scroll offset is per-focused-model; clear it on cursor moves
+      // so the new model's running-launch view opens at the top.
+      self.running_view_scroll.set(0);
+    }
     if self.launch_picker.is_none() {
       return;
     }
-    let after = self.focused_path();
     if before != after {
       self.launch_picker = None;
     }
@@ -970,19 +1002,18 @@ impl App {
     let mut state = LaunchPickerState::for_model(name);
     if let Some(p) = &path {
       if let Some(last) = self.last_params.get(p) {
-        state.ctx = last.ctx;
-        // Returning users land on their last explicit on/off
-        // choice. Only a brand-new picker shows the model-default
-        // tri-state — `from_persisted` collapses the daemon-side
-        // `bool` back into the explicit pair.
-        state.reasoning =
-          crate::tui::launch_picker::ReasoningSetting::from_persisted(last.reasoning);
-        state.preset_idx = last.ctx.and_then(|c| {
-          crate::tui::launch_picker::CTX_PRESETS
-            .iter()
-            .position(|val| *val == c)
-        });
         state.prefer_port = last.port;
+        // R20: returning user inherits the typed-knob deltas they
+        // last shipped. The daemon persists only user-supplied
+        // deltas (not the fully resolved set) so seeding straight
+        // into `user_knobs` keeps the picker's source labels
+        // honest — every persisted knob shows `(user)`, the rest
+        // re-resolve from yaml / built-in / model default.
+        //
+        // `ctx` and `reasoning` are now part of `TypedKnobs`, so
+        // they ride along inside `last.knobs` without dedicated
+        // seeding paths.
+        state.user_knobs = last.knobs.clone();
       }
     }
     state.active_instances = active_count;
@@ -994,63 +1025,32 @@ impl App {
   /// for the focused path, so a returning user lands on the params
   /// they last shipped. No-op when the cursor is on a header.
   pub fn open_launch_picker(&mut self) {
-    let picker = match self.build_default_picker() {
+    let mut picker = match self.build_default_picker() {
       Some(p) => p,
       None => return,
     };
-    // Materialise the advanced-panel buffer too when persisted
-    // flags exist for the focused path. This side effect is owned
-    // by `open_launch_picker` — `build_default_picker` stays pure
-    // so render paths can call it freely.
+    // Seed the extras buffer too when persisted extras exist for
+    // the focused path. This side effect is owned by
+    // `open_launch_picker` — `build_default_picker` stays pure so
+    // render paths can call it freely.
     if let Some(path) = self.focused_path() {
       if let Some(last) = self.last_params.get(&path) {
-        if !last.advanced.is_empty() {
-          let mut buffer = crate::tui::input_field::InputField::with_text(last.advanced.join(" "));
-          buffer.enter_edit();
-          self.advanced_panel = Some(AdvancedPanelState { buffer });
+        if !last.extras.is_empty() {
+          picker.extras = last.extras.iter().map(std::ffi::OsString::from).collect();
         }
       }
     }
     self.launch_picker = Some(picker);
-    // Pressing Enter:launch on a model routes the user to the
-    // Settings tab in the right pane. The pane itself is always
-    // visible (it follows the cursor) so we only have to flip the
-    // focus + active tab — no `force_open` plumbing required.
+    self.running_view_scroll.set(0);
     self.right_tab = RightTab::Settings;
     self.focus = Focus::RightPane;
   }
 
   pub fn close_launch_picker(&mut self) {
     self.launch_picker = None;
+    self.running_view_scroll.set(0);
     self.focus = Focus::List;
-    // Snap the right tab back to Settings — the canonical home
-    // for any selection regardless of launch state — so the next
-    // model-list visit lands on a meaningful tab even when the
-    // new selection has no managed launch yet.
     self.right_tab = RightTab::Settings;
-  }
-
-  pub fn open_advanced_panel(&mut self) {
-    let mut panel = AdvancedPanelState::default();
-    // Auto-enter edit mode so the user can type immediately. The
-    // `Esc` walk-back (exit-edit → clear → close) handles teardown.
-    panel.buffer.enter_edit();
-    self.advanced_panel = Some(panel);
-    self.focus = Focus::AdvancedPanel;
-  }
-
-  pub fn close_advanced_panel(&mut self) {
-    self.advanced_panel = None;
-    // The launch form lives inline in the right pane's Settings
-    // tab now, so closing the advanced panel returns there. If
-    // the user wasn't in the form at all (no picker state), drop
-    // back to the model list.
-    self.focus = if self.launch_picker.is_some() {
-      self.right_tab = RightTab::Settings;
-      Focus::RightPane
-    } else {
-      Focus::List
-    };
   }
 
   pub fn open_filter(&mut self) {
@@ -1673,28 +1673,34 @@ mod tests {
       LastParamsRow {
         ctx: Some(16384),
         reasoning: true,
-        advanced: vec!["--flash-attn".into(), "--n-gpu-layers".into(), "20".into()],
+        knobs: crate::config::TypedKnobs {
+          ctx: Some(16384),
+          reasoning: Some(true),
+          ..Default::default()
+        },
+        extras: vec!["--rope-freq-base".into(), "10000".into()],
         port: Some(41105),
       },
     );
     app.open_launch_picker();
     let picker = app.launch_picker.as_ref().expect("picker state");
-    assert_eq!(picker.ctx, Some(16384), "ctx must seed from last_params");
-    // Round-8: the persisted `bool` reasoning collapses into the
-    // explicit tri-state — a `true` in last_params lands on `On`,
-    // not on `ModelDefault`.
     assert_eq!(
-      picker.reasoning,
-      crate::tui::launch_picker::ReasoningSetting::On,
-      "reasoning must seed from last_params"
+      picker.user_knobs.ctx,
+      Some(16384),
+      "ctx must seed from last_params via user_knobs"
+    );
+    assert_eq!(
+      picker.user_knobs.reasoning,
+      Some(true),
+      "reasoning must seed from last_params via user_knobs"
     );
     assert_eq!(picker.prefer_port, Some(41105), "port must seed too");
-    let advanced = app
-      .advanced_panel
-      .as_ref()
-      .map(|p| p.buffer.buffer().to_string())
-      .expect("advanced panel must materialise when last_params carries flags");
-    assert_eq!(advanced, "--flash-attn --n-gpu-layers 20");
+    let extras: Vec<String> = picker
+      .extras
+      .iter()
+      .map(|s| s.to_string_lossy().into_owned())
+      .collect();
+    assert_eq!(extras, vec!["--rope-freq-base", "10000"]);
   }
 
   fn ready_managed(path: &str, port: u16, state: SurfaceState) -> ManagedRow {

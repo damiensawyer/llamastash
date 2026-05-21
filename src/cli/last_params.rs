@@ -56,6 +56,20 @@ pub async fn handle(args: LastParamsArgs, cli: &Cli, config: &Config) -> CliResu
   Ok(())
 }
 
+/// Stringify a single knob value for the `ADVANCED` cell. Bools,
+/// numbers, and strings render bare (`flash_attn:true`,
+/// `threads:2`, `cache_type_k:f16`); fall back to JSON for anything
+/// the typed-knob schema doesn't currently emit, so future field
+/// additions degrade gracefully instead of producing `null`.
+fn knob_value_str(v: &Value) -> String {
+  match v {
+    Value::String(s) => s.clone(),
+    Value::Bool(b) => b.to_string(),
+    Value::Number(n) => n.to_string(),
+    _ => v.to_string(),
+  }
+}
+
 /// Pure renderer for `last-params` human output. Empty rows surface a
 /// dim sentinel; non-empty rows pad on TTY and emit byte-stable TSV
 /// when piped. Extracted so unit tests can pin both branches without
@@ -69,11 +83,12 @@ fn render_last_params_human(rows: &[Value]) -> String {
     );
   }
   let tty = console::colors_enabled();
-  let header = ["MODEL", "CTX", "REASONING", "ADVANCED"];
+  let header = ["MODEL", "CTX", "REASONING", "ADVANCED", "EXTRAS"];
   let table_rows: Vec<Vec<String>> = rows
     .iter()
     .map(|r| {
       let path = crate::cli::output::row_path(r).unwrap_or("?");
+      let name = crate::util::paths::model_display_name(std::path::Path::new(path));
       let params = r.get("params");
       let ctx = params
         .and_then(|p| p.get("ctx"))
@@ -86,8 +101,23 @@ fn render_last_params_human(rows: &[Value]) -> String {
         .map(|b| if b { "on" } else { "off" }.to_string())
         .unwrap_or_else(|| "-".into());
       let reasoning = colors::reasoning_cell(&reasoning_raw);
+      // `ADVANCED` collapses every typed knob *except* `ctx` /
+      // `reasoning` (those already get dedicated columns) into a
+      // compact `k:v, k:v` list so the row stays readable while
+      // surfacing the full knob set the user staged.
       let advanced = params
-        .and_then(|p| p.get("advanced"))
+        .and_then(|p| p.get("knobs"))
+        .and_then(Value::as_object)
+        .map(|m| {
+          m.iter()
+            .filter(|(k, v)| !v.is_null() && k.as_str() != "ctx" && k.as_str() != "reasoning")
+            .map(|(k, v)| format!("{k}:{}", knob_value_str(v)))
+            .collect::<Vec<_>>()
+            .join(", ")
+        })
+        .unwrap_or_default();
+      let extras = params
+        .and_then(|p| p.get("extras"))
         .and_then(Value::as_array)
         .map(|a| {
           a.iter()
@@ -96,16 +126,7 @@ fn render_last_params_human(rows: &[Value]) -> String {
             .join(" ")
         })
         .unwrap_or_default();
-      vec![
-        if tty {
-          colors::path(path)
-        } else {
-          path.to_string()
-        },
-        ctx,
-        reasoning,
-        advanced,
-      ]
+      vec![name, ctx, reasoning, advanced, extras]
     })
     .collect();
   let mut out = format::table(&header, &table_rows);
@@ -144,7 +165,13 @@ mod tests {
     }
   }
 
-  fn row(path: &str, ctx: Option<u64>, reasoning: Option<bool>, advanced: &[&str]) -> Value {
+  fn row(
+    path: &str,
+    ctx: Option<u64>,
+    reasoning: Option<bool>,
+    knobs: &[(&str, Value)],
+    extras: &[&str],
+  ) -> Value {
     let mut params = serde_json::Map::new();
     if let Some(c) = ctx {
       params.insert("ctx".into(), json!(c));
@@ -152,10 +179,17 @@ mod tests {
     if let Some(r) = reasoning {
       params.insert("reasoning".into(), json!(r));
     }
-    if !advanced.is_empty() {
+    if !knobs.is_empty() {
+      let mut k = serde_json::Map::new();
+      for (key, val) in knobs {
+        k.insert((*key).into(), val.clone());
+      }
+      params.insert("knobs".into(), Value::Object(k));
+    }
+    if !extras.is_empty() {
       params.insert(
-        "advanced".into(),
-        Value::Array(advanced.iter().map(|s| json!(s)).collect()),
+        "extras".into(),
+        Value::Array(extras.iter().map(|s| json!(s)).collect()),
       );
     }
     json!({"id": {"path": path}, "params": Value::Object(params)})
@@ -175,22 +209,73 @@ mod tests {
   fn render_last_params_human_tsv_branch_is_byte_stable() {
     let _g = ColorGuard::set(false);
     let rows = vec![
-      row("/m/qwen.gguf", Some(32768), Some(true), &["--threads", "8"]),
-      row("/m/phi.gguf", None, Some(false), &[]),
+      row(
+        "/m/qwen.gguf",
+        Some(32768),
+        Some(true),
+        &[("threads", json!(8))],
+        &["--foo", "bar"],
+      ),
+      row("/m/phi.gguf", None, Some(false), &[], &[]),
     ];
     let out = render_last_params_human(&rows);
     assert_eq!(
       out,
-      "MODEL\tCTX\tREASONING\tADVANCED\n\
-       /m/qwen.gguf\t32768\ton\t--threads 8\n\
-       /m/phi.gguf\t-\toff\t\n"
+      "MODEL\tCTX\tREASONING\tADVANCED\tEXTRAS\n\
+       qwen\t32768\ton\tthreads:8\t--foo bar\n\
+       phi\t-\toff\t\t\n"
     );
+  }
+
+  #[test]
+  fn render_last_params_human_advanced_skips_ctx_reasoning_and_joins_with_commas() {
+    // ADVANCED column collapses every knob except `ctx` / `reasoning`
+    // (those have dedicated columns) into a comma-joined `k:v` list.
+    // String values render bare (no JSON quoting); the column stays
+    // BTreeMap-sorted for stable diffs.
+    let _g = ColorGuard::set(false);
+    let rows = vec![row(
+      "/m/qwen.gguf",
+      Some(2048),
+      Some(true),
+      &[
+        ("ctx", json!(2048)),
+        ("reasoning", json!(true)),
+        ("threads", json!(2)),
+        ("cache_type_k", json!("f16")),
+        ("flash_attn", json!(true)),
+      ],
+      &[],
+    )];
+    let out = render_last_params_human(&rows);
+    let advanced = out.lines().nth(1).and_then(|l| l.split('\t').nth(3));
+    assert_eq!(
+      advanced,
+      Some("cache_type_k:f16, flash_attn:true, threads:2")
+    );
+  }
+
+  #[test]
+  fn render_last_params_human_uses_file_stem_for_model_column() {
+    // First column is the model name (file stem), not the full path —
+    // keeps the table readable on terminals that don't wrap.
+    let _g = ColorGuard::set(false);
+    let rows = vec![row(
+      "/home/u/.cache/hf/blobs/abcdef-gemma-3-12b-it-Q4_K_M.gguf",
+      None,
+      None,
+      &[],
+      &[],
+    )];
+    let out = render_last_params_human(&rows);
+    let name = out.lines().nth(1).and_then(|l| l.split('\t').next());
+    assert_eq!(name, Some("abcdef-gemma-3-12b-it-Q4_K_M"));
   }
 
   #[test]
   fn render_last_params_human_tty_branch_pads_and_appends_count_footer() {
     let _g = ColorGuard::set(true);
-    let rows = vec![row("/m/qwen.gguf", Some(32768), Some(true), &[])];
+    let rows = vec![row("/m/qwen.gguf", Some(32768), Some(true), &[], &[])];
     let out = render_last_params_human(&rows);
     let plain = console::strip_ansi_codes(&out);
     assert!(plain.starts_with("MODEL"), "header missing: {plain:?}");

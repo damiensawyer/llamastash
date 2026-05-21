@@ -193,6 +193,24 @@ Do not flag these for deletion or `.gitignore` during reviews — they are part 
 - `docs/solutions/*.md` — solution memos when present.
 - `.context/compound-engineering/ce-review/*` — multi-agent review run artifacts.
 
+## Built-in defaults table maintenance
+
+The static `(architecture, gpu_backend) → TypedKnobs` defaults table
+lives in `src/launch/defaults_table.rs`. When `data/benchmark-snapshot.json`
+adds a new recommender pick, audit the table coverage:
+
+- Architectures listed in the snapshot but missing from `COVERED_ARCHS`
+  fall through to the conservative `*` row (which only seeds
+  `n_gpu_layers: 99` on GPU backends).
+- `FLASH_ATTN_ELIGIBLE` is opt-in only — extend it once measurement
+  confirms a new architecture supports flash-attn cleanly on NVIDIA
+  / Apple Metal. AMD/HIP flash-attn coverage stays uneven; leave to
+  user override via `config.yaml arch_defaults`.
+- Folklore-only flags (`mlock`, `no_mmap`, KV-cache quant types) stay
+  unset at the table level until measurement supports them.
+
+A TODO entry tracks the AMD/HIP `no_mmap` measurement follow-up.
+
 ## Common gotchas
 
 - The CLI/TUI/daemon are one binary. `cargo run -- daemon start` and `cargo run` (TUI) talk to each other via the same socket — running two `cargo run` invocations in parallel without distinct `LLAMASTASH_SOCKET` will both attach to the same daemon.

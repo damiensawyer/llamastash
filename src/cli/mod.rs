@@ -25,6 +25,7 @@ pub mod resolve;
 pub mod start;
 pub mod status;
 pub mod stop;
+pub mod tail_args;
 #[cfg(feature = "uat")]
 pub mod uat;
 

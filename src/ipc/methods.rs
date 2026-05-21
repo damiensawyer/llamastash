@@ -162,10 +162,11 @@ pub struct LaunchEnv {
   pub log_dir: PathBuf,
   pub probe: ProbeOptions,
   /// Per-architecture launch defaults sourced from
-  /// `Config.arch_defaults` (R68). Applied in `start_model_handler`
-  /// after caller-supplied flags so preset / last-params outrank
-  /// arch defaults per R69 precedence. Empty map = no merge.
-  pub arch_defaults: std::collections::BTreeMap<String, crate::config::ArchDefaults>,
+  /// `Config.arch_defaults` — user escape hatch over the built-in
+  /// `(arch, gpu_backend)` table. `start_model_handler` lands these
+  /// on the `LayerLabel::ArchDefault` layer of the resolver, between
+  /// `LastUsed` and `BuiltIn`. Empty map = no escape-hatch layer.
+  pub arch_defaults: std::collections::BTreeMap<String, crate::config::TypedKnobs>,
 }
 
 impl MethodContext {
@@ -386,8 +387,9 @@ async fn status_response(ctx: &MethodContext) -> Value {
       "ctx": params.ctx,
       "port": params.port,
       "reasoning": params.reasoning,
-      "advanced": params
-        .advanced
+      "knobs": &params.knobs,
+      "extras": params
+        .extras
         .iter()
         .map(|s| s.to_string_lossy().into_owned())
         .collect::<Vec<_>>(),
@@ -832,9 +834,15 @@ struct StartParams {
   prefer_port: Option<u16>,
   #[serde(default)]
   reasoning: Option<bool>,
-  /// Free-form passthrough flags appended after the bundled set.
+  /// Caller-supplied typed knob overrides. Each `Some` field lands
+  /// on the `LayerLabel::User` layer of the resolver, outranking
+  /// last_used / arch_default / built-in.
   #[serde(default)]
-  advanced: Vec<String>,
+  knobs: crate::config::TypedKnobs,
+  /// Free-form argv tail for `llama-server` flags the typed editor
+  /// doesn't model. Appended after the resolved knobs.
+  #[serde(default)]
+  extras: Vec<String>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -912,8 +920,10 @@ async fn start_model_handler(
     )
   })?;
 
-  // Resolve canonical ModelId from the GGUF header.
-  let id = resolve_model_id(&parsed.model_path)?;
+  // Resolve canonical ModelId and architecture from the GGUF header
+  // in a single read so the layered-knob resolver below doesn't have
+  // to re-open the file.
+  let (id, arch) = resolve_model_id_and_arch(&parsed.model_path)?;
 
   // Mode resolution: explicit override > catalog hint > default to chat.
   // The CLI surface refuses to default silently when discovery says
@@ -926,14 +936,14 @@ async fn start_model_handler(
     .unwrap_or(LaunchMode::Chat);
 
   // Reject pinned port values that would corrupt our internal state
-  // or require root: 0 means "OS pick" (llama-server would pick a
-  // port we never track), <1024 needs root and is almost certainly
-  // a typo / hostile.
+  // or require root: any value below 1024 (which also covers 0, the
+  // "OS picks for me" sentinel llama-server would pick a port we
+  // never track) needs root and is almost certainly a typo / hostile.
   for p in parsed.port.iter().chain(parsed.prefer_port.iter()) {
-    if *p == 0 || *p < 1024 {
+    if *p < 1024 {
       return Err(ErrorObject::new(
         ErrorCode::InvalidParams,
-        format!("port {p} is not in the allowed range (>= 1024, not 0)"),
+        format!("port {p} is not in the allowed range (>= 1024)"),
       ));
     }
   }
@@ -988,38 +998,83 @@ async fn start_model_handler(
       })?
   };
 
-  // Compose LaunchParams.
+  // Compose LaunchParams with the layered resolver. Precedence
+  // (highest first): caller-supplied `knobs` → daemon's persisted
+  // `last_params` for this model → YAML `arch_defaults[architecture]`
+  // → built-in `(arch, backend)` table → llama-server's own default.
   let mut launch_params = LaunchParams::new(parsed.model_path.clone(), mode);
-  launch_params.ctx = parsed.ctx;
   launch_params.port = Some(port);
-  launch_params.reasoning = parsed.reasoning.unwrap_or(false);
-  launch_params.advanced = parsed.advanced.into_iter().map(OsString::from).collect();
+  launch_params.extras = parsed.extras.into_iter().map(OsString::from).collect();
 
-  // Merge `arch_defaults[architecture]` into the advanced flag list
-  // for any flag the caller has not already supplied (R69 precedence:
-  // caller > arch_defaults). Architecture is read from the GGUF
-  // header we already parsed in `resolve_model_id`; if the header
-  // doesn't carry a recognisable `general.architecture`, the merge
-  // is a no-op.
-  if !env.arch_defaults.is_empty() {
-    if let Some(arch) = read_gguf_architecture(&parsed.model_path) {
-      crate::launch::params::apply_arch_defaults_for(&mut launch_params, &env.arch_defaults, &arch);
-    }
+  // Merge the caller's top-level `ctx` and `reasoning` into the
+  // User-layer typed knobs so they participate in the resolver chain
+  // alongside the other typed fields. The wire payload keeps the
+  // top-level fields for backward compat with scripted clients —
+  // they're projected onto the typed knob slots here, with explicit
+  // `knobs.{ctx,reasoning}` overrides winning if the caller set both.
+  let mut user_knobs = parsed.knobs.clone();
+  if user_knobs.ctx.is_none() {
+    user_knobs.ctx = parsed.ctx;
+  }
+  if user_knobs.reasoning.is_none() {
+    user_knobs.reasoning = parsed.reasoning;
   }
 
-  // Reject loopback-breaking / auth-bypass advanced flags before
+  // Pull the model's last_params from persisted state so a returning
+  // user inherits the knobs they last shipped (R20 precedence).
+  let last_params_knobs = {
+    let snap = ctx.state.snapshot().await;
+    snap
+      .last_params_map()
+      .get(&id)
+      .map(|p| p.knobs.clone())
+      .unwrap_or_default()
+  };
+  let empty_yaml = crate::config::TypedKnobs::default();
+  let yaml_knobs = arch
+    .as_deref()
+    .and_then(|a| env.arch_defaults.get(a))
+    .unwrap_or(&empty_yaml);
+  let backend = current_backend_flavor(ctx).await;
+  let builtin_knobs = match arch.as_deref() {
+    Some(a) => crate::launch::defaults_table::lookup(a, backend),
+    None => crate::launch::defaults_table::lookup("", backend),
+  };
+  // yaml + built-in share the `ArchDefault` chip — yaml wins per
+  // field via precedence order.
+  let resolved = crate::launch::params::resolve_layered(&[
+    (crate::launch::params::LayerLabel::User, &user_knobs),
+    (
+      crate::launch::params::LayerLabel::LastUsed,
+      &last_params_knobs,
+    ),
+    (crate::launch::params::LayerLabel::ArchDefault, yaml_knobs),
+    (
+      crate::launch::params::LayerLabel::ArchDefault,
+      &builtin_knobs,
+    ),
+  ]);
+  // Project resolved ctx/reasoning back onto the top-level
+  // `LaunchParams` fields — `compose` emits them inline (ctx as
+  // `-c <N>`, reasoning as the `--jinja --reasoning-format deepseek`
+  // bundle).
+  launch_params.ctx = resolved.knobs.ctx;
+  launch_params.reasoning = resolved.knobs.reasoning.unwrap_or(false);
+  launch_params.knobs = resolved.knobs;
+
+  // Reject loopback-breaking / auth-bypass extras flags before
   // spawn. `compose` strips defensively too, but failing fast here
   // gives callers a clear error instead of a silently-different argv.
   // Release the reservation first so a retry can re-use the port —
   // otherwise a client that repeatedly submits a banned flag would
   // permanently exhaust the port pool.
-  let banned = crate::launch::params::forbidden_in_advanced(&launch_params.advanced);
+  let banned = crate::launch::params::forbidden_in_extras(&launch_params.extras);
   if !banned.is_empty() {
     ctx.supervisors.release_reserved_port(port).await;
     return Err(ErrorObject::new(
       ErrorCode::InvalidParams,
       format!(
-        "advanced flags refused (loopback / auth contract): {}",
+        "extras flags refused (loopback / auth contract): {}",
         banned.join(", ")
       ),
     ));
@@ -1085,11 +1140,18 @@ async fn start_model_handler(
   // last_params (per the plan — only updated on a *successful*
   // Loading → Ready transition). We poll because ManagedModel
   // doesn't expose a transition channel yet.
+  //
+  // Persist the *user-supplied* knob deltas, not the resolved set —
+  // so source chips in the picker stay meaningful (a knob the user
+  // never touched keeps re-resolving from yaml / built-in / model
+  // default instead of being frozen as `(last used)`).
+  let mut persist_params = launch_params.clone();
+  persist_params.knobs = user_knobs;
   spawn_last_params_recorder(
     ctx.state.clone(),
     model.clone(),
     id.clone(),
-    launch_params,
+    persist_params,
     ctx.shutdown.clone(),
   );
 
@@ -1150,23 +1212,39 @@ async fn collect_in_use_ports(ctx: &MethodContext) -> Vec<u16> {
 }
 
 fn resolve_model_id(path: &std::path::Path) -> Result<ModelId, ErrorObject> {
+  let (id, _) = resolve_model_id_and_arch(path)?;
+  Ok(id)
+}
+
+/// One-pass GGUF header read that returns both the canonical model id
+/// and the architecture string. `start_model_handler` calls this so
+/// the layered-knob resolver lookup doesn't have to re-read the
+/// header to discover the arch. Arch is best-effort: a `None` here
+/// just means the `defaults_table` lookup falls back to the `*` row.
+fn resolve_model_id_and_arch(
+  path: &std::path::Path,
+) -> Result<(ModelId, Option<String>), ErrorObject> {
   let header = read_gguf_header(path, HeaderReadOptions::default()).map_err(|e| {
     ErrorObject::new(
       ErrorCode::InvalidParams,
       format!("could not read GGUF header at {}: {e}", path.display()),
     )
   })?;
-  Ok(compute_model_id(path, &header.raw))
+  let id = compute_model_id(path, &header.raw);
+  let arch = crate::gguf::metadata::summarise(&header.header).arch;
+  Ok((id, arch))
 }
 
-/// Best-effort GGUF architecture lookup for the arch_defaults merge.
-/// Returns `None` on any I/O / parse / missing-key failure — the merge
-/// then becomes a no-op, which is the right default behaviour: an
-/// architecture we can't read shouldn't drag in defaults that may not
-/// apply.
-fn read_gguf_architecture(path: &std::path::Path) -> Option<String> {
-  let read = read_gguf_header(path, HeaderReadOptions::default()).ok()?;
-  crate::gguf::metadata::summarise(&read.header).arch
+/// Live GPU-backend flavor — keys the built-in defaults table.
+/// Reads the host-metrics sampler when available; falls back to
+/// `Unsampled` (treated identically to `Unknown` by the table) when
+/// the daemon has no sampler attached (catalog-only tests).
+async fn current_backend_flavor(ctx: &MethodContext) -> crate::daemon::host_metrics::GpuFlavor {
+  if let Some(slot) = &ctx.host_metrics {
+    let snap = slot.read().await;
+    return snap.flavor();
+  }
+  crate::daemon::host_metrics::GpuFlavor::Unsampled
 }
 
 fn build_log_path(log_dir: &std::path::Path, id: &ModelId) -> PathBuf {
@@ -1215,7 +1293,9 @@ struct PresetsSaveParams {
   #[serde(default)]
   mode: Option<LaunchModeWire>,
   #[serde(default)]
-  advanced: Vec<String>,
+  knobs: crate::config::TypedKnobs,
+  #[serde(default)]
+  extras: Vec<String>,
 }
 
 async fn presets_save_handler(
@@ -1240,7 +1320,8 @@ async fn presets_save_handler(
   params_value.ctx = parsed.ctx;
   params_value.port = parsed.port;
   params_value.reasoning = parsed.reasoning.unwrap_or(false);
-  params_value.advanced = parsed.advanced.into_iter().map(OsString::from).collect();
+  params_value.knobs = parsed.knobs;
+  params_value.extras = parsed.extras.into_iter().map(OsString::from).collect();
   let preset = NamedPreset {
     name: parsed.name.clone(),
     params: params_value.clone(),
@@ -1327,7 +1408,8 @@ fn launch_params_row(p: &LaunchParams) -> Value {
     "ctx": p.ctx,
     "port": p.port,
     "reasoning": p.reasoning,
-    "advanced": p.advanced.iter().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+    "knobs": &p.knobs,
+    "extras": p.extras.iter().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>(),
   })
 }
 
