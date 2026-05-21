@@ -52,13 +52,7 @@ pub fn list_human(rows: &[CatalogRow]) -> String {
         .weights_bytes
         .map(crate::tui::fmt::format_bytes)
         .unwrap_or_else(|| "?".to_string());
-      vec![
-        r.name(),
-        arch.to_string(),
-        quant.to_string(),
-        ctx,
-        size,
-      ]
+      vec![r.name(), arch.to_string(), quant.to_string(), ctx, size]
     })
     .collect();
   let mut out = format::table(&header, &body);

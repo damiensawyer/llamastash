@@ -24,8 +24,6 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 
 - [ ] Init does not hand off to TUI after all steps.
 - [ ] Some HF downloaded models fail to start.
-- [ ] **Init download fails for synthetic-GGUF catalog rows.** `init --only models` (and `init --recommended`) errors when the recommended pick maps to an official-org repo that only ships safetensors. Example: `init download: HF tree listing for Qwen/Qwen3-Next-80B-A3B-Instruct returned zero matching files`. The snapshot has 6 synthetic rows for that repo (`gguf_publisher: "synthetic"`); the Qwen org hosts no GGUFs. The Thinking variant works fine because its rows already point at `bartowski/Qwen_Qwen3-Next-80B-A3B-Thinking-GGUF`.
-  - Planned fix (download-flow only, not the recommender): when `gguf_publisher == "synthetic"`, try trusted converters (`bartowski/{name}-GGUF`, `unsloth/{name}-GGUF`, `lmstudio-community/{name}-GGUF`) before failing. Scoped in [`docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md`](docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md) §"Per-host download fallback for synthetic rows".
 - [ ] Ollama models dont show up
 - [ ] Launching when llama-server is not found should show error popup
 
@@ -57,6 +55,7 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 
 ### Blockers
 
+- [ ] `start` should support advanced params like TUI.
 - [ ] **Deferred (post-c80d638)**: Port whichllm's family-selection / lineage-demotion / generation-bonus logic so `init --only models --json` output matches `whichllm --json --top 10` byte-for-byte. Today 7/10 picks and 3/10 quants match — see [Post-plan refinements §Remaining gap](docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md#remaining-gap-deliberately-not-closed) in plan 2026-05-20-001.
 - [ ] gpu/cpu offload split.
 - [ ] **Need brainstorm/plan**: Plan to prevent llama.cpp version drift/incompatibility issues. Should we bundle/fix version.

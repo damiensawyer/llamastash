@@ -38,10 +38,12 @@ use crate::init::fetch::{FetchClient, FetchError};
 /// size (R64). 1 GiB matches the brainstorm spec.
 pub const DISK_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Max bytes per per-file download. 16 GiB caps the largest plausible
-/// GGUF shard (a 70B Q4_K_M is ~43 GB total but split across shards).
-/// Enforced via hf-hub's `Api::metadata` HEAD before each download.
-pub const PER_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+/// Max bytes per per-file download. 64 GiB accommodates frontier
+/// single-file GGUFs (e.g. 27B Q8_0 ≈ 29 GB, 70B Q4_K_M ≈ 43 GB when
+/// not sharded). Enforced via hf-hub's `Api::metadata` HEAD before
+/// each download; the cap is a safety net against runaway metadata,
+/// not a model-size policy.
+pub const PER_FILE_MAX_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 /// Default HF endpoint root. Overridable via `HF_ENDPOINT` env to
 /// match `huggingface_hub`'s convention, but only to hosts on
@@ -107,6 +109,10 @@ pub struct DownloadResult {
   pub paths: Vec<PathBuf>,
   pub total_bytes: u64,
   pub revision: String,
+  /// HuggingFace repo id the files actually came from. Equal to the
+  /// caller's `spec.repo_id` for normal downloads; differs when a
+  /// synthetic-row fallback resolved to `bartowski/...` (etc.) instead.
+  pub resolved_repo_id: String,
 }
 
 impl RepoSpec {
@@ -200,6 +206,19 @@ pub struct DownloadOptions {
   /// through to `hf_hub::Repo::with_revision` so the downloaded file
   /// set matches the supplied identifier exactly.
   pub revision: Option<String>,
+  /// Trusted-converter repos to try in order if the primary spec's
+  /// repo has no GGUF (typical for "synthetic" snapshot rows that
+  /// point at an official org repo shipping only safetensors). Each
+  /// fallback is probed with `quant_hint` to pick the matching file
+  /// from a multi-quant repo. Empty list (the default) disables the
+  /// fallback path — `download_repo` errors as it did before.
+  pub fallback_repos: Vec<String>,
+  /// Quant tag (e.g. `"Q4_K_M"`) used to select a file from a fallback
+  /// repo's listing when the primary `pinned_filename` doesn't match
+  /// the fallback's naming convention (bartowski / unsloth /
+  /// lmstudio-community each pick different stems). Case-insensitive
+  /// substring match against `.gguf` siblings.
+  pub quant_hint: Option<String>,
 }
 
 impl std::fmt::Debug for DownloadOptions {
@@ -209,6 +228,8 @@ impl std::fmt::Debug for DownloadOptions {
       .field("estimated_bytes", &self.estimated_bytes)
       .field("progress", &self.progress.as_ref().map(|_| "<callback>"))
       .field("revision", &self.revision)
+      .field("fallback_repos", &self.fallback_repos)
+      .field("quant_hint", &self.quant_hint)
       .finish()
   }
 }
@@ -434,6 +455,168 @@ fn is_shard_index(s: &str) -> bool {
     && b.chars().all(|c| c.is_ascii_digit())
 }
 
+/// Build an `hf-hub` repo handle for `repo_id` at the given revision
+/// (or the default branch when `revision` is `None`). Empty revision
+/// strings collapse to the default branch — the CLI parser already
+/// rejects empty `--revision`, this is defense in depth for direct
+/// library callers.
+fn build_repo_handle(
+  api: &hf_hub::api::tokio::Api,
+  repo_id: &str,
+  revision: Option<&str>,
+) -> hf_hub::api::tokio::ApiRepo {
+  match revision {
+    Some(sha) if !sha.is_empty() => api.repo(Repo::with_revision(
+      repo_id.to_string(),
+      RepoType::Model,
+      sha.to_string(),
+    )),
+    _ => api.model(repo_id.to_string()),
+  }
+}
+
+/// Outcome of repo resolution: the spec to actually download (primary
+/// or a fallback substitute), the revision to use (always `None` for
+/// fallbacks since their revisions are unrelated to the user-supplied
+/// one), the `RepoInfo` from the listing call (so `download_repo` can
+/// reuse `info.sha`), and the filtered file list.
+type ResolvedRepo = (RepoSpec, Option<String>, hf_hub::api::RepoInfo, Vec<String>);
+
+/// Probe the primary spec; on `NoMatchingFiles` and a non-empty
+/// `fallback_repos`, try each fallback in order with a quant-substring
+/// match against its `.gguf` siblings. The first fallback that yields
+/// at least one match wins. If every probe fails, return the original
+/// `NoMatchingFiles` error so callers see the primary repo's name.
+async fn resolve_repo(
+  spec: &RepoSpec,
+  api: &hf_hub::api::tokio::Api,
+  options: &DownloadOptions,
+) -> Result<ResolvedRepo, DownloadError> {
+  let primary_handle = build_repo_handle(api, &spec.repo_id, options.revision.as_deref());
+  match probe_repo(
+    &primary_handle,
+    spec.pinned_filename.as_deref(),
+    options.extension_filter.as_deref(),
+    None,
+  )
+  .await
+  {
+    Ok((info, filtered)) => Ok((spec.clone(), options.revision.clone(), info, filtered)),
+    Err(primary_err) => {
+      // Only fall back on the explicit "repo listing came up empty"
+      // signal — transient API failures (rate limits, network blips)
+      // must surface to the caller, not silently swap repos.
+      let is_no_match = matches!(&primary_err, DownloadError::NoMatchingFiles { .. });
+      if !is_no_match || options.fallback_repos.is_empty() {
+        return Err(primary_err);
+      }
+      log::info!(
+        "init download: `{}` has no matching files; trying {} fallback(s)",
+        spec.repo_id,
+        options.fallback_repos.len(),
+      );
+      for fallback_id in &options.fallback_repos {
+        // Fallbacks always use the default branch — the user's
+        // `--revision` is meaningful for the primary spec only.
+        let handle = build_repo_handle(api, fallback_id, None);
+        match probe_repo(
+          &handle,
+          None,
+          options.extension_filter.as_deref(),
+          options.quant_hint.as_deref(),
+        )
+        .await
+        {
+          Ok((info, filtered)) => {
+            log::info!(
+              "init download: resolved synthetic row to fallback `{fallback_id}` ({} file)",
+              filtered.len(),
+            );
+            let pinned = filtered.first().cloned();
+            return Ok((
+              RepoSpec {
+                repo_id: fallback_id.clone(),
+                pinned_filename: pinned,
+              },
+              None,
+              info,
+              filtered,
+            ));
+          }
+          Err(e) => {
+            log::debug!("init download: fallback `{fallback_id}` rejected: {e}");
+            continue;
+          }
+        }
+      }
+      Err(primary_err)
+    }
+  }
+}
+
+/// List `repo`'s siblings, apply the standard file filter, and (when
+/// `quant_hint` is set) narrow to a single `.gguf` whose name carries
+/// the quant tag. Returns `NoMatchingFiles` when no file survives,
+/// propagates hf-hub errors for any other failure.
+async fn probe_repo(
+  repo: &hf_hub::api::tokio::ApiRepo,
+  pinned: Option<&str>,
+  extension: Option<&str>,
+  quant_hint: Option<&str>,
+) -> Result<(hf_hub::api::RepoInfo, Vec<String>), DownloadError> {
+  let info = repo.info().await?;
+  let all_files: Vec<String> = info.siblings.iter().map(|s| s.rfilename.clone()).collect();
+  let mut filtered = select_files(&all_files, pinned, extension);
+  if let Some(quant) = quant_hint {
+    filtered = pick_quant_match(&filtered, quant)
+      .map(|f| vec![f])
+      .unwrap_or_default();
+  }
+  if filtered.is_empty() {
+    return Err(DownloadError::NoMatchingFiles {
+      repo: repo.url("").trim_end_matches("/resolve//").to_string(),
+    });
+  }
+  Ok((info, filtered))
+}
+
+/// Pick a single `.gguf` file from `candidates` whose name contains
+/// `quant` (case-insensitive). When several match, prefer the shortest
+/// stem — bartowski-style repos often ship variants like
+/// `Model-Q4_K_M.gguf` and `Model-Q4_K_M-imatrix.gguf`; the plain form
+/// is the one we want.
+fn pick_quant_match(candidates: &[String], quant: &str) -> Option<String> {
+  let q_lower = quant.to_lowercase();
+  let mut matches: Vec<&String> = candidates
+    .iter()
+    .filter(|f| f.to_lowercase().contains(&q_lower))
+    .collect();
+  matches.sort_by_key(|f| f.len());
+  matches.first().map(|s| (*s).clone())
+}
+
+/// Trusted converter repo candidates for a `synthetic`-publisher snapshot
+/// row. The source repo `Owner/Name` ships safetensors only; these
+/// repos commonly host community GGUF conversions of the same weights.
+/// Order matters — bartowski is checked first because it's the most
+/// frequent host today.
+///
+/// Two bartowski conventions exist in the wild:
+/// `bartowski/{Owner}_{Name}-GGUF` (newer Qwen, etc.) and
+/// `bartowski/{Name}-GGUF` (older meta-llama, gemma). Both are
+/// probed; whichever resolves first wins.
+pub fn synthetic_publisher_fallbacks(source_repo_id: &str) -> Vec<String> {
+  let Some((owner, name)) = source_repo_id.split_once('/') else {
+    return Vec::new();
+  };
+  vec![
+    format!("bartowski/{owner}_{name}-GGUF"),
+    format!("bartowski/{name}-GGUF"),
+    format!("unsloth/{name}-GGUF"),
+    format!("lmstudio-community/{name}-GGUF"),
+  ]
+}
+
 /// Orchestrator. Lists, filters, prechecks disk, downloads via hf-hub.
 pub async fn download_repo(
   spec: &RepoSpec,
@@ -445,32 +628,15 @@ pub async fn download_repo(
   }
   let cache_root = hf_cache_dir()?;
   let api = build_api(cache_root.clone())?;
-  // When `revision` is set, route through `Repo::with_revision` so
-  // hf-hub resolves and caches under the pinned ref instead of the
-  // default branch. Empty revision strings collapse to the default
-  // branch — the CLI parser already rejects empty `--revision`, this
-  // is defense in depth for direct library callers.
-  let repo = match options.revision.as_deref() {
-    Some(sha) if !sha.is_empty() => api.repo(Repo::with_revision(
-      spec.repo_id.clone(),
-      RepoType::Model,
-      sha.to_string(),
-    )),
-    _ => api.model(spec.repo_id.clone()),
-  };
 
-  let info = repo.info().await?;
-  let all_files: Vec<String> = info.siblings.into_iter().map(|s| s.rfilename).collect();
-  let filtered = select_files(
-    &all_files,
-    spec.pinned_filename.as_deref(),
-    options.extension_filter.as_deref(),
-  );
-  if filtered.is_empty() {
-    return Err(DownloadError::NoMatchingFiles {
-      repo: spec.repo_id.clone(),
-    });
-  }
+  // Resolve the actual repo + file set. Tries the primary spec first;
+  // on `NoMatchingFiles` (typical for synthetic snapshot rows pointing
+  // at safetensors-only org repos), probes each fallback for a
+  // quant-matching `.gguf` and uses the first that resolves. The
+  // resolved spec replaces `spec` for the rest of the function.
+  let (resolved_spec, resolved_revision, info, filtered) =
+    resolve_repo(spec, &api, options).await?;
+  let repo = build_repo_handle(&api, &resolved_spec.repo_id, resolved_revision.as_deref());
 
   // hf-hub's RepoInfo doesn't expose per-file size, so we HEAD each
   // file's resolve URL to (a) enforce PER_FILE_MAX_BYTES and (b) feed
@@ -511,21 +677,20 @@ pub async fn download_repo(
     // Otherwise route through `download_with_progress` so the
     // chunk-level callback drives byte-accurate progress.
     let cache_repo = cache_handle.repo(hf_hub::Repo::with_revision(
-      spec.repo_id.clone(),
+      resolved_spec.repo_id.clone(),
       hf_hub::RepoType::Model,
-      options
-        .revision
+      resolved_revision
         .clone()
         .unwrap_or_else(|| "main".to_string()),
     ));
-    let cached = if options.revision.is_some() {
+    let cached = if resolved_revision.is_some() {
       cache_repo.get(filename)
     } else {
       // For the default branch hf-hub stores the resolved ref under
       // `refs/main`; the with-revision lookup misses that. Probe the
       // model handle's default cache repo too.
       cache_handle
-        .model(spec.repo_id.clone())
+        .model(resolved_spec.repo_id.clone())
         .get(filename)
         .or_else(|| cache_repo.get(filename))
     };
@@ -548,6 +713,7 @@ pub async fn download_repo(
     paths,
     total_bytes: total_size,
     revision: info.sha,
+    resolved_repo_id: resolved_spec.repo_id.clone(),
   })
 }
 
@@ -886,5 +1052,65 @@ mod tests {
     };
     let err = download_repo(&spec, &fetch, &opts).await.unwrap_err();
     assert!(matches!(err, DownloadError::Offline));
+  }
+
+  #[test]
+  fn pick_quant_match_finds_substring_case_insensitive() {
+    let files = vec![
+      "Qwen_Qwen3.6-27B-Q4_K_M.gguf".to_string(),
+      "Qwen_Qwen3.6-27B-Q8_0.gguf".to_string(),
+    ];
+    assert_eq!(
+      pick_quant_match(&files, "Q4_K_M"),
+      Some("Qwen_Qwen3.6-27B-Q4_K_M.gguf".to_string())
+    );
+    // Case-insensitive: lowercase hint still matches uppercase tag.
+    assert_eq!(
+      pick_quant_match(&files, "q8_0"),
+      Some("Qwen_Qwen3.6-27B-Q8_0.gguf".to_string())
+    );
+  }
+
+  #[test]
+  fn pick_quant_match_prefers_shortest_when_multiple_match() {
+    // bartowski sometimes ships `Model-Q4_K_M.gguf` alongside an
+    // `-imatrix` variant. The plain form is what we want.
+    let files = vec![
+      "Model-Q4_K_M-imatrix.gguf".to_string(),
+      "Model-Q4_K_M.gguf".to_string(),
+    ];
+    assert_eq!(
+      pick_quant_match(&files, "Q4_K_M"),
+      Some("Model-Q4_K_M.gguf".to_string())
+    );
+  }
+
+  #[test]
+  fn pick_quant_match_returns_none_when_no_file_carries_the_tag() {
+    let files = vec!["Model-Q5_K_M.gguf".to_string()];
+    assert!(pick_quant_match(&files, "Q4_K_M").is_none());
+    assert!(pick_quant_match(&[], "Q4_K_M").is_none());
+  }
+
+  #[test]
+  fn synthetic_publisher_fallbacks_generates_four_candidates_in_priority_order() {
+    let fallbacks = synthetic_publisher_fallbacks("Qwen/Qwen3-Next-80B-A3B-Instruct");
+    assert_eq!(
+      fallbacks,
+      vec![
+        "bartowski/Qwen_Qwen3-Next-80B-A3B-Instruct-GGUF".to_string(),
+        "bartowski/Qwen3-Next-80B-A3B-Instruct-GGUF".to_string(),
+        "unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF".to_string(),
+        "lmstudio-community/Qwen3-Next-80B-A3B-Instruct-GGUF".to_string(),
+      ]
+    );
+  }
+
+  #[test]
+  fn synthetic_publisher_fallbacks_is_empty_for_a_non_owner_repo_id() {
+    // Defensive — the wizard only calls this with valid curated entry
+    // repos, but a bare name should not panic or produce nonsense.
+    assert!(synthetic_publisher_fallbacks("bare-name").is_empty());
+    assert!(synthetic_publisher_fallbacks("").is_empty());
   }
 }

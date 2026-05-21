@@ -746,8 +746,20 @@ async fn run_models_step(
   // into curated would silently override the recommender's
   // assumption that "this repo's HEAD is good".
   let is_paste = matches!(choice, ModelChoice::Paste(_));
+  // For curated picks, capture the publisher + quant so synthetic
+  // rows can route through the trusted-converter fallback chain
+  // (`bartowski/...`, `unsloth/...`, `lmstudio-community/...`) when
+  // the source repo ships safetensors only.
+  let mut fallback_repos: Vec<String> = Vec::new();
+  let mut quant_hint: Option<String> = None;
   let (repo, pinned_filename, estimated_bytes) = match choice {
-    ModelChoice::Curated(entry) => (entry.repo, Some(entry.file), Some(entry.weights_bytes)),
+    ModelChoice::Curated(entry) => {
+      if entry.gguf_publisher == "synthetic" {
+        fallback_repos = crate::init::download::synthetic_publisher_fallbacks(&entry.repo);
+        quant_hint = Some(entry.quant.clone());
+      }
+      (entry.repo, Some(entry.file), Some(entry.weights_bytes))
+    }
     ModelChoice::Paste(raw) => {
       // Parse through `RepoSpec::parse` so the interactive paste
       // accepts the same `owner/repo[:filename.gguf]` syntax as the
@@ -793,11 +805,28 @@ async fn run_models_step(
     estimated_bytes,
     progress,
     revision,
+    fallback_repos,
+    quant_hint,
   };
   let result = crate::init::download::run_for_init(&spec, fetch, &options).await?;
+  // `resolved_repo_id` differs from `repo` when the synthetic-fallback
+  // chain swapped in a trusted converter (`bartowski/...`,
+  // `unsloth/...`, `lmstudio-community/...`). Report what was actually
+  // downloaded so the summary doesn't lie about provenance.
+  if !result.resolved_repo_id.is_empty() && result.resolved_repo_id != repo {
+    log::info!(
+      "init download: source repo `{repo}` resolved to `{}`",
+      result.resolved_repo_id,
+    );
+  }
+  let resolved_repo = if result.resolved_repo_id.is_empty() {
+    repo
+  } else {
+    result.resolved_repo_id.clone()
+  };
   Ok(ModelsStepResult {
     model: ModelSummary {
-      repo,
+      repo: resolved_repo,
       files: result.paths,
       total_bytes: result.total_bytes,
     },

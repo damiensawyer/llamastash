@@ -2336,6 +2336,8 @@ fn spawn_download_task(
         progress.clone() as std::sync::Arc<dyn crate::init::download::DownloadProgress>
       ),
       revision: None,
+      fallback_repos: Vec::new(),
+      quant_hint: None,
     };
     match crate::init::download::download_repo(&spec, &fetch_client, &options).await {
       Ok(_) => {
