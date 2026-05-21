@@ -67,6 +67,10 @@ probe_timeout_secs: 120     # Per-launch health-probe deadline.
 
 mouse_focus: false          # Opt into mouse capture for click-to-focus / click-to-tab. Default off keeps native terminal text selection.
 
+proxy:                      # OpenAI-compat proxy router. See §"Proxy
+  enabled: true             # (OpenAI-compatible listener)" below for
+  port: 11434               # the full endpoint + error contract.
+
 keybindings:                # Action-name → key-spec overrides.
   quit: ctrl+q
   cycle_theme: T
@@ -296,6 +300,113 @@ llamastash daemon status [--json]   # PID + uptime + connections + managed launc
 `start --detach` double-forks into the background; without it the daemon stays in the foreground.
 
 `daemon status --json` emits the raw `version` IPC response (the same `{name, version, protocol_version, pid, uptime_seconds, connections}` object an agent would get by hitting the UDS directly). The plain form is a human key/value block and is not a stable machine contract — agents should always use `--json`.
+
+## Proxy (OpenAI-compatible listener)
+
+The daemon binds a single OpenAI-compatible HTTP proxy on `127.0.0.1:11434` (default) so any agent that speaks the OpenAI REST shape — OpenCode, Pi (pi.dev), the OpenAI SDKs, Cline, llm-cli — can talk to every discovered model through one stable URL. The proxy resolves `body.model` against the same fuzzy matcher `llamastash start <ref>` uses, forwards the request byte-for-byte to the matching `llama-server` child, and streams the response back. If the named model isn't running, the proxy auto-starts it (replaying `last_params`, else `arch_defaults`). If the launch fails and another model is already Ready, the proxy falls back to it and stamps `x-llamastash-served-by` + `x-llamastash-fallback-reason: launch_failed` headers on the response. Substitution is observable; no extra round-trip is needed to discover what served the request. The full mechanism — coalesced launches, family-MRU fallback selection, scope boundaries — is documented in [`docs/plans/2026-05-21-001-feat-proxy-router-plan.md`](plans/2026-05-21-001-feat-proxy-router-plan.md).
+
+### Connecting an agent
+
+Set the OpenAI base URL to `http://127.0.0.1:11434/v1` and use any string as the API key — the proxy ignores authentication. The base-URL pattern works with any OpenAI-compatible client; the standard env var names across the ecosystem are:
+
+| Client | Env var(s) |
+|---|---|
+| OpenAI SDK (Python, Node) | `OPENAI_BASE_URL` (Python) / `OPENAI_API_BASE` (legacy) and `OPENAI_API_KEY` |
+| OpenCode | `OPENAI_API_BASE` and `OPENAI_API_KEY`, or the equivalent `openai.api_base` field in its config file |
+| Pi (pi.dev) | `OPENAI_API_BASE_URL` and `OPENAI_API_KEY` (their "OpenAI-compatible" guide) |
+| Cline / llm-cli | `OPENAI_BASE_URL` (or their tool-specific equivalent) and any key |
+
+Verify the exact env var name against the client's current docs if you're automating — names drift. The manual smoke runbook at [`tests/proxy_real_client_smoke.md`](../tests/proxy_real_client_smoke.md) carries the maintainer's verified OpenCode + Pi sequences.
+
+> **Auth posture.** The proxy has **no authentication** by design. It binds loopback-only (`127.0.0.1`), so the threat model is "same machine, any UID can issue requests." Don't run llamastash on a shared host or expose the port; the proxy refuses to bind anything but loopback and the daemon ships no `--host` / `--bind` / `--api-key` knob. LAN exposure, auth, and TLS are deferred follow-ups (see the roadmap in [`TODO.md`](../TODO.md) and the v1 R34 deferral kept in [`AGENTS.md`](../AGENTS.md)).
+
+### Is the proxy up?
+
+```bash
+llamastash status --json | jq .proxy
+```
+
+Shape, all four states:
+
+```json
+// Listening on the configured port:
+{ "enabled": true,  "listen": "127.0.0.1:11434", "status": "listening",   "bind_error": null }
+// Config has proxy.enabled: false:
+{ "enabled": false, "listen": null,              "status": "disabled",    "bind_error": null }
+// Port already taken (Ollama, etc.):
+{ "enabled": true,  "listen": "127.0.0.1:11434", "status": "port_in_use", "bind_error": null }
+// Bind failed for some other reason (EACCES, EADDRNOTAVAIL, …):
+{ "enabled": true,  "listen": "127.0.0.1:80",    "status": "unbound",     "bind_error": "permission denied" }
+```
+
+The same block is on the IPC `status` method response. The TUI's Daemon info pane shows the proxy state on row 3 — the static `server <path>` line swaps to `proxy <status> 127.0.0.1:<port>` whenever the proxy is up; a toast fires on the transition into `port_in_use`. `proxy.enabled: false` leaves the static `server <path>` row in place.
+
+### Endpoints
+
+The proxy speaks HTTP/1.1 on `127.0.0.1:<port>` and answers exactly the surfaces below. Anything else — including `/v1/messages`, MCP, websocket transports, or native llama.cpp routes like `/completion` — returns 404.
+
+| Method | Path | Behavior |
+|---|---|---|
+| `GET` | `/health` | `{"status":"ok","models_loaded":<N>,"models_discovered":<M>}`. Cheap liveness probe; counts come from the supervisor registry (`models_loaded` = Ready) and the catalog (`models_discovered`). |
+| `GET` | `/v1/models` | OpenAI-shape `{"object":"list","data":[…]}` listing every discovered model. Each row carries `id` (the discovered display name), `object: "model"`, `created: 0` (no stable epoch — the catalog has no creation timestamp; documented choice), `owned_by: "llamastash"`. Sorted by `id` so the output is byte-stable across calls. |
+| `POST` | `/v1/chat/completions` | OpenAI chat completions. Streaming (`stream: true`) is byte-piped end-to-end — SSE chunks reach the agent in the same order with the same framing the upstream `llama-server` emitted. |
+| `POST` | `/v1/completions` | OpenAI text completions. Same forwarding semantics. |
+| `POST` | `/v1/embeddings` | OpenAI embeddings. JSON pass-through. |
+| `POST` | `/v1/rerank` | llama.cpp's rerank endpoint (also exposed under the `/v1/` prefix for client uniformity). JSON pass-through. |
+
+Request body cap: **2 MiB**, enforced via `http-body-util::Limited` before forwarding. Anything larger returns HTTP 413. OpenAI chat completion requests are typically well under 1 MiB even with long histories; the cap is intentional rather than implicit.
+
+Hop-by-hop headers (`Connection`, `Keep-Alive`, `Transfer-Encoding`, `Upgrade`, `Proxy-*`) are stripped in both directions. The upstream's response is streamed back unchanged otherwise — same status, same body bytes, same SSE timing modulo network scheduling.
+
+### Response headers
+
+On the happy path no `x-llamastash-*` headers are emitted; the response is byte-equivalent to what the upstream `llama-server` returned. The fallback path (launch failed → served from a different Ready model) tags the response with two headers so clients can audit:
+
+| Header | Value |
+|---|---|
+| `x-llamastash-served-by` | The display name of the model that actually answered (e.g. `qwen2-7b-instruct-q4_k_m`). Only emitted on the fallback branch. |
+| `x-llamastash-fallback-reason` | Stable wire label. v1 emits only `launch_failed`. |
+
+Family selection prefers the *requested* model's `general.architecture` (matched exactly against running models' arch metadata), then falls through to any-MRU among Ready models. A model without arch metadata (synthetic GGUFs, etc.) skips the family-prefer step and goes straight to any-MRU.
+
+### Error envelope
+
+Every non-2xx response carries an OpenAI-shaped JSON body:
+
+```json
+{"error": {"type": "<wire-label>", "code": "<sub-discriminator>", "message": "<human-readable>", "matches": ["..."], "running": ["..."]}}
+```
+
+`code` is present only when the sub-discriminator adds information beyond `type`. `matches` appears on disambiguation errors; `running` appears on `launch_failed` 503s. Other fields are omitted from the JSON when unset.
+
+| HTTP | `type` | When |
+|---|---|---|
+| 400 | `invalid_request` (`code: model_required`, `param: "model"`) | `body.model` missing or empty. |
+| 400 | `ambiguous_model` | Fuzzy match returned >1 candidate. `matches` lists the candidate names; the client retries with a tighter reference. |
+| 400 | `invalid_request` | Request body wasn't valid JSON, or the HTTP method couldn't be translated for forwarding. |
+| 404 | `model_not_found` | Fuzzy match returned zero candidates. `matches` is an empty list. |
+| 404 | `not_found` | No such route (unknown path *or* wrong HTTP method on a known path — e.g. `GET /v1/chat/completions`). |
+| 413 | `payload_too_large` | Request body exceeded 2 MiB. |
+| 502 | `upstream_unreachable` | The model was Ready a moment ago but the connect to `llama-server` failed (process exited between snapshot and forward, kernel-level refusal, …). The agent sees this rather than a hanging socket. |
+| 503 | `launch_failed` | Auto-start failed and no Ready models exist for fallback. `running: []` is always present on this arm. |
+
+Upstream non-2xx responses (e.g. `llama-server` returns 500 for a malformed completion request) are passed through verbatim — same status code, same body bytes; the OpenAI-shape envelope above only covers errors the proxy itself emits. Mid-stream upstream death: once headers are sent the routing decision is committed; if the upstream stream errors after that point, the proxy closes its connection to the agent (the agent sees a truncated SSE / chunked body) — no retry, no fallback.
+
+### Configuration
+
+```yaml
+proxy:
+  enabled: true   # Default true. false => the daemon runs but no
+                  # listener is bound; status.proxy.status = "disabled".
+  port: 11434     # Default 11434 (matches Ollama's well-known port so
+                  # OpenAI-client wrappers find llamastash without
+                  # reconfiguration). Loopback only — there is no
+                  # `host` knob; LAN binding is a deferred follow-up.
+```
+
+Unknown keys inside `[proxy]` are **rejected loudly** (`#[serde(deny_unknown_fields)]`) — a typo never silently falls back to defaults. The top-level config still tolerates unknown keys for forward-compat. There is no `host`, no `api_key`, no `tls_*`, no fallback-tuning knob; these are all deferred per the plan's Scope Boundaries.
+
+Port collision (Ollama running on the same machine, another listener on `11434`, …) leaves the daemon up and reports `proxy.status: "port_in_use"`. Edit `proxy.port` and restart the daemon. The proxy does not auto-roam to a free port — that would break the "single stable URL" contract.
 
 ## Setup subcommands
 
