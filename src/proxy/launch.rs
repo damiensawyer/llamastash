@@ -40,9 +40,11 @@ use super::state::ProxyState;
 /// `Ready` forwards against `(model, port)`; `Failed` enters the
 /// family-MRU fallback path.
 pub(crate) enum LaunchOutcome {
-  /// Supervisor reached `ManagedState::Ready`. The caller owns the
-  /// `ManagedModel` for forwarding and the `port` for the upstream
-  /// URL.
+  /// Supervisor reached `ManagedState::Ready`. The caller forwards
+  /// against `port`; `model` + `model_id` are retained on the variant
+  /// so callers can extend forwarding without re-snapshotting.
+  // dead_code: retained for forwarding extensions that re-use the
+  // ManagedModel handle and ModelId without another snapshot pass.
   Ready {
     #[allow(dead_code)]
     model: ManagedModel,
@@ -147,7 +149,16 @@ async fn drive_launch_as_leader(state: &Arc<ProxyState>, resolved: &CatalogRow) 
           cause: "supervisor exited before reaching Ready".to_string(),
         };
       }
-      ManagedState::Launching | ManagedState::Loading | ManagedState::Stopping => {
+      ManagedState::Stopping => {
+        // Stopping can only transition to Stopped; Ready is no
+        // longer reachable. Fail fast so the fallback path engages
+        // immediately rather than wedging this request for however
+        // long the child takes to honor SIGTERM.
+        return LaunchOutcome::Failed {
+          cause: "model stopped while launching".to_string(),
+        };
+      }
+      ManagedState::Launching | ManagedState::Loading => {
         tokio::time::sleep(Duration::from_millis(100)).await;
       }
     }
@@ -180,8 +191,11 @@ async fn find_ready_supervisor(
 /// key is consistent end-to-end.
 fn canonical_id_for_row(row: &CatalogRow) -> Result<ModelId, String> {
   let path = std::path::Path::new(&row.path);
+  // Path is omitted from the error string so it does not leak into
+  // the 503 `launch_failed` response body. The daemon log still
+  // carries the path via the wrapped IoError on the supervisor side.
   let header =
     crate::gguf::header::read_path(path, crate::gguf::header::HeaderReadOptions::default())
-      .map_err(|e| format!("could not read GGUF header at {}: {e}", row.path))?;
+      .map_err(|e| format!("could not read GGUF header: {e}"))?;
   Ok(crate::gguf::identity::compute(path, &header.raw))
 }

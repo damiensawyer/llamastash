@@ -498,8 +498,14 @@ async fn body_exceeding_two_mib_returns_413() {
   // 'A's. The `Limited` adapter trips before serde even runs.
   let pad = "A".repeat(2 * 1024 * 1024 + 16);
   let body = format!(r#"{{"model":"x","pad":"{pad}"}}"#);
-  let (status, _headers, _response) = http_post(addr, "/v1/chat/completions", &body, &[]).await;
+  let (status, _headers, response) = http_post(addr, "/v1/chat/completions", &body, &[]).await;
   assert_eq!(status, 413);
+  // Lock the error envelope shape: a regression that responds with
+  // a plain hyper 413 or the wrong `type` discriminator must fail
+  // this test, not just slip through unnoticed because the status
+  // code happens to match.
+  let v: Value = serde_json::from_slice(&response).expect("json body");
+  assert_eq!(v["error"]["type"], "payload_too_large");
   shutdown.trigger();
 }
 

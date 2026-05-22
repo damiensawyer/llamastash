@@ -244,9 +244,12 @@ Snapshot of daemon health, managed launches, external (unmanaged) `llama-server`
   "daemon": {"pid": 4242, "uptime_seconds": 90, "active_connections": 1},
   "models": [...],
   "external": [...],
-  "gpu": "CpuOnly"
+  "gpu": "CpuOnly",
+  "proxy": {"enabled": true, "listen": "127.0.0.1:11434", "status": "listening", "bind_error": null}
 }
 ```
+
+The `proxy` block is documented in detail under [Proxy → Is the proxy up?](#is-the-proxy-up).
 
 ### `LlamaStash logs <target>`
 
@@ -343,7 +346,7 @@ The same block is on the IPC `status` method response. The TUI's Daemon info pan
 
 ### Endpoints
 
-The proxy speaks HTTP/1.1 on `127.0.0.1:<port>` and answers exactly the surfaces below. Anything else — including `/v1/messages`, MCP, websocket transports, or native llama.cpp routes like `/completion` — returns 404.
+The proxy speaks HTTP/1.1 only on `127.0.0.1:<port>` (no h2c upgrade, no ALPN-negotiated HTTP/2 — the underlying hyper build is feature-gated to `http1`). It answers exactly the surfaces below. Anything else — including `/v1/messages`, MCP, websocket transports, or native llama.cpp routes like `/completion` — returns 404.
 
 | Method | Path | Behavior |
 |---|---|---|
@@ -384,7 +387,7 @@ Every non-2xx response carries an OpenAI-shaped JSON body:
 | 400 | `invalid_request` (`code: model_required`, `param: "model"`) | `body.model` missing or empty. |
 | 400 | `ambiguous_model` | Fuzzy match returned >1 candidate. `matches` lists the candidate names; the client retries with a tighter reference. |
 | 400 | `invalid_request` | Request body wasn't valid JSON, or the HTTP method couldn't be translated for forwarding. |
-| 404 | `model_not_found` | Fuzzy match returned zero candidates. `matches` is an empty list. |
+| 404 | `model_not_found` | Fuzzy match returned zero candidates. `matches` is omitted from the body when empty (the field is `Option`-shaped and serialised with `skip_serializing_if`). |
 | 404 | `not_found` | No such route (unknown path *or* wrong HTTP method on a known path — e.g. `GET /v1/chat/completions`). |
 | 413 | `payload_too_large` | Request body exceeded 2 MiB. |
 | 502 | `upstream_unreachable` | The model was Ready a moment ago but the connect to `llama-server` failed (process exited between snapshot and forward, kernel-level refusal, …). The agent sees this rather than a hanging socket. |

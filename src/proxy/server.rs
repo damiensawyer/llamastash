@@ -106,13 +106,11 @@ pub async fn serve(
         "proxy listener: failed to bind {}: {e}; daemon continues without the proxy",
         addr
       );
-      write_status(
-        &status,
-        ProxyStatus::Unbound {
-          addr,
-          bind_error: e.to_string(),
-        },
-      );
+      // Cap the bind_error string so a pathological OS message cannot
+      // bloat the IPC status payload. 256 chars is roomy for typical
+      // io::Error strings ("permission denied", etc.).
+      let bind_error: String = e.to_string().chars().take(256).collect();
+      write_status(&status, ProxyStatus::Unbound { addr, bind_error });
       return Ok(());
     }
   };
@@ -194,6 +192,12 @@ fn push_handle(tracker: &Arc<ConnectionTracker>, handle: JoinHandle<()>) {
   handles.push(handle);
 }
 
+/// How long hyper will wait for a client to finish sending request
+/// headers. Bounds the impact of partial-request clients (crashed
+/// agents leaving sockets half-open, slow-loris-style mistakes) so
+/// they don't pin a serve_connection task forever.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn serve_connection(stream: tokio::net::TcpStream, state: Arc<ProxyState>) {
   // `TokioIo` bridges `tokio::net::TcpStream` (which implements the
   // tokio `AsyncRead`/`AsyncWrite` traits) onto hyper 1.x's `Io`
@@ -204,13 +208,16 @@ async fn serve_connection(stream: tokio::net::TcpStream, state: Arc<ProxyState>)
     let state = Arc::clone(&state);
     async move { route(state, req).await }
   });
-  if let Err(e) = http1::Builder::new()
+  let mut builder = http1::Builder::new();
+  builder
     // `keep_alive(true)` is the default but documenting it
     // explicitly: the keep-alive smoke test below depends on it.
     .keep_alive(true)
-    .serve_connection(io, service)
-    .await
-  {
+    // Bound header-read on the inbound stream so partial-request
+    // clients don't hold the serve_connection future indefinitely.
+    .timer(hyper_util::rt::TokioTimer::new())
+    .header_read_timeout(HEADER_READ_TIMEOUT);
+  if let Err(e) = builder.serve_connection(io, service).await {
     log::debug!("proxy: connection ended with: {e}");
   }
 }

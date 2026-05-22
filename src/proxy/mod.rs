@@ -13,16 +13,14 @@
 //! same-UID, no auth, no TLS, no LAN binding, no MCP, no HTTP/2.
 
 pub(crate) mod coalesce;
-pub mod forward;
+pub(crate) mod forward;
 pub(crate) mod launch;
 pub(crate) mod mru;
-pub mod openai;
-pub mod route;
-pub mod router;
+pub(crate) mod openai;
+pub(crate) mod route;
+pub(crate) mod router;
 pub mod server;
 pub mod state;
 
-#[allow(unused_imports)]
 pub use server::{serve, ProxyStatus, StatusCell};
-#[allow(unused_imports)]
 pub use state::ProxyState;

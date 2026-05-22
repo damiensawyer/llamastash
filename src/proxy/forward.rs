@@ -206,6 +206,10 @@ fn build_streaming_response(
   let stream_body = StreamBody::new(stream);
   let body: BoxBody<Bytes, BodyError> = stream_body.boxed();
 
+  // Strip the static hop-by-hop set AND anything named in the upstream's
+  // own `Connection: <list>` header — RFC 7230 §6.1 extends hop-by-hop
+  // per-message. Mirrors the request-side stripping above.
+  let upstream_connection_listed = collect_connection_listed(&inbound_headers);
   let mut builder = Response::builder().status(status_to_hyper(status));
   if let Some(map) = builder.headers_mut() {
     for (name, value) in inbound_headers.iter() {
@@ -213,9 +217,10 @@ fn build_streaming_response(
       if HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(n)) {
         continue;
       }
-      // Strip any inbound Connection-listed headers per RFC 7230.
-      // `reqwest` keeps these for inspection; we mustn't leak them.
-      if n.eq_ignore_ascii_case("connection") {
+      if upstream_connection_listed
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case(n))
+      {
         continue;
       }
       let Ok(hyper_name) = HeaderName::from_bytes(n.as_bytes()) else {
@@ -227,11 +232,11 @@ fn build_streaming_response(
       map.append(hyper_name, hyper_value);
     }
     if fallback {
-      // Both headers always co-occur. Unit 4 supplies the `true`
-      // case and the matching `reason` string; Unit 3 only writes
-      // the code path so the integration is mechanical when Unit 4
-      // lands.
-      if let Ok(v) = HeaderValue::from_str(served_model_id) {
+      // Sanitize served_model_id for the HeaderValue alphabet (visible
+      // ASCII): non-ASCII bytes are replaced with `_` so the header
+      // can never silently drop on a model with CJK/emoji in its name.
+      let sanitized = sanitize_header_value(served_model_id);
+      if let Ok(v) = HeaderValue::from_str(&sanitized) {
         map.insert(HeaderName::from_static("x-llamastash-served-by"), v);
       }
       if let Some(reason) = fallback_reason {
@@ -262,6 +267,25 @@ fn collect_connection_listed(headers: &HeaderMap) -> Vec<String> {
     .flat_map(|s| s.split(','))
     .map(|tok| tok.trim().to_ascii_lowercase())
     .filter(|tok| !tok.is_empty())
+    .collect()
+}
+
+/// Coerce an arbitrary string into something `HeaderValue::from_str`
+/// will accept (visible ASCII, no control characters). Non-ASCII
+/// bytes and ASCII controls are replaced with `_` so a model with
+/// CJK / emoji / whitespace in its display name still produces a
+/// usable `x-llamastash-served-by` header instead of silently
+/// dropping it.
+fn sanitize_header_value(input: &str) -> String {
+  input
+    .chars()
+    .map(|c| {
+      if (' '..='~').contains(&c) && c != '\u{007f}' {
+        c
+      } else {
+        '_'
+      }
+    })
     .collect()
 }
 

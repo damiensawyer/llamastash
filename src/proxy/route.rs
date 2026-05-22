@@ -57,27 +57,32 @@ pub(crate) enum RouteDecision {
     port: u16,
     served_model_id: String,
     /// The user-supplied `body.model` value, retained for symmetry
-    /// with the other variants. Unit 4 reads this when picking a
-    /// fallback model to report in the OpenAI error body.
+    /// with the other variants. Currently unused; kept on the variant
+    /// so router-side mismatch reporting can surface both names without
+    /// re-threading them through the call.
+    // dead_code: retained for future per-request mismatch reporting.
     #[allow(dead_code)]
     requested_model: String,
     fallback: bool,
     fallback_reason: Option<String>,
   },
-  /// The catalog has the model but no Ready supervisor is serving
-  /// it. Unit 3 returns 503 here; Unit 4 will swap this for the
-  /// auto-start + wait-for-Ready path. The variant carries the
-  /// resolved row + arch so Unit 4 doesn't have to re-resolve.
+  /// The catalog has the model but no Ready supervisor is serving it.
+  /// Dispatched into `handle_not_running` which runs the auto-start +
+  /// single-flight + family-MRU fallback flow. The variant carries the
+  /// resolved row + arch so the launch path doesn't repeat the lookup.
   NotRunning {
     requested_model: String,
-    /// Resolved catalog entry. Unit 4 consumes this to build the
-    /// launch params for `start_model_inner` without re-running
-    /// the resolver.
+    /// Resolved catalog entry consumed by the launch path to build
+    /// `StartParams` for `start_model_inner` without re-running the
+    /// resolver.
+    // dead_code: consumed via destructuring in router::forward_request;
+    // the field itself is moved out, not read by name.
     #[allow(dead_code)]
     resolved_row: Box<CatalogRow>,
     /// Catalog arch metadata (e.g. `"llama"`, `"qwen3"`). `None`
-    /// when discovery couldn't parse the GGUF header. Unit 4's
-    /// family-MRU fallback pivots on this field.
+    /// when discovery couldn't parse the GGUF header. The family-MRU
+    /// fallback pivots on this field.
+    // dead_code: consumed via destructuring in router::forward_request.
     #[allow(dead_code)]
     arch: Option<String>,
   },
@@ -228,9 +233,9 @@ pub(crate) async fn decide(state: &Arc<ProxyState>, body_model: Option<String>) 
     }
   }
 
-  // Catalog matched but nobody is serving. Unit 3's placeholder —
-  // TODO(unit-4): replace with auto-start + wait-for-Ready in
-  // src/proxy/launch.rs.
+  // Catalog matched but no supervisor is in Ready state — dispatch
+  // into the auto-start + single-flight + family-MRU-fallback flow
+  // implemented by `route::handle_not_running` (Unit 4).
   let arch = resolved.arch.clone();
   RouteDecision::NotRunning {
     requested_model: requested,

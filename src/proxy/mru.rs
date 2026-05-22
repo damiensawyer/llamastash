@@ -225,4 +225,18 @@ mod tests {
     let picked = pick_fallback(cands, Some("qwen3")).unwrap();
     assert_eq!(picked.model_id.path, PathBuf::from("/m/touched.gguf"));
   }
+
+  #[test]
+  fn two_never_touched_same_arch_picks_insertion_order() {
+    // Both candidates: same arch, both `last_request_at = None`. The
+    // sort key collapses to Ordering::Equal across both factors, so
+    // the sort is stable on input order. Locking this so a refactor
+    // that swaps to an unstable sort surfaces immediately.
+    let cands = vec![
+      cand("/m/first.gguf", 1, Some("qwen3"), None),
+      cand("/m/second.gguf", 2, Some("qwen3"), None),
+    ];
+    let picked = pick_fallback(cands, Some("qwen3")).unwrap();
+    assert_eq!(picked.model_id.path, PathBuf::from("/m/first.gguf"));
+  }
 }

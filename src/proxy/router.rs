@@ -11,7 +11,7 @@
 use std::error::Error as StdError;
 use std::sync::Arc;
 
-use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::{Method, Request, Response, StatusCode};
 use serde_json::json;
@@ -22,7 +22,6 @@ use super::route::{self, BodyError as RouteBodyError, RouteDecision};
 use super::state::ProxyState;
 use crate::daemon::supervisor::ManagedState;
 use crate::discovery::DiscoveredModel;
-use serde_json::Value;
 
 /// The error type our `BoxBody` carries. Unit 3 streams upstream
 /// `reqwest::Response::bytes_stream()` chunks through `StreamBody`,
@@ -307,7 +306,6 @@ where
     format!("auto-start of `{requested_model}` failed and no running model is available: {cause}");
   let error = ErrorObject::new("launch_failed", message).with_running(running);
   let bytes = serde_json::to_vec(&ErrorResponse { error }).expect("json encoding of fixed shape");
-  let _ = Value::Null; // keep the import alive without an actual use
   Ok(json_response(StatusCode::SERVICE_UNAVAILABLE, bytes))
 }
 
@@ -348,13 +346,4 @@ fn json_response(status: StatusCode, body: Vec<u8>) -> Response<BoxBody<Bytes, B
 /// body alias.
 fn full_body(bytes: Bytes) -> BoxBody<Bytes, BodyError> {
   Full::new(bytes).map_err(|never| match never {}).boxed()
-}
-
-/// Construct an empty body — kept here for future handler arms that
-/// need a no-content response without re-importing the util crate.
-#[allow(dead_code)]
-pub(crate) fn empty_body() -> BoxBody<Bytes, BodyError> {
-  Empty::<Bytes>::new()
-    .map_err(|never| match never {})
-    .boxed()
 }
