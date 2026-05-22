@@ -380,15 +380,11 @@ mod tests {
       "merged section title missing:\n{frame}"
     );
     assert!(
-      !frame.contains("Chat tab")
-        && !frame.contains("Embed tab")
-        && !frame.contains("Rerank tab"),
+      !frame.contains("Chat tab") && !frame.contains("Embed tab") && !frame.contains("Rerank tab"),
       "old per-tab headings should be gone:\n{frame}"
     );
     assert!(
-      !frame.contains("send chat")
-        && !frame.contains("send embed")
-        && !frame.contains("query/add"),
+      !frame.contains("send chat") && !frame.contains("send embed") && !frame.contains("query/add"),
       "per-tab Enter overrides should be gone:\n{frame}"
     );
     assert!(
