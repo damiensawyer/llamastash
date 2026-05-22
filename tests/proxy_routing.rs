@@ -300,6 +300,18 @@ async fn chat_completion_streams_back_byte_identical() {
     text.contains("\"delta\":{\"content\":\"hi\"}"),
     "expected message frame in: {text}"
   );
+  // R-15: the fake fixture emits two SSE data frames (the message
+  // and the finish_reason:stop terminator). Count them so a future
+  // regression that silently drops the second frame surfaces here.
+  let data_frames = text.matches("\ndata:").count() + usize::from(text.starts_with("data:"));
+  assert!(
+    data_frames >= 2,
+    "expected >=2 SSE data frames; saw {data_frames}: {text}"
+  );
+  assert!(
+    text.contains("\"finish_reason\":\"stop\""),
+    "expected finish_reason stop frame in: {text}"
+  );
 
   let _ = model.stop(Duration::from_secs(3)).await;
   shutdown.trigger();
@@ -612,6 +624,85 @@ async fn upstream_400_passes_through_as_400() {
   assert!(text.contains("injected 400"), "upstream body in: {text}");
 
   let _ = model.stop(Duration::from_secs(3)).await;
+  shutdown.trigger();
+  std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upstream_unreachable_after_stop_returns_structured_error() {
+  // R-14: lock the error envelope shape when the supervisor we
+  // picked dies before forwarding completes. Two valid responses:
+  //   - 502 upstream_unreachable (if the proxy still has a stale
+  //     Ready snapshot and reqwest fails to connect), OR
+  //   - 503 launch_failed (if the supervisor is gone by the time
+  //     decide() snapshots and auto-start fails to restart it).
+  // Either way: structured OpenAI envelope, no hang, no naked 500.
+  let dir = unique_temp("unreachable");
+  let catalog_path = "/fixture/unreachable.gguf";
+  let registry = SupervisorRegistry::new();
+  let (model, _port, _id) = spawn_fake_supervisor(catalog_path, &dir, LaunchMode::Chat).await;
+  let launch_id = registry.next_id();
+  registry.insert(launch_id, model.clone()).await;
+  let state = proxy_state_with(
+    vec![discovered(catalog_path, Some("unreachable"), "qwen3")],
+    registry,
+  )
+  .await;
+  let (addr, shutdown) = spawn_listener_with_state(state).await;
+
+  // Stop the supervisor, wait for the state machine to settle.
+  let _ = model.stop(Duration::from_secs(3)).await;
+  tokio::time::sleep(Duration::from_millis(50)).await;
+
+  let body = r#"{"model":"unreachable","messages":[]}"#;
+  let (status, _headers, response) = http_post(addr, "/v1/chat/completions", body, &[]).await;
+  assert!(
+    status == 502 || status == 503,
+    "expected 502 upstream_unreachable or 503 launch_failed; got {status}"
+  );
+  let v: Value = serde_json::from_slice(&response).expect("json body");
+  let kind = v["error"]["type"].as_str().unwrap_or("");
+  assert!(
+    matches!(kind, "upstream_unreachable" | "launch_failed"),
+    "expected upstream_unreachable or launch_failed; got {kind:?}"
+  );
+
+  shutdown.trigger();
+  std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn partial_request_closes_within_header_read_timeout() {
+  // R-03 regression test: assert the inbound `header_read_timeout`
+  // wired into hyper::server::conn::http1::Builder actually fires.
+  // A client that opens a TCP socket, writes a partial request
+  // line, then idles must have its connection closed by the proxy
+  // within HEADER_READ_TIMEOUT (30s production; 35s budget here so
+  // CI noise doesn't flake). If a future tweak drops the timeout
+  // from the builder chain, this test hangs past the budget.
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+  use tokio::net::TcpStream;
+
+  let dir = unique_temp("partial");
+  let registry = SupervisorRegistry::new();
+  let state = proxy_state_with(Vec::new(), registry).await;
+  let (addr, shutdown) = spawn_listener_with_state(state).await;
+
+  let mut sock = TcpStream::connect(addr).await.expect("connect");
+  // Partial request line, no newline, no Host header. Server waits
+  // on the rest of the headers; the timeout decides when to give up.
+  sock.write_all(b"GET /he").await.expect("write partial");
+  sock.flush().await.ok();
+
+  let mut buf = vec![0u8; 64];
+  let read = tokio::time::timeout(Duration::from_secs(35), sock.read(&mut buf)).await;
+  let n = read
+    .expect("proxy failed to close partial-request connection within HEADER_READ_TIMEOUT budget")
+    .expect("read");
+  // `read` of 0 = clean EOF (peer closed). Hyper closes the socket
+  // once the timeout fires; we don't expect any response bytes.
+  assert_eq!(n, 0, "expected EOF on timeout; got {n} bytes: {buf:?}");
+
   shutdown.trigger();
   std::fs::remove_dir_all(&dir).ok();
 }
