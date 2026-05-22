@@ -237,8 +237,16 @@ async fn await_catalog_populated(socket: &Path) {
 }
 
 fn build_cli(model_dir: &Path, command: Command) -> (Cli, LoadedConfig) {
+  // Point `--config` at a per-test temp file so `dispatch`'s sticky-
+  // `--llama-server` persistence (cli/mod.rs `persist_llama_server_override`)
+  // lands in a throwaway path under `model_dir` instead of clobbering
+  // the developer's real `~/.config/llamastash/config.yaml` with the
+  // fake_llama_server fixture path. The temp dir is cleaned up by
+  // `DaemonHandle::Drop`. Using `cli.config` (the `--config` flag) is
+  // higher precedence than `LLAMASTASH_CONFIG` and the XDG default, so
+  // every dispatch run resolves writes to this file.
   let cli = Cli {
-    config: None,
+    config: Some(model_dir.join(".cli-integration-config.yaml")),
     llama_server: Some(fake_binary()),
     model_paths: vec![model_dir.to_path_buf()],
     no_scan: true,
