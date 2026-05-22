@@ -14,6 +14,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use llamastash::config::CachePathsConfig;
@@ -38,6 +39,52 @@ fn unique_temp(label: &str) -> PathBuf {
   ));
   fs::create_dir_all(&dir).expect("temp dir");
   dir
+}
+
+/// Serialises tests that mutate process-global env vars. Production
+/// discovery reads `OLLAMA_MODELS` (per Ollama's own convention) and
+/// `HF_HOME` from the environment, so any test that drives discovery
+/// must clear those for the duration of the run to stay hermetic.
+/// Cargo runs `#[test]` functions in parallel by default, so the lock
+/// is required even though each test scopes its own restore.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// RAII guard that snapshots, unsets, and restores cache-related env
+/// vars production code honours. Hold one of these for the lifetime of
+/// any test that calls into `default_set` / `default_ollama_paths` /
+/// `default_hf_paths`.
+struct EnvIsolation {
+  _guard: std::sync::MutexGuard<'static, ()>,
+  saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl EnvIsolation {
+  fn acquire() -> Self {
+    const VARS: &[&str] = &["OLLAMA_MODELS", "HF_HOME"];
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let saved = VARS
+      .iter()
+      .map(|k| (*k, std::env::var_os(k)))
+      .collect::<Vec<_>>();
+    for (k, _) in &saved {
+      std::env::remove_var(k);
+    }
+    Self {
+      _guard: guard,
+      saved,
+    }
+  }
+}
+
+impl Drop for EnvIsolation {
+  fn drop(&mut self) {
+    for (k, v) in &self.saved {
+      match v {
+        Some(val) => std::env::set_var(k, val),
+        None => std::env::remove_var(k),
+      }
+    }
+  }
 }
 
 /// `WatcherOptions` tuned for tests: short debounce + frequent
@@ -73,6 +120,7 @@ async fn list_models(socket: &Path) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_model_paths_populate_list_models() {
+  let _env = EnvIsolation::acquire();
   // Config supplies a `model_paths` entry; no CLI flag involved. The
   // daemon must scan it and surface the model through `list_models`.
   let state = unique_temp("config-state");
@@ -140,6 +188,7 @@ async fn config_model_paths_populate_list_models() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ollama_default_cache_surfaces_through_list_models() {
+  let _env = EnvIsolation::acquire();
   // Synthesise the on-disk Ollama layout under a temp home and let
   // `known_caches::default_set` find it the way the production
   // daemon does. We assert the daemon's `list_models` surfaces the

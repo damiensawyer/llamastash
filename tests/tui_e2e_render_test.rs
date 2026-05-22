@@ -135,6 +135,17 @@ fn render_to_lines(app: &mut App) -> Vec<String> {
   rows
 }
 
+// Row 0 is the global title + hint strip. It carries two things that
+// churn independently of the structural layout this golden test is here
+// to defend: the live `CARGO_PKG_VERSION` (changes every release and
+// pre-release) and the help_bar hint glyph set (gets rebalanced when
+// any visible action is renamed or rebound). The `dashboard_render_
+// carries_key_landmarks` sibling test already asserts the structural
+// contract for that row — brand, daemon-connected dot, `?:help`,
+// `q:quit`. So we deliberately exclude it from the golden compare to
+// keep the test stable across version bumps and hint-strip tweaks.
+const SKIP_ROWS: &[usize] = &[0];
+
 #[test]
 fn dashboard_golden_render_matches_fixture() {
   let mut app = seeded_dashboard_app();
@@ -174,6 +185,9 @@ fn dashboard_golden_render_matches_fixture() {
     expected
   );
   for (i, (a, e)) in actual_lines.iter().zip(expected_lines.iter()).enumerate() {
+    if SKIP_ROWS.contains(&i) {
+      continue;
+    }
     assert_eq!(
       a, e,
       "row {i} diverged\n  actual:   {a:?}\n  expected: {e:?}\nFull frame:\n{rendered}"

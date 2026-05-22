@@ -36,14 +36,14 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
   - [ ] Adaptive hints with priority ranks so that order doesn't matter.
   - [ ] Adaptive columns in model list. With priority ranks so that order doesn't matter.
   - [ ] No visible severity encoding in the render (CPU temp 92 °C displays the same as 65 °C VRAM). a temp/severity glyph double encoded so color isn't load-bearing.
-  - [ ] Map all destructive actions behind Ctr (ctrl+s,k,r,d). All navigation actions behind Shif.
   - [x] ~~Ctrl+Q to Ctrl+K~~ — kill-daemon moved to `Ctrl+K` to avoid macOS "quit app" muscle-memory collision.
   - [ ] Fix: HF dialog binds only ↑↓ Enter Esc in the table. The actual interactive surface uses typing-to-filter, n/p to paginate, o to sort, and Backspace to back through stages — none
         of which appear in the help overlay because they're handled procedurally in events.rs. The dialog's own footer is the only discoverability surface for them. Real users will
         discover them by trial; the global help screen will quietly lie by omission.
-  - [ ] Remap 'd'. maybe to 'Shift+p'
   - [ ] Add Shift+T for previous theme.
   - [ ] do alt keybindings of yank for c,p,u anywhere in app.
+  - [ ] Remap 'd'. maybe to 'Shift+p'
+  - [ ] Map all destructive actions behind Ctr (ctrl+s,k,r,d). All navigation actions behind Shif.
   - [ ] Dedup keybindings.
   - [x] ~~Use unicode label for Tab etc in keybinds~~ — Tab is `↹` on Linux/Win, `⇥` on macOS; Enter is `⏎` everywhere; modifiers `⌃ ⌥ ⌘` on macOS only, `Ctrl+ / Alt+ / Super+` on PC. Shift glyph (`⇧`) no longer carries a `+` joiner.
 

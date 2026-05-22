@@ -178,6 +178,7 @@ All of these fields land in the CLI's `status --json` output too (`src/cli/outpu
 
 ## Conventions
 
+- Prefer using commands from the Makefile for common tasks (`make build`, `make test`, `make lint`) to internalize the standard flags and avoid mistakes like forgetting `--features test-fixtures` on tests.
 - Conventional-commit prefixes: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`. Unit-scoped variants are common (`feat(unit8): …`).
 - Inline `#[cfg(test)] mod tests` per file is the default; integration tests under `tests/` for daemon-spawning scenarios.
 - Comments explain **why**, not **what**. No multi-paragraph doc blocks unless the constraint is genuinely non-obvious. Don't reference task IDs or PR numbers in comments — those rot.
