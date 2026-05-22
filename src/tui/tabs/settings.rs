@@ -391,20 +391,39 @@ fn heading<'a>(text: &'a str, palette: &Palette) -> Line<'a> {
   Line::from(Span::styled(
     text,
     Style::default()
-      .fg(palette.accent)
+      .fg(palette.highlight)
       .add_modifier(Modifier::BOLD),
   ))
 }
 
 const LABEL_W: usize = 16;
 
+/// Default-value sentinels rendered when no override exists. Tracked
+/// in one place so `kv` / `kv_focused` agree on which strings deserve
+/// the muted tone.
+fn is_default_value(value: &str) -> bool {
+  matches!(value, "default" | "(none)")
+}
+
+/// Style to paint a settings value with — muted when the row falls
+/// through to its layered default (`default`, `(none)`), normal text
+/// when the value is overridden by the user or carries a real reading.
+fn value_style(value: &str, palette: &Palette) -> Style {
+  if is_default_value(value) {
+    palette.muted_style()
+  } else {
+    palette.text_style()
+  }
+}
+
 fn kv(label: &str, value: String, palette: &Palette) -> Line<'static> {
+  let style = value_style(&value, palette);
   Line::from(vec![
     Span::styled(
       format!("  {label:<width$}", width = LABEL_W),
-      palette.muted_style(),
+      palette.label_style(),
     ),
-    Span::styled(value, palette.text_style()),
+    Span::styled(value, style),
   ])
 }
 
@@ -432,19 +451,20 @@ fn kv_focused(
       .fg(palette.accent)
       .add_modifier(Modifier::BOLD)
   } else {
-    palette.muted_style()
+    palette.label_style()
   };
   let mut spans: Vec<Span<'static>> = Vec::with_capacity(6);
   spans.push(Span::styled(
     format!("{marker}{label:<width$}", width = LABEL_W),
     label_style,
   ));
+  let v_style = value_style(&value, palette);
   if focused && cyclable {
     spans.push(Span::styled("◀ ".to_string(), palette.accent_style()));
-    spans.push(Span::styled(value, palette.text_style()));
+    spans.push(Span::styled(value, v_style));
     spans.push(Span::styled(" ▶".to_string(), palette.accent_style()));
   } else {
-    spans.push(Span::styled(value, palette.text_style()));
+    spans.push(Span::styled(value, v_style));
   }
   if let (true, Some(src)) = (show_source, source_label) {
     spans.push(Span::styled(format!("  ({src})"), palette.muted_style()));

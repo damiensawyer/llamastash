@@ -30,9 +30,10 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
   - [x] Trim path names in model list grouping. Derive a short name. Show path in Right pane under the model name. It should be in muted color palette of the theme.
   - [x] Try some Padding for all panes.
   - [x] try 65x35 split for main panes
-  - [ ] Settings: when value is default it should be muted color. Else normal color
+  - [x] Settings: when value is default it should be muted color. Else normal color
   - [ ] No logo in small widths < 120w
   - [ ] wrong favorites count
+  - [ ] adjust min h x w supported.
   - [ ] Adaptive Panes.
   - [ ] Adaptive hints with priority ranks so that order doesn't matter.
   - [ ] Adaptive columns in model list. With priority ranks so that order doesn't matter.
@@ -49,6 +50,10 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
   - [x] ~~Use unicode label for Tab etc in keybinds~~ — Tab is `↹` on Linux/Win, `⇥` on macOS; Enter is `⏎` everywhere; modifiers `⌃ ⌥ ⌘` on macOS only, `Ctrl+ / Alt+ / Super+` on PC. Shift glyph (`⇧`) no longer carries a `+` joiner.
 
 - [ ] **In progress**: Proxy router that maps a single endpoint to running models by model name. If the model isn't running, start it; if launch fails, fall back to a running model when one is available; otherwise error. Keep it OpenCode / π compatible so agents and tools can hit one URL.
+
+- [ ] **TUI burns ~50% CPU when idle**. Three idle TUIs measured at ~150% CPU combined (PIDs 755035 / 704038 / 577819 on 2026-05-22). Root cause: `POLL_INTERVAL = 8ms` at [`src/tui/events.rs:42`](src/tui/events.rs#L42) drives the run loop at 125 Hz, and `terminal.draw()` at [`src/tui/events.rs:1861`](src/tui/events.rs#L1861) runs unconditionally on every iteration. **R1 fix (one line):** bump `POLL_INTERVAL` to 50ms (or 100ms to match the kdash/helix range) for an ~85% idle-CPU drop with no perceptible keystroke-latency cost. **Post-R1 refactor:** port to the kdash-style event-driven loop ([`kdash/src/event/events.rs:55`](../../kdash/src/event/events.rs#L55)) — single mpsc funnel, `Event` enum, main thread blocks on `recv` so idle CPU is truly zero. Today's 8 separate `drain_*` / `try_recv` calls in `events.rs` (refresher, logs, writer feedback, chat stream, embed, rerank, HF dialog, download strip) collapse into `Event` variants on the same channel; streaming-token latency improves as a side effect. Larger diff (~200-400 lines) so deferred behind R1 ship.
+
+- [ ] **Daemon idle RSS / CPU regression**. Long-running daemon observed at 1.5 GB RSS and ~60% CPU with no `llama-server` children (PID 309346 after 4h uptime, 2026-05-22). Profile before R1 — supervisor with no inference children should be near-idle. Suspects: scanner's per-file metadata cache growing unbounded over periodic rescans; per-launch log ring-buffer not being trimmed; or the external-process discovery loop polling too aggressively. Start with `heaptrack` / `samply` on a freshly-started daemon attached to a populated HF + Ollama cache and watch RSS over the first hour.
 
 ### Release checklist
 

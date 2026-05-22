@@ -645,8 +645,8 @@ mod tests {
       "Settings must surface the ↓ next-field row:\n{frame}"
     );
     assert!(
-      frame.contains("cycle value"),
-      "Settings must surface the ←/→ cycle-value rows:\n{frame}"
+      frame.contains("next value") && frame.contains("prev value"),
+      "Settings must surface the ←/→ next/prev value rows:\n{frame}"
     );
     // The `next field` row must render exactly once (regression
     // guard: pre-round-7 the dead `Focus::LaunchPicker` binding

@@ -394,7 +394,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     mods: KeyModifiers::CONTROL,
     action: Action::DeleteModel,
     label: crate::ctrl_label!("d"),
-    description: "delete model",
+    description: "delete",
     scopes: FocusSet::LIST,
   },
   Binding {
@@ -402,7 +402,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     mods: KeyModifiers::CONTROL,
     action: Action::CancelDownload,
     label: crate::ctrl_label!("x"),
-    description: "cancel download",
+    description: "cancel",
     scopes: FocusSet::NAV,
   },
   // ─── Motion (arrows + vi aliases) ───────────────────────────
@@ -651,7 +651,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     mods: KeyModifiers::NONE,
     action: Action::CycleValueNext,
     label: "→",
-    description: "cycle value",
+    description: "next value",
     scopes: FocusSet::RIGHT_PANE,
   },
   Binding {
@@ -659,7 +659,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     mods: KeyModifiers::NONE,
     action: Action::CycleValuePrev,
     label: "←",
-    description: "cycle value",
+    description: "prev value",
     scopes: FocusSet::RIGHT_PANE,
   },
   // ─── Enter — five Action variants across disjoint scopes ────
