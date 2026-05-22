@@ -46,6 +46,40 @@ pub enum ChatStreamMsg {
   Error(String),
 }
 
+/// RAII guard that guarantees the chat tab observes a terminal
+/// frame (`Finished` or `Error`) even if the spawned task exits
+/// unexpectedly — e.g. a panic inside the SSE parser, or a future
+/// refactor adding an early `return` that forgets the explicit
+/// terminal send. Without this, `App::chat.streaming` would stay
+/// `true` forever and the chat tab would appear wedged.
+///
+/// On normal exit, every terminal-send site calls `mark_finished()`
+/// before sending, so Drop is a no-op. On panic / early-return, Drop
+/// fires and synthesises a clean `Finished { finish_reason: None }`
+/// via `try_send` — synchronous because Drop has no async context.
+struct ChatStreamTerminalGuard {
+  tx: mpsc::Sender<crate::tui::events::Event>,
+  finished: bool,
+}
+
+impl ChatStreamTerminalGuard {
+  fn mark_finished(&mut self) {
+    self.finished = true;
+  }
+}
+
+impl Drop for ChatStreamTerminalGuard {
+  fn drop(&mut self) {
+    if !self.finished {
+      let _ = self.tx.try_send(crate::tui::events::Event::ChatStream(
+        ChatStreamMsg::Finished {
+          finish_reason: None,
+        },
+      ));
+    }
+  }
+}
+
 /// Spawn a tokio task that streams an OpenAI-compatible chat
 /// completion from `http://127.0.0.1:<port>/v1/chat/completions`
 /// against the supplied prompt. Forwards each delta to the supplied
@@ -59,6 +93,10 @@ pub fn spawn_chat_stream(
   events_tx: mpsc::Sender<crate::tui::events::Event>,
 ) {
   tokio::spawn(async move {
+    let mut guard = ChatStreamTerminalGuard {
+      tx: events_tx.clone(),
+      finished: false,
+    };
     let send = |msg: ChatStreamMsg| {
       let tx = events_tx.clone();
       async move { tx.send(crate::tui::events::Event::ChatStream(msg)).await }
@@ -73,6 +111,7 @@ pub fn spawn_chat_stream(
     let resp = match client.post(&url).json(&body).send().await {
       Ok(r) => r,
       Err(e) => {
+        guard.mark_finished();
         let _ = send(ChatStreamMsg::Error(format!("connect: {e}"))).await;
         return;
       }
@@ -80,6 +119,7 @@ pub fn spawn_chat_stream(
     if !resp.status().is_success() {
       let code = resp.status().as_u16();
       let err_body = resp.text().await.unwrap_or_default();
+      guard.mark_finished();
       let _ = send(ChatStreamMsg::Error(format!("HTTP {code}: {err_body}"))).await;
       return;
     }
@@ -91,6 +131,7 @@ pub fn spawn_chat_stream(
       let bytes = match next_chunk {
         Ok(b) => b,
         Err(e) => {
+          guard.mark_finished();
           let _ = send(ChatStreamMsg::Error(format!("stream: {e}"))).await;
           return;
         }
@@ -106,6 +147,7 @@ pub fn spawn_chat_stream(
             None => continue,
           };
           if payload == "[DONE]" {
+            guard.mark_finished();
             let _ = send(ChatStreamMsg::Finished {
               finish_reason: finish_reason.clone(),
             })
@@ -130,6 +172,7 @@ pub fn spawn_chat_stream(
         }
       }
     }
+    guard.mark_finished();
     let _ = send(ChatStreamMsg::Finished { finish_reason }).await;
   });
 }

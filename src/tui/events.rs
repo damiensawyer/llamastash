@@ -1338,6 +1338,24 @@ fn focused_managed_or_toast(app: &mut App, action: &str) -> Option<crate::tui::a
   }
 }
 
+/// Clone the unified events channel for a spawn site that requires
+/// it. Returns `None` in lib unit tests (which legitimately drive
+/// `apply_*` without a tokio runtime) and panics in any other debug
+/// build — a `None` reached outside `cfg(test)` means `run()` forgot
+/// to prime `events_tx`, which would otherwise silently swallow the
+/// submit. Release builds get the same `None` no-op so users never
+/// see a TUI crash from a code-path bug.
+fn require_events_tx(app: &App, op: &'static str) -> Option<mpsc::Sender<Event>> {
+  let tx = app.events_tx.clone();
+  if tx.is_none() {
+    #[cfg(all(not(test), debug_assertions))]
+    panic!("events_tx must be primed by run() before {op}");
+    #[cfg(any(test, not(debug_assertions)))]
+    let _ = op;
+  }
+  tx
+}
+
 /// Trigger an OpenAI streaming chat completion against the focused
 /// Ready model. Stashes the receiver on `app.chat` so the render
 /// loop can drain it without blocking input.
@@ -1352,11 +1370,7 @@ fn apply_send_chat(app: &mut App) {
   let prompt = app.chat.prompt.buffer().to_string();
   let model_name = crate::util::paths::model_display_name(&managed.path);
   app.chat.reset_for_send();
-  // Without an events channel (unit tests), the local `streaming` flag
-  // is the only observable effect of submit. The real `run()` always
-  // primes `events_tx` so the chat task can land its `Event::ChatStream`
-  // chunks back on the main loop.
-  if let Some(tx) = app.events_tx.clone() {
+  if let Some(tx) = require_events_tx(app, "chat submit") {
     spawn_chat_stream(managed.port, model_name, prompt, tx);
   }
 }
@@ -1376,7 +1390,7 @@ fn apply_embed_submit(app: &mut App) {
   let model_name = crate::util::paths::model_display_name(&managed.path);
   app.embed.busy = true;
   let port = managed.port;
-  if let Some(events_tx) = app.events_tx.clone() {
+  if let Some(events_tx) = require_events_tx(app, "embed submit") {
     tokio::spawn(async move {
       let result = oai_embed(port, &model_name, &input).await;
       let evt = match result {
@@ -1437,7 +1451,7 @@ fn apply_rerank_submit(app: &mut App) {
   let model_name = crate::util::paths::model_display_name(&managed.path);
   app.rerank.busy = true;
   let port = managed.port;
-  if let Some(events_tx) = app.events_tx.clone() {
+  if let Some(events_tx) = require_events_tx(app, "rerank submit") {
     tokio::spawn(async move {
       let result = oai_rerank(port, &model_name, &query, &candidates).await;
       let evt = match result {
@@ -1993,18 +2007,12 @@ fn handle_event(app: &mut App, evt: Event, writer_tx: &mpsc::Sender<WriterCmd>) 
       // The HF dialog's debounced live search fires off the tick
       // rather than carrying its own timer task — the unified loop
       // wakes at TICK_RATE so the check is essentially free.
-      let before_in_flight = app
-        .hf_dialog
-        .as_ref()
-        .map(|s| s.search_in_flight)
-        .unwrap_or(false);
-      service_hf_dialog_debounce(app);
-      let after_in_flight = app
-        .hf_dialog
-        .as_ref()
-        .map(|s| s.search_in_flight)
-        .unwrap_or(false);
-      before_in_flight != after_in_flight
+      let hf_search_dispatched = service_hf_dialog_debounce(app);
+      // Time-decay UI (toast TTL, strip error linger) needs a
+      // periodic redraw so it visibly disappears even when no other
+      // events are landing. Bounded by `TICK_RATE` (4 Hz) so the
+      // idle-CPU win from the refactor is preserved.
+      hf_search_dispatched || tick_has_time_decay_ui(app)
     }
     Event::Refresh(tick) => {
       apply_refresh(app, tick);
@@ -2529,8 +2537,16 @@ impl StripProgress {
   /// trait-method context. Bounded `try_send` so a wedged main loop
   /// drops progress frames rather than blocking the download path —
   /// progress is firehose, the next chunk reflects the same state.
-  /// `Finished` / `Error` / `Started` are infrequent enough that
-  /// dropping them is acceptable under the same logic.
+  ///
+  /// Dropping a `Started` here is recoverable: every subsequent
+  /// `Progress` carries `bytes_total`, and
+  /// [`crate::tui::download_strip::DownloadStripState::apply_progress`]
+  /// lifts the strip's `bytes_total` via `.max()` so the first Progress
+  /// to land after a dropped Started repairs the state machine. See the
+  /// `progress_without_started_repairs_state` test in `download_strip.rs`.
+  /// `Finished` + `Error` from this trait impl are not emitted (only the
+  /// outer `spawn_download_task` posts those, via the awaiting
+  /// `push_dl` closure that survives backpressure).
   fn push(&self, evt: crate::tui::download_strip::DownloadEvent) {
     let _ = self.tx.try_send(Event::Download(evt));
   }
@@ -2787,15 +2803,31 @@ pub fn apply_hf_dialog_event(app: &mut App, evt: crate::tui::hf_dialog::HfDialog
 /// elapses since the last keystroke, it fires a fresh search. The
 /// `query_seq` monotonicity inside the dialog state still drops
 /// stale responses if the user keeps typing.
-pub fn service_hf_dialog_debounce(app: &mut App) {
+///
+/// Returns `true` iff a new search was dispatched this tick — the
+/// caller uses that to decide whether the tick warrants a redraw.
+pub fn service_hf_dialog_debounce(app: &mut App) -> bool {
   let events_tx = app.events_tx.clone();
   let Some(state) = app.hf_dialog.as_mut() else {
-    return;
+    return false;
   };
   if state.search_due(std::time::Instant::now()) {
     let cursor = state.current_cursor.clone();
     spawn_hf_search(state, cursor, events_tx);
+    return true;
   }
+  false
+}
+
+/// `true` when a `Tick` event should still trigger a redraw because
+/// some time-decay UI element is on screen — a toast that may have
+/// just hit `TOAST_TTL`, or a download-strip error that may have
+/// just hit `ERROR_LINGER`. Without this, those elements would only
+/// disappear on the next non-Tick event (~750 ms via the refresher),
+/// which is visibly laggy. Cheap predicate, runs at most once per
+/// `TICK_RATE`.
+fn tick_has_time_decay_ui(app: &App) -> bool {
+  app.toast_message().is_some() || app.download_strip.last_error.is_some()
 }
 
 #[cfg(test)]
@@ -4603,6 +4635,92 @@ mod tests {
     assert!(
       empty_toast.contains("no log lines yet"),
       "empty-buffer toast should explain there's nothing to copy; got: {empty_toast}"
+    );
+  }
+
+  // ── handle_event dirty-flag policy ─────────────────────────────
+
+  /// `handle_event` needs a writer channel; tests don't drive the
+  /// daemon so the receiver is dropped after the call returns. The
+  /// sender is non-buffering enough for any synchronous push the
+  /// dispatch path might emit (none of the input fixtures here do).
+  fn fresh_writer_channel() -> (mpsc::Sender<WriterCmd>, mpsc::Receiver<WriterCmd>) {
+    mpsc::channel::<WriterCmd>(8)
+  }
+
+  #[tokio::test]
+  async fn handle_event_input_always_requests_redraw() {
+    let mut app = App::new(Default::default());
+    let (writer_tx, _writer_rx) = fresh_writer_channel();
+    let evt = Event::Input(key(KeyCode::Char('q'), KeyModifiers::NONE));
+    assert!(
+      handle_event(&mut app, evt, &writer_tx),
+      "input events must request a redraw"
+    );
+  }
+
+  #[tokio::test]
+  async fn handle_event_refresh_always_requests_redraw() {
+    let mut app = App::new(Default::default());
+    let (writer_tx, _writer_rx) = fresh_writer_channel();
+    let evt = Event::Refresh(RefreshTick::Disconnected);
+    assert!(
+      handle_event(&mut app, evt, &writer_tx),
+      "refresh ticks must request a redraw"
+    );
+  }
+
+  #[tokio::test]
+  async fn handle_event_chat_stream_requests_redraw() {
+    let mut app = App::new(Default::default());
+    let (writer_tx, _writer_rx) = fresh_writer_channel();
+    let evt = Event::ChatStream(ChatStreamMsg::Delta("hi".into()));
+    assert!(
+      handle_event(&mut app, evt, &writer_tx),
+      "chat stream chunks must request a redraw"
+    );
+  }
+
+  #[tokio::test]
+  async fn handle_event_idle_tick_skips_redraw() {
+    // Empty app, no toast, no hf dialog, no strip error → a pure
+    // Tick must NOT request a redraw. This is the load-bearing
+    // case for the idle-CPU goal.
+    let mut app = App::new(Default::default());
+    let (writer_tx, _writer_rx) = fresh_writer_channel();
+    assert!(
+      !handle_event(&mut app, Event::Tick, &writer_tx),
+      "idle Tick should not request a redraw"
+    );
+  }
+
+  #[tokio::test]
+  async fn handle_event_tick_with_active_toast_requests_redraw() {
+    // Toast is time-decayed (TOAST_TTL on App::expire_toast). Without
+    // a redraw on Tick, the toast would only disappear on the next
+    // non-Tick event — at idle this is the ~750ms refresher cadence,
+    // which is visibly laggy. The Tick must keep the redraw alive
+    // until the toast either expires or another event lands.
+    let mut app = App::new(Default::default());
+    app.show_toast("yanked");
+    let (writer_tx, _writer_rx) = fresh_writer_channel();
+    assert!(
+      handle_event(&mut app, Event::Tick, &writer_tx),
+      "Tick with an active toast must request a redraw"
+    );
+  }
+
+  #[tokio::test]
+  async fn handle_event_tick_with_strip_error_requests_redraw() {
+    // Download-strip lingering error fades after ERROR_LINGER. Same
+    // logic as the toast: Tick must keep redrawing so the strip can
+    // visibly clear when the linger window elapses.
+    let mut app = App::new(Default::default());
+    app.download_strip.last_error = Some(("rate-limited".to_string(), std::time::Instant::now()));
+    let (writer_tx, _writer_rx) = fresh_writer_channel();
+    assert!(
+      handle_event(&mut app, Event::Tick, &writer_tx),
+      "Tick with a strip error must request a redraw so the linger window can elapse"
     );
   }
 }

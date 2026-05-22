@@ -538,6 +538,34 @@ mod tests {
   }
 
   #[test]
+  fn progress_without_started_repairs_state() {
+    // The hf-hub `DownloadProgress` trait impl pushes events via a
+    // bounded `try_send`, so a `Started` frame can be dropped under
+    // backpressure (events.rs `StripProgress::push`). The invariant
+    // that makes this safe is: every `Progress` carries `bytes_total`,
+    // and `apply_progress` lifts the strip's `bytes_total` via `.max`,
+    // so the first Progress to land after a dropped Started repairs
+    // the state machine. This test pins that contract.
+    let mut strip = DownloadStripState::default();
+    let pull = make_pull("owner/repo", "model.gguf", None);
+    strip.enqueue(pull);
+    let promoted = strip.promote_next().unwrap();
+    strip.install_active(&promoted);
+    // Skip apply_started — simulates a dropped Started event.
+    let active_before = strip.active.as_ref().unwrap();
+    assert_eq!(active_before.bytes_total, 0);
+    assert_eq!(active_before.bytes_done, 0);
+    // First Progress carries the real bytes_total.
+    strip.apply_progress("owner/repo", 250_000, 1_000_000);
+    let active = strip.active.as_ref().unwrap();
+    assert_eq!(active.bytes_done, 250_000);
+    assert_eq!(
+      active.bytes_total, 1_000_000,
+      "Progress must repair bytes_total when Started was dropped"
+    );
+  }
+
+  #[test]
   fn already_cached_records_path_even_without_active_pull() {
     // Regression: the pre-flight cache probe in `enqueue_hf_pull`
     // fires `AlreadyCached` without ever calling `install_active`.
