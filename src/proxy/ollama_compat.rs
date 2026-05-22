@@ -18,12 +18,21 @@
 //! Field-level mapping notes (where Ollama's shape doesn't line up
 //! with what llamastash has):
 //!
-//! - `digest`: Ollama uses `sha256:<hex>`. llamastash identifies
-//!   models by `header_blake3` (BLAKE3 of the GGUF header). We emit
-//!   `blake3:<hex>` so clients that round-trip the digest opaquely
-//!   keep working, and clients that *do* validate the algorithm see
-//!   the truthful tag rather than a misleading `sha256:` prefix on a
-//!   non-SHA-256 hash.
+//! - `digest`: Ollama uses `sha256:<hex>`. llamastash emits
+//!   `blake3:<hex>` derived from the canonical path string of the
+//!   discovered file ([`digest_for_path`]). The `blake3:` prefix is
+//!   truthful about the algorithm (most clients treat the digest
+//!   opaquely; those that *do* validate see the right tag rather
+//!   than a misleading `sha256:` prefix on a non-SHA-256 hash). The
+//!   value is **stable** across `/api/tags` and `/api/ps` for the
+//!   same model — both endpoints feed the same canonical path
+//!   through the same hash. It is **not** the GGUF header BLAKE3
+//!   that [`crate::gguf::identity::ModelId`] computes: re-reading
+//!   ~16 MiB of header on every `/api/tags` request would brick
+//!   discovery, and the catalog doesn't cache the header hash
+//!   alongside [`ModelMetadata`] today. Lifting the digest to the
+//!   truthful header BLAKE3 is tracked in TODO §R2 ("Ollama-compat
+//!   digest from cached header BLAKE3").
 //! - `size`: Ollama returns the on-disk file size; we don't currently
 //!   stat the file at discovery time. `weights_bytes` from
 //!   [`ModelMetadata`] is the GGUF tensor footprint, typically within
@@ -62,18 +71,33 @@ pub const UNKNOWN_MTIME: &str = "1970-01-01T00:00:00Z";
 /// eviction is deferred (R34). Far-future = "no expiry."
 pub const FAR_FUTURE_EXPIRY: &str = "9999-12-31T23:59:59Z";
 
-/// Convert a 32-byte BLAKE3 header digest into the `blake3:<hex>`
-/// form used by Ollama-shape `digest` fields. The `blake3:` prefix is
-/// truthful about the underlying hash — Ollama uses `sha256:` but
-/// most clients treat the digest as opaque, so the prefix divergence
-/// is observable rather than dangerous.
-pub fn digest_from_header_blake3(header_blake3: &[u8; 32]) -> String {
+/// Format 32 BLAKE3 bytes as the `blake3:<hex>` string used by
+/// Ollama-shape `digest` fields. Algorithm-neutral on what was
+/// hashed — see [`digest_for_path`] for the strategy currently used
+/// by `/api/tags` and `/api/ps`.
+pub fn digest_blake3_hex(bytes: &[u8; 32]) -> String {
   let mut out = String::with_capacity(7 + 64);
   out.push_str("blake3:");
-  for byte in header_blake3 {
+  for byte in bytes {
     out.push_str(&format!("{byte:02x}"));
   }
   out
+}
+
+/// Stable Ollama-shape digest for a model identified by its canonical
+/// path. Hashes the path string (UTF-8 bytes of
+/// `path.to_string_lossy()`) and formats via [`digest_blake3_hex`].
+///
+/// Both `/api/tags` and `/api/ps` call through this helper so the
+/// same model emits the same digest across both endpoints regardless
+/// of whether it is currently Ready. The catalog doesn't cache the
+/// GGUF header BLAKE3 today and re-reading the header on every
+/// `/api/tags` row would brick discovery, so we use the canonical
+/// path as a stable stand-in. Lifting this to the truthful header
+/// digest is tracked in TODO §R2.
+pub fn digest_for_path(path: &std::path::Path) -> String {
+  let hashed = blake3::hash(path.to_string_lossy().as_bytes());
+  digest_blake3_hex(hashed.as_bytes())
 }
 
 /// `GET /api/tags` envelope. Ollama returns every model in the local
@@ -103,8 +127,11 @@ pub struct TagModel {
   /// On-disk size in bytes. `weights_bytes` projection — see module
   /// docstring for the small approximation gap.
   pub size: u64,
-  /// Content digest. `blake3:<hex>` from the GGUF header BLAKE3 (see
-  /// [`digest_from_header_blake3`]).
+  /// Content digest. `blake3:<hex>` derived from the canonical
+  /// path string via [`digest_for_path`] — see the module docstring
+  /// for the divergence from Ollama's `sha256:` digest and the
+  /// rationale for using a path-derived hash rather than the GGUF
+  /// header BLAKE3.
   pub digest: String,
   pub details: ModelDetails,
 }
@@ -222,11 +249,21 @@ mod tests {
 
   #[test]
   fn digest_uses_blake3_prefix_with_64_hex_chars() {
-    let digest = digest_from_header_blake3(&[0x01u8; 32]);
+    let digest = digest_blake3_hex(&[0x01u8; 32]);
     assert!(digest.starts_with("blake3:"));
     let hex = digest.strip_prefix("blake3:").unwrap();
     assert_eq!(hex.len(), 64, "32 bytes × 2 hex chars = 64");
     assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+  }
+
+  #[test]
+  fn digest_for_path_is_stable_and_path_dependent() {
+    let a1 = digest_for_path(std::path::Path::new("/models/llama.gguf"));
+    let a2 = digest_for_path(std::path::Path::new("/models/llama.gguf"));
+    let b = digest_for_path(std::path::Path::new("/models/qwen.gguf"));
+    assert_eq!(a1, a2, "same path → same digest across calls");
+    assert_ne!(a1, b, "different path → different digest");
+    assert!(a1.starts_with("blake3:"));
   }
 
   #[test]

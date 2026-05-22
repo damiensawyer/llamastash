@@ -28,8 +28,8 @@ use serde_json::json;
 
 use super::forward;
 use super::ollama_compat::{
-  digest_from_header_blake3, ModelDetails, PsModel, PsResponse, ShowRequest, ShowResponse,
-  TagModel, TagsResponse, VersionResponse, FAR_FUTURE_EXPIRY, UNKNOWN_MTIME,
+  digest_for_path, ModelDetails, PsModel, PsResponse, ShowRequest, ShowResponse, TagModel,
+  TagsResponse, VersionResponse, FAR_FUTURE_EXPIRY, UNKNOWN_MTIME,
 };
 use super::openai::{ErrorObject, ErrorResponse, ModelList, ModelObject};
 use super::route::{self, BodyError as RouteBodyError, RouteDecision};
@@ -325,7 +325,9 @@ async fn ollama_ps(state: Arc<ProxyState>) -> ProxyResponse {
       name: name.clone(),
       model: name,
       size,
-      digest: digest_from_header_blake3(&id.header_blake3),
+      // Path-derived digest, identical to what /api/tags emits for
+      // the same model — see `ollama_compat::digest_for_path`.
+      digest: digest_for_path(&id.path),
       details,
       expires_at: FAR_FUTURE_EXPIRY.to_string(),
       size_vram: 0,
@@ -482,7 +484,10 @@ fn ollama_tag_from_discovered(m: &DiscoveredModel) -> TagModel {
     .as_ref()
     .and_then(|md| md.weights_bytes)
     .unwrap_or(0);
-  let digest = compute_digest_for(m);
+  // Path-derived digest, identical to what /api/ps emits for the
+  // same model. Parse-error rows hash their path too — clients see
+  // a stable, comparable value rather than a special-case sentinel.
+  let digest = digest_for_path(&m.path);
   TagModel {
     name: name.clone(),
     model: name,
@@ -491,27 +496,6 @@ fn ollama_tag_from_discovered(m: &DiscoveredModel) -> TagModel {
     digest,
     details: ollama_details_from_metadata(m.metadata.as_ref()),
   }
-}
-
-/// Compute an Ollama-shape `digest` string for a discovered model.
-/// Returns `"blake3:<all-zeros>"` for parse-error rows where the
-/// header BLAKE3 isn't available — clients see a stable sentinel for
-/// "this row is present but its header didn't parse" rather than a
-/// missing field.
-fn compute_digest_for(m: &DiscoveredModel) -> String {
-  if m.metadata.is_some() {
-    // Compute the BLAKE3 inline from the on-disk header. The catalog
-    // doesn't currently store the BLAKE3 digest alongside metadata —
-    // `ModelId` is computed at `start_model` time. For /api/tags the
-    // synchronous header re-read would be expensive; emit a
-    // path-derived deterministic blake3 instead so the digest is
-    // stable across requests but cheap to produce.
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(m.path.to_string_lossy().as_bytes());
-    let bytes: [u8; 32] = *hasher.finalize().as_bytes();
-    return digest_from_header_blake3(&bytes);
-  }
-  digest_from_header_blake3(&[0u8; 32])
 }
 
 /// Project a [`DiscoveredModel`] onto the `CatalogRow` shape the

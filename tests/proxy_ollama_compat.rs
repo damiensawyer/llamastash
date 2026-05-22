@@ -24,10 +24,19 @@ use std::{
   time::Duration,
 };
 
+use llamastash::daemon::probe::ProbeOptions;
+use llamastash::daemon::registry::SupervisorRegistry;
 use llamastash::daemon::shutdown::ShutdownToken;
+use llamastash::daemon::supervisor::{
+  spawn as supervisor_spawn, ManagedModel, ManagedSpawn, ManagedState,
+};
 use llamastash::discovery::{DiscoveredModel, ModelCatalog, ModelSource};
+use llamastash::gguf::identity::ModelId;
 use llamastash::gguf::metadata::{ModeHint, ModelMetadata, Quant};
+use llamastash::gguf::test_fixtures::build_minimal_gguf;
 use llamastash::ipc::methods::MethodContext;
+use llamastash::launch::mode::LaunchMode;
+use llamastash::launch::params::LaunchParams;
 use llamastash::proxy::server::{loopback_addr, new_status_cell, serve, ProxyStatus, StatusCell};
 use llamastash::proxy::state::ProxyState;
 use serde_json::Value;
@@ -499,4 +508,186 @@ async fn api_show_capabilities_reflect_mode_hint() {
   assert_eq!(caps, vec!["rerank"], "rerank mode → rerank cap");
 
   shutdown_listener(shutdown, handle).await;
+}
+
+// --- /api/ps Ready supervisor + cross-endpoint digest -------------------
+//
+// The Ready branch of `/api/ps` needs a live supervisor in the
+// registry. Pattern lifted from `tests/proxy_fallback.rs`: drop a
+// minimal GGUF on disk, spawn `fake_llama_server` against it,
+// register the resulting `ManagedModel` in a `SupervisorRegistry`,
+// then wire that registry into the `MethodContext` the proxy reads.
+
+fn fake_binary() -> PathBuf {
+  PathBuf::from(env!("CARGO_BIN_EXE_fake_llama_server"))
+}
+
+fn fast_probe() -> ProbeOptions {
+  ProbeOptions {
+    interval: Duration::from_millis(30),
+    timeout: Duration::from_secs(15),
+  }
+}
+
+fn write_gguf(dir: &Path, name: &str, arch: &str) -> PathBuf {
+  let path = dir.join(name);
+  std::fs::write(&path, build_minimal_gguf(arch)).expect("write gguf");
+  std::fs::canonicalize(&path).expect("canonicalize")
+}
+
+async fn wait_for_ready(model: &ManagedModel) {
+  let deadline = std::time::Instant::now() + Duration::from_secs(5);
+  loop {
+    if matches!(model.state().await, ManagedState::Ready) {
+      return;
+    }
+    if std::time::Instant::now() > deadline {
+      panic!("supervisor never reached Ready");
+    }
+    sleep(Duration::from_millis(20)).await;
+  }
+}
+
+async fn pre_launch(
+  catalog_path: &Path,
+  registry: &SupervisorRegistry,
+  log_dir: &Path,
+  mode: LaunchMode,
+) -> ManagedModel {
+  let port = pick_free_port();
+  let id = ModelId {
+    path: catalog_path.to_path_buf(),
+    header_blake3: [0u8; 32],
+  };
+  let model = supervisor_spawn(ManagedSpawn {
+    id,
+    binary: fake_binary(),
+    params: LaunchParams::new(catalog_path.to_path_buf(), mode),
+    port,
+    mode,
+    log_path: log_dir.join("ollama-ps.log"),
+    probe: fast_probe(),
+  })
+  .await
+  .expect("spawn");
+  wait_for_ready(&model).await;
+  let launch_id = registry.next_id();
+  registry.insert(launch_id, model.clone()).await;
+  model
+}
+
+async fn proxy_state_with_models_and_registry(
+  models: Vec<DiscoveredModel>,
+  registry: SupervisorRegistry,
+) -> Arc<ProxyState> {
+  let catalog = ModelCatalog::new();
+  for m in models {
+    catalog.upsert(m).await;
+  }
+  let ctx = MethodContext::with_catalog(ShutdownToken::new(), catalog).with_supervisors(registry);
+  ProxyState::from_context(&ctx)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn api_ps_returns_ready_supervisor_with_documented_fields() {
+  let dir = unique_temp_dir("ps-ready");
+  let log_dir = dir.join("logs");
+  std::fs::create_dir_all(&log_dir).unwrap();
+  let qwen3 = write_gguf(&dir, "qwen3-ready.gguf", "qwen3");
+
+  let registry = SupervisorRegistry::new();
+  let live = pre_launch(&qwen3, &registry, &log_dir, LaunchMode::Chat).await;
+
+  // Catalog entry that points at the same canonical path the
+  // supervisor's ModelId carries — that's how /api/ps joins
+  // supervisor rows back to catalog metadata.
+  let mut discovered = make_model(
+    qwen3.to_str().unwrap(),
+    Some("qwen3:7b"),
+    "qwen3",
+    ModeHint::Chat,
+  );
+  discovered.path = qwen3.clone();
+  let state = proxy_state_with_models_and_registry(vec![discovered], registry).await;
+  let (addr, shutdown, handle) = spawn_listener_with_state(state).await;
+
+  let (status, body) = http_get(addr, "/api/ps").await;
+  assert_eq!(status, 200);
+  let v: Value = serde_json::from_slice(&body).expect("json body");
+  let arr = v["models"].as_array().expect("models array");
+  assert_eq!(arr.len(), 1, "exactly one Ready supervisor: {v}");
+  let row = &arr[0];
+
+  // Required Ollama fields present.
+  assert_eq!(row["name"], row["model"], "name and model agree");
+  assert_eq!(row["name"], "qwen3:7b", "display_label wins");
+  assert_eq!(row["size"], 4_200_000_000_u64, "weights_bytes projected");
+  let digest = row["digest"].as_str().expect("digest field");
+  assert!(
+    digest.starts_with("blake3:"),
+    "ps digest uses blake3 prefix: {digest}"
+  );
+  // Placeholder slots — pinned so a regression here surfaces loudly.
+  assert_eq!(
+    row["expires_at"], "9999-12-31T23:59:59Z",
+    "no idle-TTL eviction → far-future placeholder"
+  );
+  assert_eq!(row["size_vram"], 0, "VRAM attribution TODO → 0");
+  // Details block reuses the same projection as /api/tags.
+  assert_eq!(row["details"]["family"], "qwen3");
+  assert_eq!(row["details"]["quantization_level"], "Q4_K");
+  assert_eq!(row["details"]["parameter_size"], "7B");
+
+  let _ = live.stop(Duration::from_secs(3)).await;
+  shutdown_listener(shutdown, handle).await;
+  std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn digest_is_stable_across_tags_and_ps_for_same_model() {
+  // Cross-endpoint invariant: /api/tags and /api/ps emit the same
+  // `digest` value for the same model. Clients that pin tags-to-ps
+  // joins by digest depend on this — see `ollama_compat::digest_for_path`.
+  let dir = unique_temp_dir("ps-digest");
+  let log_dir = dir.join("logs");
+  std::fs::create_dir_all(&log_dir).unwrap();
+  let qwen3 = write_gguf(&dir, "qwen3-digest.gguf", "qwen3");
+
+  let registry = SupervisorRegistry::new();
+  let live = pre_launch(&qwen3, &registry, &log_dir, LaunchMode::Chat).await;
+
+  let mut discovered = make_model(
+    qwen3.to_str().unwrap(),
+    Some("qwen3:7b"),
+    "qwen3",
+    ModeHint::Chat,
+  );
+  discovered.path = qwen3.clone();
+  let state = proxy_state_with_models_and_registry(vec![discovered], registry).await;
+  let (addr, shutdown, handle) = spawn_listener_with_state(state).await;
+
+  let (s_tags, b_tags) = http_get(addr, "/api/tags").await;
+  assert_eq!(s_tags, 200);
+  let v_tags: Value = serde_json::from_slice(&b_tags).expect("tags json");
+  let tags_row = v_tags["models"]
+    .as_array()
+    .and_then(|a| a.iter().find(|r| r["name"] == "qwen3:7b"))
+    .expect("tags row for qwen3:7b");
+
+  let (s_ps, b_ps) = http_get(addr, "/api/ps").await;
+  assert_eq!(s_ps, 200);
+  let v_ps: Value = serde_json::from_slice(&b_ps).expect("ps json");
+  let ps_row = v_ps["models"]
+    .as_array()
+    .and_then(|a| a.iter().find(|r| r["name"] == "qwen3:7b"))
+    .expect("ps row for qwen3:7b");
+
+  assert_eq!(
+    tags_row["digest"], ps_row["digest"],
+    "same model → same digest across /api/tags and /api/ps"
+  );
+
+  let _ = live.stop(Duration::from_secs(3)).await;
+  shutdown_listener(shutdown, handle).await;
+  std::fs::remove_dir_all(&dir).ok();
 }

@@ -463,3 +463,48 @@ async fn collect_fallback_candidates(state: &Arc<ProxyState>) -> Vec<FallbackCan
 // exercise `resolve_model_with_candidates` directly. End-to-end
 // ambiguity / not_found handling (proxy → 400 / 404) is covered by
 // `tests/proxy_routing.rs`.
+
+#[cfg(test)]
+mod tests {
+  use super::fallback_reason_for;
+
+  // The four arms of `fallback_reason_for` decide whether the
+  // x-llamastash-fallback-reason header reads "launch_failed" (the
+  // picked model is in the same family as what the client asked for
+  // — output shape parity holds) or "family_mismatch" (cross-arch
+  // pick — output shape parity does not hold). Embedding/rerank
+  // clients branch on this header, so the four cases need explicit
+  // coverage rather than relying on the one integration test that
+  // happens to hit the `(None, Some)` branch.
+
+  #[test]
+  fn same_arch_on_both_sides_is_launch_failed() {
+    assert_eq!(
+      fallback_reason_for(Some("llama"), Some("llama")),
+      "launch_failed"
+    );
+  }
+
+  #[test]
+  fn no_arch_on_either_side_is_launch_failed() {
+    assert_eq!(fallback_reason_for(None, None), "launch_failed");
+  }
+
+  #[test]
+  fn requested_arch_missing_is_family_mismatch() {
+    assert_eq!(fallback_reason_for(None, Some("llama")), "family_mismatch");
+  }
+
+  #[test]
+  fn picked_arch_missing_is_family_mismatch() {
+    assert_eq!(fallback_reason_for(Some("llama"), None), "family_mismatch");
+  }
+
+  #[test]
+  fn different_arches_is_family_mismatch() {
+    assert_eq!(
+      fallback_reason_for(Some("bert"), Some("llama")),
+      "family_mismatch"
+    );
+  }
+}
