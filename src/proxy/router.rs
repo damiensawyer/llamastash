@@ -86,16 +86,16 @@ async fn forward_request(state: Arc<ProxyState>, req: Request<Incoming>) -> Prox
     RouteDecision::ReadyAt {
       port,
       served_model_id,
+      served_model_key,
       fallback,
       fallback_reason,
-      ..
     } => {
       // MRU touch on the Ready path. Stamped *before* forwarding
       // begins (per the plan's "as it starts forwarding, not on
       // completion" rule) so long-running streams don't delay the
-      // timestamp. We re-look-up the supervisor's ModelId from the
-      // snapshot — `RouteDecision::ReadyAt` doesn't carry it.
-      touch_mru_for_port(&state, port).await;
+      // timestamp. Direct touch by ModelId avoids the second
+      // supervisor snapshot the port-only path used to take.
+      state.mru.touch(&served_model_key).await;
       forward::forward_to_upstream(
         &state,
         forward::InboundRequest {
@@ -107,6 +107,7 @@ async fn forward_request(state: Arc<ProxyState>, req: Request<Incoming>) -> Prox
         forward::Target {
           port,
           served_model_id: &served_model_id,
+          served_model_key: &served_model_key,
           fallback,
           fallback_reason: fallback_reason.as_deref(),
         },
@@ -307,27 +308,6 @@ where
   let error = ErrorObject::new("launch_failed", message).with_running(running);
   let bytes = serde_json::to_vec(&ErrorResponse { error }).expect("json encoding of fixed shape");
   Ok(json_response(StatusCode::SERVICE_UNAVAILABLE, bytes))
-}
-
-/// Touch the MRU tracker for the supervisor currently bound to
-/// `port`. The proxy stamps `last_request_at` on every successful
-/// request *as forwarding begins* (per the plan's locked decision),
-/// not on completion — long-running streams shouldn't delay the
-/// timestamp.
-pub(crate) async fn touch_mru_for_port(state: &Arc<ProxyState>, port: u16) {
-  let snap = state.supervisors.snapshot().await;
-  for (_launch_id, model) in snap.into_iter() {
-    if model.port() == port {
-      state.mru.touch(model.id()).await;
-      return;
-    }
-  }
-}
-
-/// Touch the MRU tracker by `ModelId`. Used by the fallback arm
-/// which already has the id from the supervisor snapshot it walked.
-pub(crate) async fn touch_mru_for_id(state: &Arc<ProxyState>, id: &crate::gguf::identity::ModelId) {
-  state.mru.touch(id).await;
 }
 
 fn json_response(status: StatusCode, body: Vec<u8>) -> Response<BoxBody<Bytes, BodyError>> {

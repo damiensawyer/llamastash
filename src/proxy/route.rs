@@ -31,6 +31,7 @@ use hyper::body::{Bytes, Incoming};
 use crate::cli::resolve::{resolve_model, CatalogRow};
 use crate::daemon::supervisor::ManagedState;
 use crate::discovery::DiscoveredModel;
+use crate::gguf::identity::ModelId;
 
 use super::launch::{self, LaunchOutcome};
 use super::mru::{pick_fallback, FallbackCandidate};
@@ -56,13 +57,13 @@ pub(crate) enum RouteDecision {
   ReadyAt {
     port: u16,
     served_model_id: String,
-    /// The user-supplied `body.model` value, retained for symmetry
-    /// with the other variants. Currently unused; kept on the variant
-    /// so router-side mismatch reporting can surface both names without
-    /// re-threading them through the call.
-    // dead_code: retained for future per-request mismatch reporting.
-    #[allow(dead_code)]
-    requested_model: String,
+    /// Canonical `(path, header_blake3)` of the supervisor we picked.
+    /// Threaded through so the forward path can re-verify the port
+    /// still binds the same model just before sending the request
+    /// upstream — defends against the Ready→Stopping→port-reuse race
+    /// where a different model could be answering on the same port
+    /// by the time we connect.
+    served_model_key: ModelId,
     fallback: bool,
     fallback_reason: Option<String>,
   },
@@ -225,8 +226,8 @@ pub(crate) async fn decide(state: &Arc<ProxyState>, body_model: Option<String>) 
     if matches!(model.state().await, ManagedState::Ready) {
       return RouteDecision::ReadyAt {
         port: model.port(),
-        served_model_id: resolved.name(),
-        requested_model: requested,
+        served_model_id: served_name_for_row(&resolved),
+        served_model_key: model.id().clone(),
         fallback: false,
         fallback_reason: None,
       };
@@ -332,11 +333,11 @@ pub(crate) async fn handle_not_running(
 ) -> ProxyResponse {
   let outcome = launch::auto_start(state, &resolved_row).await;
   match outcome {
-    LaunchOutcome::Ready { port } => {
+    LaunchOutcome::Ready { port, model_id } => {
       // Touch the MRU using the supervisor we just confirmed Ready.
       // The display name for the response header on the happy path
       // is the requested model name — no fallback, no surprise.
-      super::router::touch_mru_for_port(state, port).await;
+      state.mru.touch(&model_id).await;
       let served = served_name_for_row(&resolved_row);
       super::forward::forward_to_upstream(
         state,
@@ -344,6 +345,7 @@ pub(crate) async fn handle_not_running(
         super::forward::Target {
           port,
           served_model_id: &served,
+          served_model_key: &model_id,
           fallback: false,
           fallback_reason: None,
         },
@@ -356,13 +358,14 @@ pub(crate) async fn handle_not_running(
       // timestamp, then defer to `pick_fallback` for the policy.
       let candidates = collect_fallback_candidates(state).await;
       if let Some(pick) = pick_fallback(candidates, requested_arch.as_deref()) {
-        super::router::touch_mru_for_id(state, &pick.model_id).await;
+        state.mru.touch(&pick.model_id).await;
         return super::forward::forward_to_upstream(
           state,
           inbound,
           super::forward::Target {
             port: pick.port,
             served_model_id: &pick.served_model_id,
+            served_model_key: &pick.model_id,
             fallback: true,
             fallback_reason: Some("launch_failed"),
           },

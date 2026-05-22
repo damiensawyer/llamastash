@@ -65,6 +65,11 @@ pub(crate) struct InboundRequest {
 pub(crate) struct Target<'a> {
   pub port: u16,
   pub served_model_id: &'a str,
+  /// Canonical id of the supervisor that owns `port` at decision
+  /// time. Used to re-verify the binding immediately before send so
+  /// a Ready→Stopping→port-reuse race can't silently route to a
+  /// different model.
+  pub served_model_key: &'a crate::gguf::identity::ModelId,
   pub fallback: bool,
   pub fallback_reason: Option<&'a str>,
 }
@@ -91,9 +96,21 @@ pub(crate) async fn forward_to_upstream(
   let Target {
     port,
     served_model_id,
+    served_model_key,
     fallback,
     fallback_reason,
   } = target;
+  // Re-verify the supervisor at `port` is still the one we picked.
+  // Without this, a Ready→Stopping→port-reuse window between
+  // `route::decide` and now can silently route the request to a
+  // different model on the recycled port.
+  if !verify_port_binding(state, port, served_model_key).await {
+    return Ok(error_envelope(
+      StatusCode::BAD_GATEWAY,
+      "upstream_unreachable",
+      "model exited before forwarding could begin",
+    ));
+  }
   // Compose upstream URL: path + query from the original request,
   // host always 127.0.0.1 (loopback only — see plan §Scope Boundaries).
   let path_and_query = inbound_uri
@@ -255,6 +272,37 @@ fn build_streaming_response(
 /// number for safety.
 fn status_to_hyper(s: reqwest::StatusCode) -> hyper::StatusCode {
   hyper::StatusCode::from_u16(s.as_u16()).unwrap_or(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Confirm the supervisor currently bound to `port` is still the
+/// one we picked at `route::decide` time. Returns `false` if the
+/// port no longer maps to `expected_id` (model stopped, port reused
+/// by a different model, or supervisor no longer Ready). Best-effort:
+/// the supervisor could still disappear between this check and the
+/// reqwest send, but that window collapses to "ms," not "stop+start"
+/// — small enough that a stale ManagedState read is acceptable.
+async fn verify_port_binding(
+  state: &Arc<ProxyState>,
+  port: u16,
+  expected_id: &crate::gguf::identity::ModelId,
+) -> bool {
+  let snap = state.supervisors.snapshot().await;
+  for (_launch_id, model) in snap.into_iter() {
+    if model.port() != port {
+      continue;
+    }
+    if model.id() != expected_id {
+      log::warn!(
+        "proxy: port {port} now bound to a different model than expected; rejecting forward"
+      );
+      return false;
+    }
+    return matches!(
+      model.state().await,
+      crate::daemon::supervisor::ManagedState::Ready
+    );
+  }
+  false
 }
 
 /// Parse a `Connection: <list>` header into a lower-case list of

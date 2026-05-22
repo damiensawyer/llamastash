@@ -37,15 +37,15 @@ use super::coalesce::{AcquireOutcome, SharedOutcome};
 use super::state::ProxyState;
 
 /// Outcome of [`auto_start`]. The proxy's caller branches on this:
-/// `Ready` forwards against `port`; `Failed` enters the family-MRU
-/// fallback path.
+/// `Ready` forwards against `(port, model_id)`; `Failed` enters the
+/// family-MRU fallback path.
 #[derive(Clone, Debug)]
 pub(crate) enum LaunchOutcome {
   /// Supervisor reached `ManagedState::Ready`. The caller forwards
-  /// against `port`. The `ManagedModel` handle is intentionally not
-  /// carried: forward path looks the supervisor up by `(port, id)`
-  /// so it stays in sync with concurrent IPC start/stop activity.
-  Ready { port: u16 },
+  /// against `port`; `model_id` is threaded so the forward path can
+  /// re-verify the supervisor still owns `port` before sending
+  /// (port-reuse defense — see `super::forward`).
+  Ready { port: u16, model_id: ModelId },
   /// Launch hit a terminal error before reaching Ready. `cause`
   /// surfaces in the 503 `launch_failed` JSON body when no fallback
   /// is available.
@@ -55,7 +55,7 @@ pub(crate) enum LaunchOutcome {
 impl From<SharedOutcome> for LaunchOutcome {
   fn from(s: SharedOutcome) -> Self {
     match s {
-      SharedOutcome::Ready { port } => LaunchOutcome::Ready { port },
+      SharedOutcome::Ready { port, model_id } => LaunchOutcome::Ready { port, model_id },
       SharedOutcome::Failed { cause } => LaunchOutcome::Failed { cause },
     }
   }
@@ -64,7 +64,7 @@ impl From<SharedOutcome> for LaunchOutcome {
 impl From<LaunchOutcome> for SharedOutcome {
   fn from(o: LaunchOutcome) -> Self {
     match o {
-      LaunchOutcome::Ready { port } => SharedOutcome::Ready { port },
+      LaunchOutcome::Ready { port, model_id } => SharedOutcome::Ready { port, model_id },
       LaunchOutcome::Failed { cause } => SharedOutcome::Failed { cause },
     }
   }
@@ -102,7 +102,7 @@ pub(crate) async fn auto_start(state: &Arc<ProxyState>, resolved: &CatalogRow) -
   // the leader finishes (or wake to `None` on cancellation).
   match state.coalesce.acquire(model_id.clone()).await {
     AcquireOutcome::Leader(leader) => {
-      let outcome = drive_launch_as_leader(state, resolved).await;
+      let outcome = drive_launch_as_leader(state, resolved, model_id).await;
       leader.finish(outcome.clone().into()).await;
       outcome
     }
@@ -118,7 +118,11 @@ pub(crate) async fn auto_start(state: &Arc<ProxyState>, resolved: &CatalogRow) -
 /// Run [`start_model_inner`], then poll `state()` at 100 ms until
 /// the supervisor reaches `Ready` or `Error`. Pulled out so the
 /// leader arm of [`auto_start`] reads top-to-bottom without nesting.
-async fn drive_launch_as_leader(state: &Arc<ProxyState>, resolved: &CatalogRow) -> LaunchOutcome {
+async fn drive_launch_as_leader(
+  state: &Arc<ProxyState>,
+  resolved: &CatalogRow,
+  model_id: ModelId,
+) -> LaunchOutcome {
   let params = StartParams {
     model_path: std::path::PathBuf::from(&resolved.path),
     ..StartParams::default()
@@ -140,6 +144,7 @@ async fn drive_launch_as_leader(state: &Arc<ProxyState>, resolved: &CatalogRow) 
       ManagedState::Ready => {
         return LaunchOutcome::Ready {
           port: started.port,
+          model_id,
         };
       }
       ManagedState::Error { cause } => {

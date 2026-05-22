@@ -33,9 +33,11 @@ use crate::gguf::identity::ModelId;
 /// [`crate::proxy::launch::LaunchOutcome`].
 #[derive(Clone, Debug)]
 pub(crate) enum SharedOutcome {
-  /// Supervisor reached `Ready`; the bound port is durable for the
-  /// life of the supervisor entry.
-  Ready { port: u16 },
+  /// Supervisor reached `Ready`; the bound port + canonical id are
+  /// what the forward path needs to verify the supervisor is still
+  /// the same one we launched (defends the Ready→Stopping→port-reuse
+  /// race in [`super::forward`]).
+  Ready { port: u16, model_id: ModelId },
   /// Launch hit a terminal error before reaching Ready. `cause`
   /// surfaces in the 503 `launch_failed` body when no fallback exists.
   Failed { cause: String },
@@ -126,11 +128,7 @@ impl Drop for Leader {
     }
     // Stamp Cancelled synchronously so any follower already parked
     // on the inner Notify sees the right state when they re-check.
-    *self
-      .slot
-      .state
-      .lock()
-      .unwrap_or_else(|e| e.into_inner()) = SlotState::Cancelled;
+    *self.slot.state.lock().unwrap_or_else(|e| e.into_inner()) = SlotState::Cancelled;
     self.slot.notify.notify_waiters();
     // Detach the map cleanup onto the runtime — Drop can't await.
     // If no runtime is available we leak the entry; the next acquire
@@ -190,11 +188,7 @@ impl Follower {
   /// still-pending. Centralised so the lock acquisition + match is
   /// not duplicated across the two read sites in [`Self::wait`].
   fn read_slot(&self) -> Option<Option<SharedOutcome>> {
-    let guard = self
-      .slot
-      .state
-      .lock()
-      .unwrap_or_else(|e| e.into_inner());
+    let guard = self.slot.state.lock().unwrap_or_else(|e| e.into_inner());
     match &*guard {
       SlotState::Complete(out) => Some(Some(out.clone())),
       SlotState::Cancelled => Some(None),
@@ -250,7 +244,10 @@ mod tests {
   }
 
   fn ready(port: u16) -> SharedOutcome {
-    SharedOutcome::Ready { port }
+    SharedOutcome::Ready {
+      port,
+      model_id: key("/m/ready.gguf"),
+    }
   }
 
   #[tokio::test]
@@ -296,7 +293,7 @@ mod tests {
     let woke_for_task = woke.clone();
     let task = tokio::spawn(async move {
       let out = follower.wait().await;
-      assert!(matches!(out, Some(SharedOutcome::Ready { port: 18001 })));
+      assert!(matches!(out, Some(SharedOutcome::Ready { port: 18001, .. })));
       woke_for_task.fetch_add(1, Ordering::SeqCst);
     });
     // Yield to let the follower start awaiting; with the durable
@@ -328,7 +325,7 @@ mod tests {
     leader.finish(ready(18042)).await;
     // ... then wait. Should return immediately.
     let out = follower.wait().await;
-    assert!(matches!(out, Some(SharedOutcome::Ready { port: 18042 })));
+    assert!(matches!(out, Some(SharedOutcome::Ready { port: 18042, .. })));
   }
 
   #[tokio::test]
