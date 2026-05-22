@@ -8,6 +8,12 @@ real OpenAI-compatible backend rather than a fake server. The goal is
 discovered model in its picker and a chat turn completes against both
 a running model and a dormant one (triggering auto-start)."
 
+Broader-scope verification of the proxy feature (Ollama-discovery
+endpoints, family-MRU fallback headers, `--proxy-port` override,
+real-client integration matrix, known limitations) lives in
+[`tests/proxy_manual_test_plan.md`](proxy_manual_test_plan.md). Run that
+after substantive proxy changes; run *this* smoke before every release.
+
 Sign-off goes in the release PR description as a one-line confirmation:
 
 > OpenCode + Pi smoke-tested green at `<commit-sha>`.
