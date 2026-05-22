@@ -53,15 +53,14 @@ impl PickerField {
   /// Whether `e:edit` opens an inline buffer on this row.
   ///
   /// - Numeric / float / enum knobs and the free-text `Extras` row
-  ///   open an `InputField` for typing.
+  ///   open an [`crate::tui::input_field::InputField`] for typing.
   /// - Boolean knobs (reasoning, flash_attn, mlock, no_mmap) don't —
   ///   they're cycled with ←/→. Surfacing `e:edit` on a boolean row
   ///   would be a no-op chip and a misleading affordance.
   ///
-  /// Shared between [`crate::tui::events::open_focused_inline_edit`]
-  /// (which early-returns on booleans) and the right-pane hint strip
-  /// (which hides the chip on those rows) so the chip and the
-  /// handler stay in lockstep.
+  /// Shared between the Settings-row edit handler (which early-returns
+  /// on booleans) and the right-pane hint strip (which hides the chip
+  /// on those rows) so the chip and the handler stay in lockstep.
   pub fn is_editable(self) -> bool {
     match self {
       PickerField::Extras => true,
@@ -85,10 +84,10 @@ impl PickerField {
 /// Inline-edit state owned by [`LaunchPickerState`].
 ///
 /// The buffer and modal `editing` flag live in `inline_edit`
-/// ([`InputField`]) so the typed-knob editor shares the
+/// ([`crate::tui::input_field::InputField`]) so the typed-knob editor shares the
 /// `e:edit / Esc:walk-back / Enter:Submit` contract with every
 /// other text input in the TUI. The wrapper carries the two extra
-/// pieces of state `InputField` doesn't model:
+/// pieces of state `crate::tui::input_field::InputField` doesn't model:
 ///
 /// - `field` — which `PickerField` the open edit is editing (numeric
 ///   / enum knob or the extras row), so `commit_inline_edit` knows
@@ -125,7 +124,8 @@ impl InlineEdit {
   }
 
   /// True while the user is actively typing into the buffer (the
-  /// edit is open *and* `InputField` reports edit mode). Used by
+  /// edit is open *and* `crate::tui::input_field::InputField` reports
+  /// edit mode). Used by
   /// the event router to send keys to the input instead of the
   /// outer keymap.
   pub fn is_open(&self) -> bool {
@@ -155,7 +155,8 @@ pub struct LaunchPickerState {
   /// Enter:Submit` contract with every other text input in the TUI.
   pub extras_input: crate::tui::input_field::InputField,
   /// Inline edit state for numeric / enum rows. Wraps an
-  /// [`InputField`] plus the `PickerField` marker so the commit path
+  /// [`crate::tui::input_field::InputField`] plus the `PickerField`
+  /// marker so the commit path
   /// knows which row to write back to, and an optional parse-error
   /// string rendered under the row.
   pub inline_edit: InlineEdit,

@@ -37,7 +37,7 @@ The brew tap is the recommended path on Apple Silicon — it installs a code-sig
 cargo install llamastash --locked
 ```
 
-Builds from the published crate. Requires Rust 1.78+ (newer is fine). The `--locked` flag pins to the `Cargo.lock` shipped with the release for reproducibility.
+Builds from the published crate. Requires Rust 1.95+ (newer is fine). The `--locked` flag pins to the `Cargo.lock` shipped with the release for reproducibility.
 
 ### Option 4 — Build from source
 

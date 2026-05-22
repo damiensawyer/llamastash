@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use llamastash::config::loader::PortRange;
 use llamastash::daemon::{run_foreground, DaemonOptions};
 use llamastash::gguf::test_fixtures::build_minimal_gguf;
-use llamastash::ipc::Client;
+use llamastash::ipc::{client::ClientError, Client};
 use llamastash::tui::oai_client::{embed, rerank, spawn_chat_stream, ChatStreamMsg};
 use serde_json::json;
 use tokio::time::timeout;
@@ -101,12 +101,21 @@ async fn drive_to_ready_port() -> (u16, tokio::task::JoinHandle<()>, PathBuf) {
   // Wait briefly for Ready.
   let deadline = std::time::Instant::now() + Duration::from_secs(5);
   loop {
-    let body = client.call("status", None).await.expect("status");
-    let models = body["models"].as_array().expect("models");
-    if let Some(m) = models.iter().find(|m| m["launch_id"] == launch_id) {
-      if m["state"]["state"] == json!("ready") {
-        break;
-      }
+    match Client::connect(&socket).await {
+      Ok(mut status_client) => match status_client.call("status", None).await {
+        Ok(body) => {
+          let models = body["models"].as_array().expect("models");
+          if let Some(m) = models.iter().find(|m| m["launch_id"] == launch_id) {
+            if m["state"]["state"] == json!("ready") {
+              break;
+            }
+          }
+        }
+        Err(ClientError::Connect(_) | ClientError::Frame(_) | ClientError::Timeout(_)) => {}
+        Err(err) => panic!("status: {err}"),
+      },
+      Err(ClientError::Connect(_)) => {}
+      Err(err) => panic!("status connect: {err}"),
     }
     if std::time::Instant::now() > deadline {
       panic!("supervisor never reached Ready");

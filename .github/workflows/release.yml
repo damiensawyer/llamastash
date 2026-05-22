@@ -98,7 +98,7 @@ jobs:
             echo "is_prerelease=$prerelease"
           } >>"$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # On push, github.ref is the tag and the default works. On
           # workflow_dispatch, github.ref is the branch the workflow was
@@ -172,7 +172,7 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.create-release.outputs.tag }}
 
@@ -269,7 +269,7 @@ jobs:
       RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
       RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.create-release.outputs.tag }}
           sparse-checkout: |
@@ -330,7 +330,7 @@ jobs:
       RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
       RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.create-release.outputs.tag }}
       - uses: actions/download-artifact@v4
@@ -447,7 +447,7 @@ jobs:
       RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
       RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.create-release.outputs.tag }}
 
@@ -559,7 +559,7 @@ jobs:
     runs-on: ubuntu-latest
     if: needs.create-release.outputs.is_prerelease == 'false'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.create-release.outputs.tag }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable, 2026-05

@@ -141,20 +141,20 @@ Every read-and-mutation command supports `--json` and emits a wrapped object: `{
 
 ### Exit-code table
 
-| Code | Constant | Meaning |
-|---|---|---|
-| 0 | `SUCCESS` | Success |
-| 64 | `USAGE` | Bad CLI usage (clap rejection) |
-| 65 | `DAEMON_UNREACHABLE` | Daemon socket missing / timeout |
-| 66 | `MODEL_NOT_FOUND` | Model reference matched zero or multiple |
-| 67 | `LAUNCH_FAILED` | `start_model` accepted but supervisor failed |
-| 68 | `STOP_FAILED` | `stop_model` / `stop_all` returned an error |
-| 69 | `PULL_FAILED` | Standalone `llamastash pull` failed |
-| 70 | `BINARY_NOT_FOUND` | `llama-server` not on PATH / config |
-| 71 | `UNKNOWN` | Catch-all (anyhow bubble-up) |
-| 72 | `INIT_ABORTED` | Init pre-smoke abort (integrity / daemon stop) |
-| 73 | `INIT_DOWNLOAD_FAILED` | Init's model-download step failed |
-| 74 | `INIT_SMOKE_FAILED` | Init reached smoke but probe didn't pass |
+| Code | Constant               | Meaning                                        |
+| ---- | ---------------------- | ---------------------------------------------- |
+| 0    | `SUCCESS`              | Success                                        |
+| 64   | `USAGE`                | Bad CLI usage (clap rejection)                 |
+| 65   | `DAEMON_UNREACHABLE`   | Daemon socket missing / timeout                |
+| 66   | `MODEL_NOT_FOUND`      | Model reference matched zero or multiple       |
+| 67   | `LAUNCH_FAILED`        | `start_model` accepted but supervisor failed   |
+| 68   | `STOP_FAILED`          | `stop_model` / `stop_all` returned an error    |
+| 69   | `PULL_FAILED`          | Standalone `llamastash pull` failed            |
+| 70   | `BINARY_NOT_FOUND`     | `llama-server` not on PATH / config            |
+| 71   | `UNKNOWN`              | Catch-all (anyhow bubble-up)                   |
+| 72   | `INIT_ABORTED`         | Init pre-smoke abort (integrity / daemon stop) |
+| 73   | `INIT_DOWNLOAD_FAILED` | Init's model-download step failed              |
+| 74   | `INIT_SMOKE_FAILED`    | Init reached smoke but probe didn't pass       |
 
 `llamastash uat` (maintainer-only, `--features uat`) emits a parallel
 set of synthetic codes inside its JSON report's
@@ -178,6 +178,7 @@ All of these fields land in the CLI's `status --json` output too (`src/cli/outpu
 
 ## Conventions
 
+- Until first release is made, do not add code/docs etc for backward compatibility/legacy etc.
 - Prefer using commands from the Makefile for common tasks (`make build`, `make test`, `make lint`) to internalize the standard flags and avoid mistakes like forgetting `--features test-fixtures` on tests.
 - Conventional-commit prefixes: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`. Unit-scoped variants are common (`feat(unit8): …`).
 - Inline `#[cfg(test)] mod tests` per file is the default; integration tests under `tests/` for daemon-spawning scenarios.
