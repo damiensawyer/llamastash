@@ -188,10 +188,13 @@ jobs:
         # the published file set. Does NOT verify crate-name availability.
         run: cargo publish --dry-run --locked
 
-      - name: changelog has unreleased or current-version heading
-        # On PRs we just want SOMETHING under [Unreleased]; on tag-builds the
-        # release workflow itself checks for the version heading. Here, fail
-        # if the [Unreleased] section is missing entirely.
+      - name: changelog has unreleased heading
+        # On PRs we just want SOMETHING under [Unreleased]; the tag-time
+        # Cargo.toml ↔ CHANGELOG ↔ tag cross-check lives in release.yml's
+        # `prepare-release` job, so duplicating it here only fires noise
+        # on the release-prep PR (where the maintainer is already paying
+        # attention) and on every commit between the Cargo.toml bump and
+        # the tag. Keep this lightweight presence guard only.
         run: |
           set -euo pipefail
           if ! grep -q '^## \[Unreleased\]' CHANGELOG.md; then
@@ -199,23 +202,6 @@ jobs:
             exit 1
           fi
           echo "[Unreleased] heading present; OK"
-
-      - name: Cargo.toml ↔ CHANGELOG version alignment
-        # If Cargo.toml's version is not -dev (i.e. it has been bumped for a
-        # release), CHANGELOG.md must already have a matching section.
-        run: |
-          set -euo pipefail
-          version=$(awk -F\" '/^version[[:space:]]*=/ {print $2; exit}' Cargo.toml)
-          if [[ "$version" == *-dev ]]; then
-            echo "Cargo.toml is at a -dev version; skipping CHANGELOG alignment check"
-            exit 0
-          fi
-          if ! grep -Eq "^## \[${version}\]" CHANGELOG.md; then
-            echo "::error::Cargo.toml is at ${version} but CHANGELOG.md has no [${version}] section."
-            echo "::error::Either promote [Unreleased] to [${version}], or revert the Cargo.toml bump."
-            exit 1
-          fi
-          echo "Cargo.toml ${version} matches CHANGELOG [${version}]; OK"
 
       - name: packager.py unit tests
         # Catches template / argv regressions in the homebrew packager before
