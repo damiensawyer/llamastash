@@ -354,18 +354,46 @@ mod tests {
     // Esc (RIGHT_PANE → FocusList) and Shift+M (NAV → FocusList) share
     // the same action but carry different descriptions — the help
     // overlay must keep them on separate rows so the Esc line reads
-    // "back/cancel/clear/exit edit", not "models list". The renderer
-    // may soft-wrap the long description, so we sniff for the leading
-    // segment rather than the full string.
+    // "cancel/clear/back", not "models list".
     let app = App::new(AppOptions::default());
     let frame = render_to_string(140, 40, &app);
     assert!(
-      frame.contains("back/cancel/clear"),
+      frame.contains("cancel/clear/back"),
       "Esc consolidated description missing:\n{frame}"
     );
     assert!(
       frame.contains("models list"),
       "Shift+M models list row missing:\n{frame}"
+    );
+  }
+
+  #[test]
+  fn overlay_merges_chat_embed_rerank_into_single_section() {
+    // The three input tabs collapse into one `Chat/Embed/Rerank`
+    // section. Enter reads "submit" (no per-tab override); the rerank
+    // ↑/↓ field-cycle rows and the chat-specific `send chat` text
+    // are hidden so the section stays a focused list of shared chords.
+    let app = App::new(AppOptions::default());
+    let frame = render_to_string(140, 40, &app);
+    assert!(
+      frame.contains("Chat/Embed/Rerank"),
+      "merged section title missing:\n{frame}"
+    );
+    assert!(
+      !frame.contains("Chat tab")
+        && !frame.contains("Embed tab")
+        && !frame.contains("Rerank tab"),
+      "old per-tab headings should be gone:\n{frame}"
+    );
+    assert!(
+      !frame.contains("send chat")
+        && !frame.contains("send embed")
+        && !frame.contains("query/add"),
+      "per-tab Enter overrides should be gone:\n{frame}"
+    );
+    assert!(
+      !frame.contains("next field") && !frame.contains("prev field"),
+      "rerank field-cycle rows should not surface here:\n{frame}"
     );
   }
 
@@ -400,11 +428,11 @@ mod tests {
     // truncate every description.
     let app = App::new(AppOptions::default());
     let frame = render_to_string(60, 36, &app);
-    // General section still surfaces; "back/cancel/clear" survives the
-    // narrow render because the column is now full-width.
+    // General section still surfaces; the Esc row fits on one line
+    // because the column is now full-width.
     assert!(frame.contains("General"), "General missing:\n{frame}");
     assert!(
-      frame.contains("back/cancel/clear"),
+      frame.contains("cancel/clear/back"),
       "Esc row missing under single-column:\n{frame}"
     );
   }

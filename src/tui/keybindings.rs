@@ -321,12 +321,11 @@ pub enum Category {
   Logs,
   /// Settings tab affordances.
   Settings,
-  /// Chat tab affordances.
-  Chat,
-  /// Embed tab affordances.
-  Embed,
-  /// Rerank tab affordances.
-  Rerank,
+  /// Combined Chat / Embed / Rerank input-tab affordances. All three
+  /// tabs accept the same shape of input (Enter:submit, Ctrl+R toggles
+  /// reasoning blocks) so we render them under one heading instead of
+  /// three near-empty sections.
+  InputTabs,
   /// HuggingFace pull dialog modal.
   HfDialog,
 }
@@ -339,9 +338,7 @@ impl Category {
     Category::Models,
     Category::Logs,
     Category::Settings,
-    Category::Chat,
-    Category::Embed,
-    Category::Rerank,
+    Category::InputTabs,
     Category::HfDialog,
   ];
 
@@ -352,9 +349,7 @@ impl Category {
       Category::Models => "Models list",
       Category::Logs => "Logs tab",
       Category::Settings => "Settings tab",
-      Category::Chat => "Chat tab",
-      Category::Embed => "Embed tab",
-      Category::Rerank => "Rerank tab",
+      Category::InputTabs => "Chat/Embed/Rerank",
       Category::HfDialog => "HF pull dialog",
     }
   }
@@ -399,8 +394,7 @@ impl Binding {
 const CAT_GLOBAL: &[Category] = &[Category::Global];
 const CAT_MODELS: &[Category] = &[Category::Models];
 const CAT_SETTINGS: &[Category] = &[Category::Settings];
-const CAT_CHAT: &[Category] = &[Category::Chat];
-const CAT_RERANK: &[Category] = &[Category::Rerank];
+const CAT_INPUT_TABS: &[Category] = &[Category::InputTabs];
 const CAT_HF_DIALOG: &[Category] = &[Category::HfDialog];
 /// Yank chips (`u`, `p`) appear under Models and Settings — the two
 /// surfaces where the focused row has a meaningful server URL / path.
@@ -698,7 +692,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     action: Action::FocusChatTab,
     label: "C",
     hint: "chat/embed/rerank",
-    description: Some("chat / embed / rerank"),
+    description: Some("chat/embed/rerank"),
     scopes: FocusSet::NAV,
     categories: CAT_GLOBAL,
   },
@@ -708,7 +702,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     action: Action::FocusChatTab,
     label: "E",
     hint: "chat/embed/rerank",
-    description: Some("chat / embed / rerank"),
+    description: Some("chat/embed/rerank"),
     scopes: FocusSet::NAV,
     // Same action as Shift+C; help overlay merges into one `C,E,R` row.
     categories: CAT_GLOBAL,
@@ -719,7 +713,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     action: Action::FocusChatTab,
     label: "R",
     hint: "chat/embed/rerank",
-    description: Some("chat / embed / rerank"),
+    description: Some("chat/embed/rerank"),
     scopes: FocusSet::NAV,
     categories: CAT_GLOBAL,
   },
@@ -877,8 +871,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     categories: &[
       Category::Models,
       Category::Settings,
-      Category::Embed,
-      Category::Rerank,
+      Category::InputTabs,
       Category::HfDialog,
     ],
   },
@@ -890,7 +883,11 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     hint: "send",
     description: Some("send chat"),
     scopes: FocusSet::CHAT_INPUT,
-    categories: CAT_CHAT,
+    // Hidden from the help overlay; the merged Chat/Embed/Rerank
+    // section surfaces `Enter:submit` via the Submit binding above
+    // (Submit's scope doesn't include CHAT_INPUT — SendChat owns that
+    // focus — but the help row reads the same to the user).
+    categories: &[],
   },
   Binding {
     key: KeyCode::Enter,
@@ -910,7 +907,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     hint: "toggle reasoning",
     description: Some("toggle <think> blocks"),
     scopes: FocusSet::CHAT_INPUT,
-    categories: CAT_CHAT,
+    categories: CAT_INPUT_TABS,
   },
   // ─── Esc — five disjoint actions across the focus families. ──
   // The help overlay surfaces a single merged row under Global; the
@@ -922,7 +919,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     action: Action::FocusList,
     label: ESC_LABEL,
     hint: "models list",
-    description: Some("back/cancel/clear/exit edit"),
+    description: Some("cancel/clear/back"),
     scopes: FocusSet::RIGHT_PANE,
     categories: CAT_GLOBAL,
   },
@@ -967,8 +964,10 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     categories: &[],
   },
   // ─── Rerank field cycle (↑↓ inside rerank input only) ───────
-  // Collides with MoveUp/MoveDown on the same keys; disjoint
-  // scopes (RERANK_INPUT vs NAV|HF_DIALOG) keep them clean.
+  // Collides with MoveUp/MoveDown on the same keys; disjoint scopes
+  // (RERANK_INPUT vs NAV|HF_DIALOG) keep them clean. Hidden from the
+  // help overlay — the merged Chat/Embed/Rerank section keeps to
+  // shared chords (Enter, Shift+Enter, Ctrl+R).
   Binding {
     key: KeyCode::Down,
     mods: KeyModifiers::NONE,
@@ -977,7 +976,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     hint: "next field",
     description: None,
     scopes: FocusSet::RERANK_INPUT,
-    categories: CAT_RERANK,
+    categories: &[],
   },
   Binding {
     key: KeyCode::Up,
@@ -987,7 +986,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     hint: "prev field",
     description: None,
     scopes: FocusSet::RERANK_INPUT,
-    categories: CAT_RERANK,
+    categories: &[],
   },
   // ─── HF dialog stage chords (display-only) ──────────────────
   // The HF dialog's per-stage handler in `events::handle_hf_dialog_input`
@@ -1297,7 +1296,7 @@ impl Action {
       (Action::Submit, Focus::EmbedInput) => Some("embed"),
       (Action::Submit, Focus::RerankInput) => Some("query/add candidate"),
       (Action::Submit, Focus::ConfirmPopup) => Some("confirm"),
-      (Action::Submit, Focus::HfDialog) => Some("open / confirm"),
+      (Action::Submit, Focus::HfDialog) => Some("open/confirm"),
       // Motion in the right pane is scroll on the Logs tab, field
       // cycle on Settings. The hint surfaces the live tab via the
       // chip-rendering callers (right pane reads `app.right_tab`).
@@ -1314,12 +1313,12 @@ impl Action {
   /// section-specific wording.
   pub fn description_for(self, category: Category) -> Option<&'static str> {
     match (self, category) {
-      // Submit reshapes per editorial section.
+      // Submit reshapes per editorial section. The merged
+      // Chat/Embed/Rerank section reads the binding's plain "submit"
+      // text — no per-tab override.
       (Action::Submit, Category::Models) => Some("apply filter"),
-      (Action::Submit, Category::Settings) => Some("launch / save"),
-      (Action::Submit, Category::Embed) => Some("send embed"),
-      (Action::Submit, Category::Rerank) => Some("query / add"),
-      (Action::Submit, Category::HfDialog) => Some("open / confirm"),
+      (Action::Submit, Category::Settings) => Some("launch/save"),
+      (Action::Submit, Category::HfDialog) => Some("open/confirm"),
       // Yank `c` on the Logs tab copies the entire log buffer rather
       // than the curl command.
       (Action::YankCurl, Category::Logs) => Some("copy logs"),
