@@ -333,8 +333,19 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
     let addr = proxy::server::loopback_addr(opts.proxy.port);
     let token_for_proxy = token.clone();
     let status_for_proxy = std::sync::Arc::clone(&proxy_status_cell);
+    let serve_opts = proxy::server::ServeOptions {
+      header_read_timeout: std::time::Duration::from_secs(opts.proxy.header_read_timeout_secs),
+    };
     supervisor::spawn_supervised("proxy_listener", async move {
-      if let Err(e) = proxy::serve(state, addr, token_for_proxy, status_for_proxy).await {
+      if let Err(e) = proxy::server::serve_with_options(
+        state,
+        addr,
+        token_for_proxy,
+        status_for_proxy,
+        serve_opts,
+      )
+      .await
+      {
         log::warn!("proxy listener task ended with error: {e}");
       }
     });

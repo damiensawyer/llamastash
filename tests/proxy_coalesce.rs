@@ -140,13 +140,15 @@ async fn build_state(
   (state, ctx)
 }
 
-async fn spawn_listener(state: Arc<ProxyState>) -> (SocketAddr, ShutdownToken) {
+async fn spawn_listener(
+  state: Arc<ProxyState>,
+) -> (SocketAddr, ShutdownToken, tokio::task::JoinHandle<()>) {
   let token = ShutdownToken::new();
   let status: StatusCell = new_status_cell();
   let bind_addr = loopback_addr(0);
   let token_for_task = token.clone();
   let status_for_task = Arc::clone(&status);
-  tokio::spawn(async move {
+  let handle = tokio::spawn(async move {
     serve(state, bind_addr, token_for_task, status_for_task)
       .await
       .expect("proxy serve returns Ok");
@@ -154,7 +156,16 @@ async fn spawn_listener(state: Arc<ProxyState>) -> (SocketAddr, ShutdownToken) {
   let bound = wait_for_listening(&status, Duration::from_secs(2))
     .await
     .expect("listener reaches Listening");
-  (bound, token)
+  (bound, token, handle)
+}
+
+/// Trigger shutdown and join the serve task; catches a hung serve loop.
+async fn shutdown_listener(shutdown: ShutdownToken, handle: tokio::task::JoinHandle<()>) {
+  shutdown.trigger();
+  tokio::time::timeout(Duration::from_secs(5), handle)
+    .await
+    .expect("proxy serve loop must exit after shutdown.trigger()")
+    .expect("proxy serve task must not panic");
 }
 
 async fn wait_for_listening(status: &StatusCell, budget: Duration) -> Option<SocketAddr> {
@@ -219,7 +230,7 @@ async fn two_concurrent_requests_for_same_model_share_one_launch() {
     allocate_port_range(1),
   )
   .await;
-  let (addr, shutdown) = spawn_listener(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener(state).await;
 
   let body = r#"{"model":"qwen3","messages":[]}"#.to_string();
   let body_a = body.clone();
@@ -242,7 +253,7 @@ async fn two_concurrent_requests_for_same_model_share_one_launch() {
   );
 
   stop_all(&ctx).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -266,7 +277,7 @@ async fn three_concurrent_requests_for_distinct_models_each_launch() {
     allocate_port_range(3),
   )
   .await;
-  let (addr, shutdown) = spawn_listener(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener(state).await;
 
   let r_a = tokio::spawn(async move {
     http_post(
@@ -301,6 +312,6 @@ async fn three_concurrent_requests_for_distinct_models_each_launch() {
   assert_eq!(snap.len(), 3, "three distinct supervisors launched");
 
   stop_all(&ctx).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }

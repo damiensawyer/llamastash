@@ -125,6 +125,7 @@ async fn daemon_starts_with_proxy_enabled_and_health_returns_ok() {
   opts.proxy = ProxyConfig {
     enabled: true,
     port,
+    ..ProxyConfig::default()
   };
   let socket_path = opts.socket_path.clone();
   let proxy_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
@@ -168,6 +169,7 @@ async fn daemon_starts_without_proxy_when_disabled() {
   opts.proxy = ProxyConfig {
     enabled: false,
     port,
+    ..ProxyConfig::default()
   };
   let socket_path = opts.socket_path.clone();
   let proxy_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
@@ -203,6 +205,7 @@ async fn daemon_keeps_running_when_proxy_port_already_in_use() {
   opts.proxy = ProxyConfig {
     enabled: true,
     port,
+    ..ProxyConfig::default()
   };
   let socket_path = opts.socket_path.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });
@@ -230,6 +233,7 @@ async fn http11_keep_alive_serves_two_health_requests_on_one_connection() {
   opts.proxy = ProxyConfig {
     enabled: true,
     port,
+    ..ProxyConfig::default()
   };
   let socket_path = opts.socket_path.clone();
   let proxy_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);

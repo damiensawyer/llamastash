@@ -79,17 +79,57 @@ pub fn new_status_cell() -> StatusCell {
   Arc::new(RwLock::new(ProxyStatus::Disabled))
 }
 
+/// Default header-read timeout used by tests + callers that don't
+/// thread a real `ProxyConfig` through. Production wiring in
+/// `run_foreground` passes the user-configured value via
+/// [`serve_with_options`] instead.
+pub const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Tunable knobs for the listener. Kept as a struct so future
+/// additions don't churn the [`serve`] signature; in v1 only the
+/// header-read timeout is configurable.
+#[derive(Clone, Copy, Debug)]
+pub struct ServeOptions {
+  pub header_read_timeout: Duration,
+}
+
+impl Default for ServeOptions {
+  fn default() -> Self {
+    Self {
+      header_read_timeout: DEFAULT_HEADER_READ_TIMEOUT,
+    }
+  }
+}
+
 /// Run the proxy listener until `shutdown` is triggered.
 ///
 /// Returns without panicking on bind failure: the caller is the
 /// daemon's `run_foreground`, which has stricter availability
 /// guarantees than the proxy itself. `status` reflects the outcome
 /// so the IPC surface can report it.
+///
+/// Defaults to [`ServeOptions::default`] (30 s header-read timeout).
+/// Production callers pass a `ProxyConfig`-derived value via
+/// [`serve_with_options`].
 pub async fn serve(
   state: Arc<ProxyState>,
   addr: SocketAddr,
   shutdown: ShutdownToken,
   status: StatusCell,
+) -> Result<()> {
+  serve_with_options(state, addr, shutdown, status, ServeOptions::default()).await
+}
+
+/// `serve` plus per-listener tuning knobs. Same semantics as
+/// [`serve`]; lifted out so the daemon can forward
+/// `proxy.header_read_timeout_secs` without forcing every caller
+/// (tests, benches) to construct a full options bundle.
+pub async fn serve_with_options(
+  state: Arc<ProxyState>,
+  addr: SocketAddr,
+  shutdown: ShutdownToken,
+  status: StatusCell,
+  options: ServeOptions,
 ) -> Result<()> {
   let listener = match TcpListener::bind(&addr).await {
     Ok(l) => l,
@@ -138,8 +178,9 @@ pub async fn serve(
             let conn_tracker = Arc::clone(&tracker);
             conn_tracker.active.fetch_add(1, Ordering::SeqCst);
             let task_tracker = Arc::clone(&conn_tracker);
+            let header_read_timeout = options.header_read_timeout;
             let handle = tokio::spawn(async move {
-              serve_connection(stream, conn_state).await;
+              serve_connection(stream, conn_state, header_read_timeout).await;
               task_tracker.active.fetch_sub(1, Ordering::SeqCst);
             });
             push_handle(&conn_tracker, handle);
@@ -192,13 +233,11 @@ fn push_handle(tracker: &Arc<ConnectionTracker>, handle: JoinHandle<()>) {
   handles.push(handle);
 }
 
-/// How long hyper will wait for a client to finish sending request
-/// headers. Bounds the impact of partial-request clients (crashed
-/// agents leaving sockets half-open, slow-loris-style mistakes) so
-/// they don't pin a serve_connection task forever.
-const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
-
-async fn serve_connection(stream: tokio::net::TcpStream, state: Arc<ProxyState>) {
+async fn serve_connection(
+  stream: tokio::net::TcpStream,
+  state: Arc<ProxyState>,
+  header_read_timeout: Duration,
+) {
   // `TokioIo` bridges `tokio::net::TcpStream` (which implements the
   // tokio `AsyncRead`/`AsyncWrite` traits) onto hyper 1.x's `Io`
   // traits without a `tower-service` dep. Owned by the connection
@@ -216,7 +255,7 @@ async fn serve_connection(stream: tokio::net::TcpStream, state: Arc<ProxyState>)
     // Bound header-read on the inbound stream so partial-request
     // clients don't hold the serve_connection future indefinitely.
     .timer(hyper_util::rt::TokioTimer::new())
-    .header_read_timeout(HEADER_READ_TIMEOUT);
+    .header_read_timeout(header_read_timeout);
   if let Err(e) = builder.serve_connection(io, service).await {
     log::debug!("proxy: connection ended with: {e}");
   }
@@ -241,10 +280,12 @@ mod tests {
   use std::time::Duration;
 
   /// Spin up the proxy on an ephemeral port and return the bound
-  /// address + shutdown token. The caller is responsible for
-  /// triggering shutdown at the end of the test so the task is
-  /// joined cleanly.
-  async fn spawn_proxy_on_ephemeral_port() -> (SocketAddr, ShutdownToken, StatusCell) {
+  /// address + shutdown token + the JoinHandle. The caller drives
+  /// shutdown via `shutdown.trigger()` and then `shutdown_proxy` so
+  /// a hung serve loop fails the test loudly instead of leaving a
+  /// detached task behind.
+  async fn spawn_proxy_on_ephemeral_port() -> (SocketAddr, ShutdownToken, StatusCell, JoinHandle<()>)
+  {
     let ctx = MethodContext::new(ShutdownToken::new());
     let state = ProxyState::from_context(&ctx);
     let token = ctx.shutdown.clone();
@@ -263,9 +304,21 @@ mod tests {
     let bound = wait_for_listening(&status, Duration::from_secs(2))
       .await
       .expect("proxy must reach Listening within 2s");
-    // Detach the handle — drain runs on shutdown.
-    drop(handle);
-    (bound, token, status)
+    (bound, token, status, handle)
+  }
+
+  /// Trigger shutdown and join the serve task with a generous budget.
+  /// Catches the failure mode where a serve loop never exits — without
+  /// this, `drop(handle)` would silently leave a detached task and the
+  /// hang would go unnoticed.
+  async fn shutdown_proxy(shutdown: ShutdownToken, handle: JoinHandle<()>) {
+    shutdown.trigger();
+    // DRAIN_TIMEOUT + 1 s slack for the spawn-task to wind down.
+    let budget = DRAIN_TIMEOUT + Duration::from_secs(1);
+    tokio::time::timeout(budget, handle)
+      .await
+      .expect("proxy serve loop must exit after shutdown.trigger()")
+      .expect("proxy serve task must not panic");
   }
 
   async fn wait_for_listening(status: &StatusCell, budget: Duration) -> Option<SocketAddr> {
@@ -336,7 +389,7 @@ mod tests {
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn health_returns_ok_shape() {
-    let (addr, shutdown, _status) = spawn_proxy_on_ephemeral_port().await;
+    let (addr, shutdown, _status, handle) = spawn_proxy_on_ephemeral_port().await;
     let mut sock = tokio::net::TcpStream::connect(addr)
       .await
       .expect("connect to proxy");
@@ -350,7 +403,7 @@ mod tests {
       parsed["models_discovered"].is_u64(),
       "models_discovered shape"
     );
-    shutdown.trigger();
+    shutdown_proxy(shutdown, handle).await;
   }
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -361,7 +414,7 @@ mod tests {
     // `invalid_request` / `code: model_required`. Pre-Unit-3
     // this same route returned 501; the assertion swap documents
     // the contract handoff.
-    let (addr, shutdown, _status) = spawn_proxy_on_ephemeral_port().await;
+    let (addr, shutdown, _status, handle) = spawn_proxy_on_ephemeral_port().await;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let host = addr.to_string();
@@ -374,12 +427,12 @@ mod tests {
     let head = std::str::from_utf8(&buf).expect("utf8");
     assert!(head.contains("400"), "expected 400 in: {head}");
     assert!(head.contains("model_required"), "body shape: {head}");
-    shutdown.trigger();
+    shutdown_proxy(shutdown, handle).await;
   }
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn keep_alive_serves_two_health_requests_on_one_connection() {
-    let (addr, shutdown, _status) = spawn_proxy_on_ephemeral_port().await;
+    let (addr, shutdown, _status, handle) = spawn_proxy_on_ephemeral_port().await;
     let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let host = addr.to_string();
     let (s1, b1) = http_get_keepalive(&mut sock, &host, "/health").await;
@@ -391,7 +444,7 @@ mod tests {
     assert_eq!(s2, 200, "second request status (keep-alive smoke)");
     let p2: serde_json::Value = serde_json::from_slice(&b2).expect("json");
     assert_eq!(p2["status"], "ok");
-    shutdown.trigger();
+    shutdown_proxy(shutdown, handle).await;
   }
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

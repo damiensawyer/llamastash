@@ -287,9 +287,14 @@ fn same_path(model_id_path: &std::path::Path, row_path: &str) -> bool {
 ///      coalesced; waits for Ready or terminal Error).
 ///   2. On Ready → MRU touch + forward (no fallback headers).
 ///   3. On Error → pick a family-MRU fallback and forward with
-///      `x-llamastash-served-by` + `x-llamastash-fallback-reason:
-///      launch_failed`. If no Ready candidate exists → 503
-///      `launch_failed` with the running list.
+///      `x-llamastash-served-by` + `x-llamastash-fallback-reason`.
+///      Reason is `launch_failed` when the pick shares the requested
+///      arch (graceful in-family substitution) and `family_mismatch`
+///      when the pick is from a different arch (e.g. an embedding
+///      request fell through to a chat model — the upstream output
+///      will not match request semantics, and clients that care
+///      should branch on the header). If no Ready candidate exists
+///      → 503 `launch_failed` with the running list.
 pub(crate) async fn handle_not_running(
   state: &Arc<ProxyState>,
   inbound: super::forward::InboundRequest,
@@ -325,6 +330,7 @@ pub(crate) async fn handle_not_running(
       let candidates = collect_fallback_candidates(state).await;
       if let Some(pick) = pick_fallback(candidates, requested_arch.as_deref()) {
         state.mru.touch(&pick.model_id).await;
+        let reason = fallback_reason_for(requested_arch.as_deref(), pick.arch.as_deref());
         return super::forward::forward_to_upstream(
           state,
           inbound,
@@ -333,33 +339,48 @@ pub(crate) async fn handle_not_running(
             served_model_id: &pick.served_model_id,
             served_model_key: &pick.model_id,
             fallback: true,
-            fallback_reason: Some("launch_failed"),
+            fallback_reason: Some(reason),
           },
         )
         .await;
       }
-      // No running model to fall back to. R155 mandates a 503
-      // with the (empty) `running` list inline. Drop the requested
-      // model name into the message so logs surface what was being
-      // attempted.
-      launch_failed_response(&cause, Vec::<String>::new(), &requested_model)
+      // No Ready model to fall back to. R155 mandates a 503 with
+      // the `running: []` list inline (empty by construction here:
+      // `pick_fallback` only returns None when zero Ready candidates
+      // exist). Drop the requested model name into the message so
+      // logs surface what was being attempted.
+      launch_failed_response(&cause, &requested_model)
     }
+  }
+}
+
+/// Pick the `x-llamastash-fallback-reason` value based on whether the
+/// picked candidate is in the same arch family as the failed request.
+///
+/// - `launch_failed`: in-family substitution. Same arch (or both
+///   sides have no arch metadata) — the upstream output shape is
+///   what the client asked for.
+/// - `family_mismatch`: cross-arch fallback. The picked supervisor's
+///   arch differs from the requested arch, or one side is missing
+///   metadata. The upstream output shape is *not* what the client
+///   asked for (e.g. an embedding request answered by a chat model).
+///   Clients that don't read response headers will see surprising
+///   payloads; this is the header that lets them branch.
+fn fallback_reason_for(requested: Option<&str>, picked: Option<&str>) -> &'static str {
+  match (requested, picked) {
+    (Some(a), Some(b)) if a == b => "launch_failed",
+    (None, None) => "launch_failed",
+    _ => "family_mismatch",
   }
 }
 
 /// Build the 503 `launch_failed` envelope used by the fallback path
 /// when no Ready model is available. The `running: []` field is
-/// always present (R155); the message surfaces the supervisor's
-/// `cause` so clients see *why* the launch failed.
-pub(crate) fn launch_failed_response<I, S>(
-  cause: &str,
-  running: I,
-  requested_model: &str,
-) -> ProxyResponse
-where
-  I: IntoIterator<Item = S>,
-  S: Into<String>,
-{
+/// always present (R155) and always empty here by construction —
+/// this helper is only reached when `pick_fallback` returned None,
+/// which means zero Ready supervisors existed. The message surfaces
+/// the supervisor's `cause` so clients see *why* the launch failed.
+pub(crate) fn launch_failed_response(cause: &str, requested_model: &str) -> ProxyResponse {
   use super::openai::{ErrorObject, ErrorResponse};
   use http_body_util::{combinators::BoxBody, BodyExt, Full};
   use hyper::body::Bytes;
@@ -367,7 +388,7 @@ where
 
   let message =
     format!("auto-start of `{requested_model}` failed and no running model is available: {cause}");
-  let error = ErrorObject::new("launch_failed", message).with_running(running);
+  let error = ErrorObject::new("launch_failed", message).with_running(Vec::<String>::new());
   let bytes = serde_json::to_vec(&ErrorResponse { error }).expect("json encoding of fixed shape");
   let body: BoxBody<Bytes, super::router::BodyError> = Full::new(Bytes::from(bytes))
     .map_err(|never| match never {})

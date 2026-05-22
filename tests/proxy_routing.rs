@@ -154,13 +154,15 @@ async fn spawn_fake_supervisor(
   (model, port, id)
 }
 
-async fn spawn_listener_with_state(state: Arc<ProxyState>) -> (SocketAddr, ShutdownToken) {
+async fn spawn_listener_with_state(
+  state: Arc<ProxyState>,
+) -> (SocketAddr, ShutdownToken, tokio::task::JoinHandle<()>) {
   let token = ShutdownToken::new();
   let status: StatusCell = new_status_cell();
   let bind_addr = loopback_addr(0);
   let token_for_task = token.clone();
   let status_for_task = Arc::clone(&status);
-  tokio::spawn(async move {
+  let handle = tokio::spawn(async move {
     serve(state, bind_addr, token_for_task, status_for_task)
       .await
       .expect("proxy serve returns Ok");
@@ -168,7 +170,16 @@ async fn spawn_listener_with_state(state: Arc<ProxyState>) -> (SocketAddr, Shutd
   let bound = wait_for_listening(&status, Duration::from_secs(2))
     .await
     .expect("listener reaches Listening");
-  (bound, token)
+  (bound, token, handle)
+}
+
+/// Trigger shutdown and join the serve task; catches a hung serve loop.
+async fn shutdown_listener(shutdown: ShutdownToken, handle: tokio::task::JoinHandle<()>) {
+  shutdown.trigger();
+  tokio::time::timeout(Duration::from_secs(5), handle)
+    .await
+    .expect("proxy serve loop must exit after shutdown.trigger()")
+    .expect("proxy serve task must not panic");
 }
 
 async fn wait_for_listening(status: &StatusCell, budget: Duration) -> Option<SocketAddr> {
@@ -265,7 +276,7 @@ async fn chat_completion_streams_back_byte_identical() {
     registry,
   )
   .await;
-  let (addr, shutdown) = spawn_listener_with_state(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
 
   let body = serde_json::json!({
     "model": "qwen3",
@@ -314,7 +325,7 @@ async fn chat_completion_streams_back_byte_identical() {
   );
 
   let _ = model.stop(Duration::from_secs(3)).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -332,7 +343,7 @@ async fn embeddings_endpoint_round_trips_json() {
     registry,
   )
   .await;
-  let (addr, shutdown) = spawn_listener_with_state(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
 
   let body = serde_json::json!({
     "model": "nomic-embed",
@@ -349,7 +360,7 @@ async fn embeddings_endpoint_round_trips_json() {
   assert!(parsed["data"][0]["embedding"].is_array());
 
   let _ = model.stop(Duration::from_secs(3)).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -367,7 +378,7 @@ async fn rerank_endpoint_forwards() {
     registry,
   )
   .await;
-  let (addr, shutdown) = spawn_listener_with_state(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
 
   let body = serde_json::json!({
     "model": "bge-rerank",
@@ -382,7 +393,7 @@ async fn rerank_endpoint_forwards() {
   assert!(parsed["results"].is_array());
 
   let _ = model.stop(Duration::from_secs(3)).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -396,7 +407,7 @@ async fn unknown_model_name_returns_404_model_not_found() {
     registry,
   )
   .await;
-  let (addr, shutdown) = spawn_listener_with_state(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
 
   let body = r#"{"model":"definitely-absent","messages":[]}"#;
   let (status, _headers, response) = http_post(addr, "/v1/chat/completions", body, &[]).await;
@@ -413,7 +424,7 @@ async fn unknown_model_name_returns_404_model_not_found() {
       .unwrap_or(true),
     "matches absent or empty: {v}"
   );
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -427,7 +438,7 @@ async fn ambiguous_substring_returns_400_with_candidates() {
     registry,
   )
   .await;
-  let (addr, shutdown) = spawn_listener_with_state(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
 
   let body = r#"{"model":"qwen-coder","messages":[]}"#;
   let (status, _headers, response) = http_post(addr, "/v1/chat/completions", body, &[]).await;
@@ -442,14 +453,14 @@ async fn ambiguous_substring_returns_400_with_candidates() {
     .collect();
   assert!(names.contains(&"qwen-coder-7b.gguf"), "got: {names:?}");
   assert!(names.contains(&"qwen-coder-13b.gguf"), "got: {names:?}");
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missing_model_field_returns_400_model_required() {
   let registry = SupervisorRegistry::new();
   let state = proxy_state_with(Vec::new(), registry).await;
-  let (addr, shutdown) = spawn_listener_with_state(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
 
   let (status, _headers, response) = http_post(addr, "/v1/chat/completions", "{}", &[]).await;
   assert_eq!(status, 400);
@@ -457,21 +468,21 @@ async fn missing_model_field_returns_400_model_required() {
   assert_eq!(v["error"]["type"], "invalid_request");
   assert_eq!(v["error"]["code"], "model_required");
   assert_eq!(v["error"]["param"], "model");
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn empty_model_string_returns_400_model_required() {
   let registry = SupervisorRegistry::new();
   let state = proxy_state_with(Vec::new(), registry).await;
-  let (addr, shutdown) = spawn_listener_with_state(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
 
   let (status, _headers, response) =
     http_post(addr, "/v1/chat/completions", r#"{"model":""}"#, &[]).await;
   assert_eq!(status, 400);
   let v: Value = serde_json::from_slice(&response).expect("json");
   assert_eq!(v["error"]["code"], "model_required");
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -486,7 +497,7 @@ async fn catalog_match_without_running_supervisor_returns_launch_failed() {
     registry,
   )
   .await;
-  let (addr, shutdown) = spawn_listener_with_state(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
 
   let body = r#"{"model":"qwen3","messages":[]}"#;
   let (status, _headers, response) = http_post(addr, "/v1/chat/completions", body, &[]).await;
@@ -497,14 +508,14 @@ async fn catalog_match_without_running_supervisor_returns_launch_failed() {
     .as_array()
     .expect("running array present");
   assert!(running.is_empty(), "no Ready models to fall back to");
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn body_exceeding_two_mib_returns_413() {
   let registry = SupervisorRegistry::new();
   let state = proxy_state_with(Vec::new(), registry).await;
-  let (addr, shutdown) = spawn_listener_with_state(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
 
   // Build a JSON body > 2 MiB: a single string field padded with
   // 'A's. The `Limited` adapter trips before serde even runs.
@@ -518,20 +529,20 @@ async fn body_exceeding_two_mib_returns_413() {
   // code happens to match.
   let v: Value = serde_json::from_slice(&response).expect("json body");
   assert_eq!(v["error"]["type"], "payload_too_large");
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn malformed_json_body_returns_400() {
   let registry = SupervisorRegistry::new();
   let state = proxy_state_with(Vec::new(), registry).await;
-  let (addr, shutdown) = spawn_listener_with_state(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
 
   let (status, _h, response) = http_post(addr, "/v1/chat/completions", "{not json", &[]).await;
   assert_eq!(status, 400);
   let v: Value = serde_json::from_slice(&response).expect("json");
   assert_eq!(v["error"]["type"], "invalid_request");
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
 }
 
 // --- hop-by-hop header handling -----------------------------------------
@@ -553,7 +564,7 @@ async fn hop_by_hop_headers_dont_break_forwarding() {
     registry,
   )
   .await;
-  let (addr, shutdown) = spawn_listener_with_state(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
 
   let body = r#"{"model":"hop","messages":[],"stream":true}"#;
   // The inbound request already carries `Connection: close` (added
@@ -589,7 +600,7 @@ async fn hop_by_hop_headers_dont_break_forwarding() {
   assert!(text.contains("\"model\":\"hop\""), "body forwarded: {text}");
 
   let _ = model.stop(Duration::from_secs(3)).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -614,7 +625,7 @@ async fn upstream_400_passes_through_as_400() {
     registry,
   )
   .await;
-  let (addr, shutdown) = spawn_listener_with_state(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
 
   let body = r#"{"model":"fail","messages":[],"__TEST_INJECT_FAIL_400__":true}"#;
   let (status, _headers, response) = http_post(addr, "/v1/chat/completions", body, &[]).await;
@@ -624,7 +635,7 @@ async fn upstream_400_passes_through_as_400() {
   assert!(text.contains("injected 400"), "upstream body in: {text}");
 
   let _ = model.stop(Duration::from_secs(3)).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -648,7 +659,7 @@ async fn upstream_unreachable_after_stop_returns_structured_error() {
     registry,
   )
   .await;
-  let (addr, shutdown) = spawn_listener_with_state(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
 
   // Stop the supervisor, wait for the state machine to settle.
   let _ = model.stop(Duration::from_secs(3)).await;
@@ -667,7 +678,7 @@ async fn upstream_unreachable_after_stop_returns_structured_error() {
     "expected upstream_unreachable or launch_failed; got {kind:?}"
   );
 
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -686,7 +697,7 @@ async fn partial_request_closes_within_header_read_timeout() {
   let dir = unique_temp("partial");
   let registry = SupervisorRegistry::new();
   let state = proxy_state_with(Vec::new(), registry).await;
-  let (addr, shutdown) = spawn_listener_with_state(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
 
   let mut sock = TcpStream::connect(addr).await.expect("connect");
   // Partial request line, no newline, no Host header. Server waits
@@ -703,6 +714,6 @@ async fn partial_request_closes_within_header_read_timeout() {
   // once the timeout fires; we don't expect any response bytes.
   assert_eq!(n, 0, "expected EOF on timeout; got {n} bytes: {buf:?}");
 
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }

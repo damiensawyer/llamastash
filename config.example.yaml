@@ -167,6 +167,12 @@ proxy:
   # auto-roam (would break the "single stable URL" promise). Edit
   # `port` and restart to recover.
   port: 11434
+  # Seconds hyper waits for a client to finish sending request
+  # headers before dropping the connection. Bounds the impact of
+  # partial-request clients (crashed agents leaving sockets
+  # half-open, slow-loris-style mistakes). Raise to 120 if a client
+  # legitimately streams headers across a slow link.
+  header_read_timeout_secs: 30
 
 # ─── Keybindings ──────────────────────────────────────────────────
 #

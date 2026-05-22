@@ -99,19 +99,27 @@ pub struct ProxyConfig {
   /// `proxy.status: "port_in_use"`.
   #[serde(default = "ProxyConfig::default_port")]
   pub port: u16,
+  /// How long hyper waits for a client to finish sending request
+  /// headers, in seconds. Default `30`. Bounds partial-request clients
+  /// (crashed agents leaving sockets half-open, slow-loris-style
+  /// mistakes) so they don't pin a serve_connection task forever.
+  /// Raise to e.g. `120` if an agent legitimately streams headers
+  /// across a slow link.
+  #[serde(default = "ProxyConfig::default_header_read_timeout_secs")]
+  pub header_read_timeout_secs: u64,
 }
 
 impl ProxyConfig {
-  /// Loopback host the listener binds. v1 hard-codes 127.0.0.1; no
-  /// `--host` / LAN binding surface (plan Scope Boundaries).
-  pub const LOOPBACK_HOST: &'static str = "127.0.0.1";
-
   fn default_enabled() -> bool {
     true
   }
 
   fn default_port() -> u16 {
     11434
+  }
+
+  fn default_header_read_timeout_secs() -> u64 {
+    30
   }
 }
 
@@ -120,6 +128,7 @@ impl Default for ProxyConfig {
     Self {
       enabled: Self::default_enabled(),
       port: Self::default_port(),
+      header_read_timeout_secs: Self::default_header_read_timeout_secs(),
     }
   }
 }

@@ -178,13 +178,15 @@ async fn build_state(
   (state, ctx)
 }
 
-async fn spawn_listener(state: Arc<ProxyState>) -> (SocketAddr, ShutdownToken) {
+async fn spawn_listener(
+  state: Arc<ProxyState>,
+) -> (SocketAddr, ShutdownToken, tokio::task::JoinHandle<()>) {
   let token = ShutdownToken::new();
   let status: StatusCell = new_status_cell();
   let bind_addr = loopback_addr(0);
   let token_for_task = token.clone();
   let status_for_task = Arc::clone(&status);
-  tokio::spawn(async move {
+  let handle = tokio::spawn(async move {
     serve(state, bind_addr, token_for_task, status_for_task)
       .await
       .expect("proxy serve returns Ok");
@@ -192,7 +194,16 @@ async fn spawn_listener(state: Arc<ProxyState>) -> (SocketAddr, ShutdownToken) {
   let bound = wait_for_listening(&status, Duration::from_secs(2))
     .await
     .expect("listener reaches Listening");
-  (bound, token)
+  (bound, token, handle)
+}
+
+/// Trigger shutdown and join the serve task; catches a hung serve loop.
+async fn shutdown_listener(shutdown: ShutdownToken, handle: tokio::task::JoinHandle<()>) {
+  shutdown.trigger();
+  tokio::time::timeout(Duration::from_secs(5), handle)
+    .await
+    .expect("proxy serve loop must exit after shutdown.trigger()")
+    .expect("proxy serve task must not panic");
 }
 
 async fn wait_for_listening(status: &StatusCell, budget: Duration) -> Option<SocketAddr> {
@@ -292,7 +303,7 @@ async fn fallback_to_matching_arch_running_model_emits_headers() {
     allocate_port_range(),
   )
   .await;
-  let (addr, shutdown) = spawn_listener(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener(state).await;
 
   let body = r#"{"model":"missing-qwen3","messages":[]}"#;
   let (status, headers, response) = http_post(addr, "/v1/chat/completions", body).await;
@@ -314,7 +325,7 @@ async fn fallback_to_matching_arch_running_model_emits_headers() {
   );
 
   stop_all(&ctx, &[live]).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -343,7 +354,7 @@ async fn fallback_to_different_arch_model_when_no_family_match() {
     allocate_port_range(),
   )
   .await;
-  let (addr, shutdown) = spawn_listener(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener(state).await;
 
   let body = r#"{"model":"missing-qwen3","messages":[]}"#;
   let (status, headers, _response) = http_post(addr, "/v1/chat/completions", body).await;
@@ -351,10 +362,14 @@ async fn fallback_to_different_arch_model_when_no_family_match() {
   let served = header_value(&headers, "x-llamastash-served-by").expect("served-by");
   assert_eq!(served, "ready-llama", "cross-arch any-MRU fallback fires");
   let reason = header_value(&headers, "x-llamastash-fallback-reason").expect("fallback-reason");
-  assert_eq!(reason, "launch_failed");
+  // Cross-arch fallback (qwen3 → llama) is observable via the
+  // `family_mismatch` reason so clients can distinguish in-family
+  // substitution (graceful) from cross-arch fallback (different
+  // response shape — embeddings/rerank in particular).
+  assert_eq!(reason, "family_mismatch");
 
   stop_all(&ctx, &[live]).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -385,7 +400,7 @@ async fn unknown_arch_requested_falls_back_to_any_mru() {
     allocate_port_range(),
   )
   .await;
-  let (addr, shutdown) = spawn_listener(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener(state).await;
 
   let body = r#"{"model":"missing-noarch","messages":[]}"#;
   let (status, headers, _response) = http_post(addr, "/v1/chat/completions", body).await;
@@ -393,10 +408,13 @@ async fn unknown_arch_requested_falls_back_to_any_mru() {
   let served = header_value(&headers, "x-llamastash-served-by").expect("served-by");
   assert_eq!(served, "ready-bert");
   let reason = header_value(&headers, "x-llamastash-fallback-reason").expect("reason");
-  assert_eq!(reason, "launch_failed");
+  // Requested arch was None → picked arch is `bert` (known). The
+  // proxy treats unknown-arch fallthrough as `family_mismatch` too,
+  // since the client can't trust the response shape either way.
+  assert_eq!(reason, "family_mismatch");
 
   stop_all(&ctx, &[live]).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -427,7 +445,7 @@ async fn second_request_after_launch_failure_falls_back_independently() {
     allocate_port_range(),
   )
   .await;
-  let (addr, shutdown) = spawn_listener(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener(state).await;
 
   let body = r#"{"model":"missing-qwen3","messages":[]}"#;
   let (s1, h1, _b1) = http_post(addr, "/v1/chat/completions", body).await;
@@ -444,6 +462,6 @@ async fn second_request_after_launch_failure_falls_back_independently() {
   );
 
   stop_all(&ctx, &[live]).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }

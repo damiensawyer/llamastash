@@ -121,17 +121,11 @@ pub(crate) async fn forward_to_upstream(
 
   // Translate hyper::Method into reqwest::Method. Both crates share
   // the underlying `http` types so this is a structural conversion
-  // rather than a string round-trip.
-  let upstream_method = match reqwest::Method::from_bytes(inbound_method.as_str().as_bytes()) {
-    Ok(m) => m,
-    Err(_) => {
-      return Ok(error_envelope(
-        StatusCode::BAD_REQUEST,
-        "invalid_request",
-        "unrecognised request method",
-      ));
-    }
-  };
+  // rather than a string round-trip — and hyper has already validated
+  // the inbound method before we reach this point, so the parse can't
+  // fail in practice.
+  let upstream_method = reqwest::Method::from_bytes(inbound_method.as_str().as_bytes())
+    .expect("hyper-validated method round-trips to reqwest");
 
   // Forwarded headers: drop hop-by-hop entries and anything named in
   // the inbound `Connection: <list>` header (RFC 7230 §6.1 extends

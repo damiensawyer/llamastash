@@ -127,13 +127,15 @@ async fn build_state(
   (state, ctx)
 }
 
-async fn spawn_listener(state: Arc<ProxyState>) -> (SocketAddr, ShutdownToken) {
+async fn spawn_listener(
+  state: Arc<ProxyState>,
+) -> (SocketAddr, ShutdownToken, tokio::task::JoinHandle<()>) {
   let token = ShutdownToken::new();
   let status: StatusCell = new_status_cell();
   let bind_addr = loopback_addr(0);
   let token_for_task = token.clone();
   let status_for_task = Arc::clone(&status);
-  tokio::spawn(async move {
+  let handle = tokio::spawn(async move {
     serve(state, bind_addr, token_for_task, status_for_task)
       .await
       .expect("proxy serve returns Ok");
@@ -141,7 +143,18 @@ async fn spawn_listener(state: Arc<ProxyState>) -> (SocketAddr, ShutdownToken) {
   let bound = wait_for_listening(&status, Duration::from_secs(2))
     .await
     .expect("listener reaches Listening");
-  (bound, token)
+  (bound, token, handle)
+}
+
+/// Trigger shutdown and join the serve task with a generous budget.
+/// Catches a hung serve loop instead of leaving a detached task that
+/// would otherwise be silently torn down at runtime exit.
+async fn shutdown_listener(shutdown: ShutdownToken, handle: tokio::task::JoinHandle<()>) {
+  shutdown.trigger();
+  tokio::time::timeout(Duration::from_secs(5), handle)
+    .await
+    .expect("proxy serve loop must exit after shutdown.trigger()")
+    .expect("proxy serve task must not panic");
 }
 
 async fn wait_for_listening(status: &StatusCell, budget: Duration) -> Option<SocketAddr> {
@@ -217,7 +230,7 @@ async fn dormant_model_auto_starts_and_forwards_without_fallback_headers() {
     allocate_port_range(),
   )
   .await;
-  let (addr, shutdown) = spawn_listener(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener(state).await;
 
   let body = serde_json::json!({
     "model": "qwen3",
@@ -241,7 +254,7 @@ async fn dormant_model_auto_starts_and_forwards_without_fallback_headers() {
   assert_eq!(snap.len(), 1, "exactly one supervisor was launched");
 
   stop_all(&ctx).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -267,7 +280,7 @@ async fn slow_start_blocks_then_succeeds() {
     allocate_port_range(),
   )
   .await;
-  let (addr, shutdown) = spawn_listener(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener(state).await;
 
   let start = std::time::Instant::now();
   let body = r#"{"model":"qwen3","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
@@ -285,7 +298,7 @@ async fn slow_start_blocks_then_succeeds() {
   assert!(text.contains("\"model\":\"qwen3\""));
 
   stop_all(&ctx).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -307,7 +320,7 @@ async fn supervisor_state_visible_to_registry_after_auto_start() {
     allocate_port_range(),
   )
   .await;
-  let (addr, shutdown) = spawn_listener(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener(state).await;
 
   let body = r#"{"model":"qwen3","messages":[]}"#;
   let (status, _h, _b) = http_post(addr, "/v1/chat/completions", body).await;
@@ -329,7 +342,7 @@ async fn supervisor_state_visible_to_registry_after_auto_start() {
   assert_eq!(persisted.running.len(), 1);
 
   stop_all(&ctx).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -355,7 +368,7 @@ async fn second_request_for_same_model_skips_relaunch() {
     allocate_port_range(),
   )
   .await;
-  let (addr, shutdown) = spawn_listener(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener(state).await;
 
   let body = r#"{"model":"qwen3","messages":[]}"#;
   let (s1, _h1, _b1) = http_post(addr, "/v1/chat/completions", body).await;
@@ -370,7 +383,7 @@ async fn second_request_for_same_model_skips_relaunch() {
   );
 
   stop_all(&ctx).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -397,7 +410,7 @@ async fn auto_start_failure_with_no_ready_models_returns_launch_failed() {
     allocate_port_range(),
   )
   .await;
-  let (addr, shutdown) = spawn_listener(state).await;
+  let (addr, shutdown, listener_handle) = spawn_listener(state).await;
 
   let body = r#"{"model":"never","messages":[]}"#;
   let (status, _h, response) = http_post(addr, "/v1/chat/completions", body).await;
@@ -408,6 +421,6 @@ async fn auto_start_failure_with_no_ready_models_returns_launch_failed() {
   assert!(running.is_empty(), "no Ready models to fall back to");
 
   stop_all(&ctx).await;
-  shutdown.trigger();
+  shutdown_listener(shutdown, listener_handle).await;
   std::fs::remove_dir_all(&dir).ok();
 }
