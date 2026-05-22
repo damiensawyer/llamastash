@@ -9,3 +9,6 @@ cargo fmt --all
 
 echo "Executing: make lint"
 make lint
+
+echo "Executing: make doc"
+make doc

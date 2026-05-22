@@ -73,6 +73,11 @@ render:
 lint:
 	@CARGO_INCREMENTAL=0 cargo clippy --all-targets --features test-fixtures -- -D warnings
 
+## Check rustdoc — fails on broken / private-cross-visibility intra-doc
+## links so the `cargo doc` CI job stays green. `--no-deps` mirrors CI.
+doc:
+	@RUSTFLAGS="-D warnings" cargo doc --no-deps --features test-fixtures
+
 ## Fix lint
 lint-fix:
 	@cargo fix --allow-staged

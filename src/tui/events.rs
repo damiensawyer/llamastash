@@ -64,23 +64,23 @@ pub enum Event {
   /// Terminal input — key, mouse, paste, resize. Pushed by the
   /// background crossterm-poll thread.
   Input(TermEvent),
-  /// Periodic wake when no input arrives within [`TICK_RATE`].
+  /// Periodic wake when no input arrives within `TICK_RATE`.
   Tick,
   /// Daemon-state update (catalog, status, favorites, last-params,
   /// logs) plus the writer-task error surface. Pushed by
-  /// [`spawn_refresher`], [`spawn_logs_poller`], and [`spawn_writer`].
+  /// `spawn_refresher`, `spawn_logs_poller`, and `spawn_writer`.
   Refresh(RefreshTick),
-  /// Chat-completion stream chunk. Pushed by
-  /// [`crate::tui::oai_client::spawn_chat_stream`].
+  /// Chat-completion stream chunk. Pushed by the
+  /// `oai_client::spawn_chat_stream` helper.
   ChatStream(ChatStreamMsg),
   /// Embed or rerank one-shot result. Pushed by the per-tab
   /// `tokio::spawn` shim in `apply_embed_submit` / `apply_rerank_submit`.
   Tab(crate::tui::tabs::TabEvent),
   /// HF browser dialog update (search results, repo file listing).
-  /// Pushed by [`spawn_hf_search`] and [`spawn_hf_list_repo_files`].
+  /// Pushed by `spawn_hf_search` and `spawn_hf_list_repo_files`.
   HfDialog(crate::tui::hf_dialog::HfDialogEvent),
   /// HF download progress / completion. Pushed by
-  /// [`spawn_download_task`].
+  /// `spawn_download_task`.
   Download(crate::tui::download_strip::DownloadEvent),
 }
 
@@ -2736,7 +2736,7 @@ fn build_tui_fetch_client(offline: bool) -> crate::init::fetch::FetchClient {
     .unwrap_or_else(|_| FetchClient::offline())
 }
 
-/// Apply one [`DownloadEvent`] to the strip. Promotes the next
+/// Apply one [`crate::tui::download_strip::DownloadEvent`] to the strip. Promotes the next
 /// queued pull when the active one finishes / errors / hits the
 /// cache; surfaces a toast when a cache-hit short-circuit lands.
 pub fn apply_download_event(app: &mut App, evt: crate::tui::download_strip::DownloadEvent) {
@@ -2812,7 +2812,7 @@ pub fn apply_download_event(app: &mut App, evt: crate::tui::download_strip::Down
   }
 }
 
-/// Apply one [`HfDialogEvent`] to the dialog state. Replaces the
+/// Apply one [`crate::tui::hf_dialog::HfDialogEvent`] to the dialog state. Replaces the
 /// prior `drain_hf_dialog` polling helper — the unified loop hands
 /// one event in at a time.
 pub fn apply_hf_dialog_event(app: &mut App, evt: crate::tui::hf_dialog::HfDialogEvent) {

@@ -1,5 +1,5 @@
 //! Modal `?` help overlay listing every keybinding grouped by
-//! category. Layout is fully derived from [`DEFAULT_BINDINGS`] —
+//! category. Layout is fully derived from `DEFAULT_BINDINGS` —
 //! each binding row carries its own `categories` list, and the
 //! renderer walks every [`Category`] in order, collecting rows
 //! whose binding lands in that section.
