@@ -169,7 +169,19 @@ fn counts_row<'a>(app: &'a App, palette: &'a Palette) -> Line<'a> {
     .iter()
     .filter(|m| matches!(m.state, crate::tui::status_icons::SurfaceState::Ready))
     .count();
-  let favorites = app.favorites.len();
+  // Count only favorites whose path is in the current catalog so the
+  // number matches what the user can actually find in the list. Stale
+  // favorites (file deleted / moved out of watched dirs) silently
+  // drop off; running favorites still count (their star is visible
+  // in the folder group even when the dedicated `★ Favorites`
+  // shortcut excludes them).
+  let catalog: std::collections::HashSet<&std::path::Path> =
+    app.models.iter().map(|m| m.path.as_path()).collect();
+  let favorites = app
+    .favorites
+    .iter()
+    .filter(|p| catalog.contains(p.as_path()))
+    .count();
   Line::from(vec![
     Span::styled(LABEL_MODELS, palette.label_style()),
     Span::styled(format!("{total} found"), palette.text_style()),
@@ -408,6 +420,49 @@ mod tests {
     );
     assert!(rows.iter().any(|r| r.contains("1 ready")));
     assert!(rows.iter().any(|r| r.contains("1 ★")));
+  }
+
+  #[test]
+  fn counts_row_drops_stale_favorites_not_in_catalog() {
+    // A favorite whose path is no longer in `app.models` (file deleted
+    // or moved out of watched dirs) must NOT inflate the `N ★` count —
+    // the list pane would have no row to render it on, so reporting it
+    // here desyncs the count from what's actually visible.
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake_model("/m/a.gguf", "/m")];
+    app.favorites = vec![
+      PathBuf::from("/m/a.gguf"),         // in catalog
+      PathBuf::from("/m/ghost.gguf"),     // stale — not in catalog
+    ];
+    let rows = render_lines(&app);
+    assert!(
+      rows.iter().any(|r| r.contains("1 ★")),
+      "stale favorite must drop from the count: {rows:#?}"
+    );
+    assert!(
+      !rows.iter().any(|r| r.contains("2 ★")),
+      "count must not include stale favorites: {rows:#?}"
+    );
+  }
+
+  #[test]
+  fn counts_row_includes_running_favorites() {
+    // A favorited model that's currently running still counts — the
+    // user has it favorited, the catalog still surfaces it, and the
+    // star is visible on the row in its folder group. Each model
+    // counts exactly once.
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![
+      fake_model("/m/a.gguf", "/m"),
+      fake_model("/m/b.gguf", "/m"),
+    ];
+    app.managed = vec![fake_managed("/m/a.gguf", 41100, SurfaceState::Ready)];
+    app.favorites = vec![PathBuf::from("/m/a.gguf"), PathBuf::from("/m/b.gguf")];
+    let rows = render_lines(&app);
+    assert!(
+      rows.iter().any(|r| r.contains("2 ★")),
+      "running favorite must still count: {rows:#?}"
+    );
   }
 
   #[test]

@@ -286,9 +286,11 @@ fn running_row(m: &DiscoveredModel, launch: &RunningLaunchRow) -> ListRow {
     Some(launch.launch_id.clone()),
   );
   // The favorite glyph drops on Running rows so two launches of the
-  // same favorited model don't both wear a star — the user can
-  // already see the original star on the row in the Favorites
-  // group below. Achieved by passing `favorite=false` above.
+  // same favorited model don't both wear a star — the original star
+  // still shows on the row in its folder group below (the dedicated
+  // `★ Favorites` section filters running paths out, so the folder
+  // group is the canonical home for a running favorite). Achieved by
+  // passing `favorite=false` above.
   if let ListRow::Model { ref mut path, .. } = row {
     // `model_row` cloned the catalog path; preserve as-is.
     let _ = path;
