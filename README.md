@@ -54,51 +54,53 @@ Full subcommand reference: [`docs/usage.md`](docs/usage.md). Architecture and IP
 
 ## Features
 
-### Zero-to-chat in one command
+Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs, contracts, and links into [`docs/usage.md`](docs/usage.md).
 
-- **`llamastash init` — first-run wizard.** Detects your hardware (NVIDIA, AMD/ROCm, Apple Metal, Vulkan, CPU), installs the right `llama-server` variant (Homebrew on macOS, integrity-verified GitHub Releases prebuilt on Linux), picks a starter GGUF tuned to your VRAM, downloads it into the HuggingFace cache, writes a tuned `config.yaml`, and smoke-launches it — all behind a stepped flow with live progress for every long step. `--recommended` accepts every default; `--only` / `--skip` scope re-runs after GPU swaps; `--json` + `--offline` make it agent-friendly.
-- **Hardware-aware model recommender.** VRAM-fit hard filter + composite ranking (benchmark score × tok/s × params × recency) over a bundled benchmark snapshot refreshed daily by CI (Open-LLM-Leaderboard + Aider Polyglot + curated whichllm catalog). Every pick is auditable: VRAM headroom, benchmark source, estimated tok/s, parameter count, quantization.
-- **`llamastash doctor` — read-only health check.** Compares your live setup against the snapshot init wrote, emits typed findings.
+### [Zero-to-chat in one command](FEATURES.md#zero-to-chat-in-one-command)
 
-### Discovers what you already have
+- [`llamastash init` — first-run wizard](FEATURES.md#llamastash-init--first-run-wizard) that detects hardware, installs `llama-server`, picks + downloads a starter GGUF, writes a tuned config, and smoke-launches.
+- [Hardware-aware model recommender](FEATURES.md#hardware-aware-model-recommender) with a VRAM-fit filter + composite ranking over a CI-refreshed benchmark snapshot.
+- [`llamastash doctor`](FEATURES.md#llamastash-doctor--read-only-health-check) — typed, agent-branchable findings; always exits `0`.
 
-- **Auto-scans HuggingFace, Ollama, and LM Studio caches.** Plus any user paths you add. Models stream into the catalog incrementally; the TUI stays responsive while scanning.
-- **Rich GGUF intelligence.** Header parser surfaces architecture, parameter count, quantization, native context length, embedded chat template, and reasoning hints. KV-cache-aware memory estimates that account for your chosen context length, not just weights.
-- **Smart deduplication.** Symlinks dedupe to their target; split GGUFs (`*-00001-of-00003.gguf`) collapse into one logical entry; Ollama's content-addressed blobs surface under their human-readable name.
-- **Live filesystem watching.** New GGUFs anywhere under the scan roots appear without restarting.
+### [Discovers what you already have](FEATURES.md#discovers-what-you-already-have)
 
-### Launches anything, supervises everything
+- [Auto-scans HuggingFace, Ollama, and LM Studio caches](FEATURES.md#auto-scans-huggingface-ollama-and-lm-studio-caches), plus user paths.
+- [Rich GGUF intelligence](FEATURES.md#rich-gguf-intelligence) — architecture, params, quant, native context, chat template, KV-cache-aware memory estimates.
+- [Smart deduplication](FEATURES.md#smart-deduplication) — symlinks collapsed, split GGUFs unified, Ollama blobs named.
+- [Live filesystem watching](FEATURES.md#live-filesystem-watching) — new GGUFs appear without a restart.
 
-- **Daemon-on-demand.** A single binary plays TUI, CLI, and background daemon. The first client auto-spawns the daemon; running models survive TUI close and daemon restart (three-factor orphan re-adoption: PID alive + port listening + `/v1/models` path match).
-- **Multi-model concurrency.** Run as many models as your hardware can hold. Each gets its own port (auto-allocated from a configurable range) and a `Launching → Loading → Ready → Stopping → Stopped` state machine with `/health` probing.
-- **GPU-aware built-in arch defaults.** A static `(architecture, gpu_backend) → flags` table ships in the binary — `llama*`, `qwen2*`, `qwen3*`, `mistral`, `mixtral`, `gemma*`, `phi*`, `deepseek*`, `granite`, `falcon`, `stablelm`, `command-r`, plus a `*` fallback. A fresh install gets sensible `n_gpu_layers` / `flash_attn` on every supported backend, with zero YAML to touch.
-- **Typed launch-knob editor.** Settings tab exposes `ctx`, `reasoning`, `n_gpu_layers`, `threads`, `cache_type_k/v`, `flash_attn`, `mlock`, `no_mmap`, `parallel`, `batch_size`, `ubatch_size`, `rope_freq_scale`, `keep`, plus a free-text `extras` row. Each row shows its **source chip** (`(user)`, `(last used)`, `(arch default)`, `(model default)`, `(server default)`) so you always know where the value came from. Layered resolver: `preset > last-params > yaml arch_defaults > built-in table > llama-server`.
-- **Named presets, favorites, last-params recall.** Save tuned launch profiles per model (`coding`, `long-ctx`, `fast`), star anything you launch often, and have your last successful launch params pre-populated next time.
+### [Launches anything, supervises everything](FEATURES.md#launches-anything-supervises-everything)
 
-### A TUI that doesn't get in your way
+- [Daemon-on-demand](FEATURES.md#daemon-on-demand) — one binary as TUI + CLI + daemon; running models survive TUI close.
+- [Multi-model concurrency](FEATURES.md#multi-model-concurrency) — per-model port from a configurable range, `/health`-probed state machine.
+- [GPU-aware built-in arch defaults](FEATURES.md#gpu-aware-built-in-arch-defaults) — sensible flags per `(architecture, gpu_backend)` with zero YAML.
+- [Typed launch-knob editor](FEATURES.md#typed-launch-knob-editor) with `(source)` chips and a layered preset → last-params → arch-defaults → built-ins resolver.
+- [Named presets, favorites, last-params recall](FEATURES.md#named-presets-favorites-last-params-recall).
 
-- **Keyboard-driven everywhere.** Vim-style navigation (`hjkl`), `/` filter, `f` favorite, `u`/`c`/`p` yank URL / curl / path, `t` cycle theme, `?` contextual help. Mouse is optional polish.
-- **Right pane is your smoke test.** Tab-driven Logs / Chat / Embed / Rerank that hits the same OpenAI-compatible endpoints any external client would use — `<think>` blocks collapse in Chat; Embed shows vectors and optional cosine similarity; Rerank stages a query + candidate list. A successful smoke test proves the model is also usable from any external client.
-- **In-TUI HuggingFace browser.** `d` opens a three-state modal — Search → File picker → Confirm — over the live HuggingFace `/api/models` endpoint. Search, sort by Downloads / Likes / Recently Updated / Trending, page-by-page pagination. The file picker collapses shard sets and marks per-file hardware fit (`✓` / `⚠` / `✗`). A pinned download strip surfaces progress and throughput; `Ctrl+X` cancels mid-chunk; `Ctrl+D` deletes a cached repo from disk.
-- **Theming and rebinding.** Five built-in themes (Catppuccin Macchiato default + Latte, Gruvbox Dark, Solarized Dark, Monochrome) plus a `custom_theme` block accepting hex or ANSI names. Every TUI action is rebindable via a `keybindings:` block with a kdash-style key-spec dialect (`ctrl+q`, `shift+tab`, `f1`, …).
-- **Accessible by default.** Status indicators are dual-encoded (color + glyph) so the UI stays legible on monochrome terminals.
+### [A TUI that doesn't get in your way](FEATURES.md#a-tui-that-doesnt-get-in-your-way)
 
-### First-class CLI for agents and scripts
+- [Keyboard-driven everywhere](FEATURES.md#keyboard-driven-everywhere) — vim-style `hjkl`, `/` filter, `u`/`c`/`p` yank, `?` help.
+- [Right pane is your smoke test](FEATURES.md#right-pane-is-your-smoke-test) — Logs / Chat / Embed / Rerank over the same OpenAI-compatible endpoints external clients use.
+- [In-TUI HuggingFace browser](FEATURES.md#in-tui-huggingface-browser) — search, sort, paginate, per-file hardware fit, download strip with cancel.
+- [Theming and rebinding](FEATURES.md#theming-and-rebinding) — five themes + custom palette; every action rebindable.
+- [Accessible by default](FEATURES.md#accessible-by-default) — dual-encoded status (color + glyph), readable on mono terminals.
 
-- **Subcommands cover every TUI capability.** `list`, `start`, `stop`, `status`, `logs`, `presets`, `favorites`, `last-params`, `daemon`, `init`, `doctor`, `pull`, `recommend` — every read+mutation command supports `--json` as the agent contract. `--no-spawn` opts out of the daemon auto-spawn for scripts that want to fail fast.
-- **Documented exit codes per failure class.** `66` for ambiguous model reference, `67` for launch failure, `69` for `pull` failure, `70` for missing `llama-server`, `72`/`73`/`74` for init phases — pin against numbers, not message text.
-- **Colored TTY output, byte-stable TSV when piped.** Padded + colored tables on a terminal; tab-separated rows when stdout isn't a TTY. `--no-colors` / `NO_COLOR=1` honored. `--json` output is byte-stable regardless.
-- **`llamastash pull <hf-repo>` — standalone HF fetch.** Same `hf-hub`-backed primitive the wizard and the TUI dialog use; honors `HF_TOKEN`, refuses world-readable token files, does a disk-space precheck.
-- **`llamastash recommend` — hardware-aware picks in your shell.** The wizard's recommender without the install / download / config-write steps. Pipe to `jq`.
-- **Reproducible pulls via `--revision <SHA>`.** Pin HF downloads to a specific commit for agent and CI workflows.
+### [First-class CLI for agents and scripts](FEATURES.md#first-class-cli-for-agents-and-scripts)
 
-### Built to be safe to run
+- [Subcommands cover every TUI capability](FEATURES.md#subcommands-cover-every-tui-capability) with `--json` as the stable agent contract.
+- [Documented exit codes per failure class](FEATURES.md#documented-exit-codes-per-failure-class) — pin numbers, not message text.
+- [Colored TTY output, byte-stable TSV when piped](FEATURES.md#colored-tty-output-byte-stable-tsv-when-piped) — existing `awk` / `column` pipelines keep working.
+- [`llamastash pull <hf-repo>`](FEATURES.md#llamastash-pull-hf-repo--standalone-hf-fetch) — same primitive as the wizard, with disk-space prechecks.
+- [`llamastash recommend`](FEATURES.md#llamastash-recommend--hardware-aware-picks-in-your-shell) — the recommender on its own, agent-friendly.
+- [Reproducible pulls via `--revision <SHA>`](FEATURES.md#reproducible-pulls-via---revision-sha).
 
-- **Unix-socket peercred auth (`0600`).** Only your own UID can drive the daemon. No tokens to manage; no network surface in v1.
-- **Hardened fetch substrate.** HTTPS-only with a host allowlist, redirect cap, body-size cap, IP-literal refusal. Used for benchmark snapshot fetch, GH Releases install, and HF API calls. `--offline` / `LLAMASTASH_OFFLINE` short-circuits before any DNS.
-- **Archive-bomb defenses on installers.** Entry-count cap, total-size cap, compression-ratio cap; refuses hardlink, symlink, absolute-path, or `..` entries. SHA-256 verified before extract from the GitHub Releases asset's `digest` field.
-- **Atomic, mode-checked config + state writes.** Temp-file + rename, refuses symlinks and group/world-writable parents, `0600` final mode. Corrupt `state.json` is quarantined to `state.json.broken-<ts>` and the daemon boots clean rather than refusing to start.
-- **Side-by-side daemons.** `LLAMASTASH_STATE_DIR` / `LLAMASTASH_CONFIG_DIR` / `LLAMASTASH_CACHE_DIR` / `LLAMASTASH_SOCKET` let you run isolated instances without colliding on persisted state.
+### [Built to be safe to run](FEATURES.md#built-to-be-safe-to-run)
+
+- [Unix-socket peercred auth (`0600`)](FEATURES.md#unix-socket-peercred-auth-0600) — only your UID; no network surface in v1.
+- [Hardened fetch substrate](FEATURES.md#hardened-fetch-substrate) — HTTPS-only, host allowlist, redirect/body-size caps, IP-literal refusal.
+- [Archive-bomb defenses on installers](FEATURES.md#archive-bomb-defenses-on-installers) — entry/size/ratio caps; SHA-256 verified before extract.
+- [Atomic, mode-checked config + state writes](FEATURES.md#atomic-mode-checked-config--state-writes) — `0600` final mode; corrupt state quarantined, not fatal.
+- [Side-by-side daemons](FEATURES.md#side-by-side-daemons) — isolated instances via `LLAMASTASH_*_DIR` + `LLAMASTASH_SOCKET`.
 
 ## Configuration
 
