@@ -38,9 +38,6 @@ pub struct RerankTabState {
   /// Top-of-viewport offset into the rendered output. Round-8: ↑/↓
   /// in `Focus::RightPane` walk this — same shape as Chat / Embed.
   pub scroll_offset: u16,
-  /// Receiver for the in-flight `/v1/rerank` call. The render loop
-  /// drains it via `try_recv` once per tick.
-  pub pending: Option<tokio::sync::mpsc::UnboundedReceiver<crate::tui::tabs::TabEvent>>,
 }
 
 impl RerankTabState {

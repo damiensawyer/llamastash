@@ -18,7 +18,6 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
-use tokio::sync::mpsc;
 
 use crate::theme::Palette;
 use crate::tui::hf_dialog::PickerRow;
@@ -99,15 +98,13 @@ pub enum DownloadEvent {
 }
 
 /// Pinned download strip state owned by `App`. Render-side only —
-/// the actual download task spawns from `events.rs` and ships
-/// progress back over `event_tx`.
-#[derive(Debug)]
+/// the actual download task spawns from `events.rs` and pushes
+/// `Event::Download(DownloadEvent)` back onto the unified TUI channel.
+#[derive(Debug, Default)]
 pub struct DownloadStripState {
   pub queue: VecDeque<QueuedPull>,
   pub active: Option<ActivePull>,
   pub last_error: Option<(String, Instant)>,
-  pub event_rx: mpsc::UnboundedReceiver<DownloadEvent>,
-  pub event_tx: mpsc::UnboundedSender<DownloadEvent>,
   /// Last `AlreadyCached` event observed. The events.rs drain
   /// consumes this once to toast + select the matching list-pane
   /// row, then clears it.
@@ -118,21 +115,6 @@ pub struct DownloadStripState {
   /// terminal event (Finished / Error / AlreadyCached / explicit
   /// cancel) so stale handles never accumulate.
   pub active_abort: Option<tokio::task::AbortHandle>,
-}
-
-impl Default for DownloadStripState {
-  fn default() -> Self {
-    let (tx, rx) = mpsc::unbounded_channel();
-    Self {
-      queue: VecDeque::new(),
-      active: None,
-      last_error: None,
-      event_rx: rx,
-      event_tx: tx,
-      pending_cache_hit: None,
-      active_abort: None,
-    }
-  }
 }
 
 impl DownloadStripState {

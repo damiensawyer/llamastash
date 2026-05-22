@@ -238,6 +238,13 @@ pub struct App {
   /// `Vec<RightTab>` each time (audit §F4.1 #2). Same lifetime
   /// rules as `rows_cache`.
   pub(crate) right_tabs_cache: Option<Vec<RightTab>>,
+  /// Sender into the unified TUI event channel. `Some(_)` during a
+  /// real `run()` session; `None` in unit tests that drive `pump_input`
+  /// directly without spinning a runtime. Subsystems (chat stream,
+  /// embed/rerank, HF dialog, download tasks) clone this when
+  /// spawning a tokio task so their results land back on the same
+  /// `recv` the main loop blocks on.
+  pub events_tx: Option<tokio::sync::mpsc::Sender<crate::tui::events::Event>>,
 }
 
 /// Action awaiting user confirmation in the modal popup. Captured
@@ -319,6 +326,7 @@ impl App {
       download_strip: crate::tui::download_strip::DownloadStripState::default(),
       rows_cache: None,
       right_tabs_cache: None,
+      events_tx: None,
     }
   }
 

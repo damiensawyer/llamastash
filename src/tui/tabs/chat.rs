@@ -16,12 +16,11 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
-use tokio::sync::mpsc;
 
 use crate::theme::Palette;
 use crate::tui::app::App;
 use crate::tui::keybindings::Focus;
-use crate::tui::oai_client::{collapse_think_blocks, ChatStreamMsg};
+use crate::tui::oai_client::collapse_think_blocks;
 use crate::tui::tabs::input_pane::{self, InputPaneOpts, PromptField};
 
 /// Working state for the chat tab. Owned by [`crate::tui::app::App`]
@@ -47,12 +46,6 @@ pub struct ChatTabState {
   /// Top-of-viewport offset into the rendered response. 0 pins
   /// to the top; ↑/↓ in `Focus::RightPane` walk this (round-8).
   pub scroll_offset: u16,
-  /// Receiver for the most recent `spawn_chat_stream` invocation.
-  /// The render loop drains it via `try_recv` on every tick — that
-  /// way SSE deltas land in [`ChatTabState::response`] without the input thread
-  /// having to await anything. `None` once the stream signals
-  /// `Finished` or `Error`.
-  pub stream_rx: Option<mpsc::Receiver<ChatStreamMsg>>,
 }
 
 impl ChatTabState {

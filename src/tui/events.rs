@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -29,17 +29,60 @@ use crate::tui::tabs::rerank::RerankField;
 use crate::tui::tabs::RightTab;
 use crate::util::clipboard;
 
-/// Catalog/status refresh cadence in the steady state. Latency
-/// requirement (R29) is bounded by `POLL_INTERVAL`, not by this; the
-/// refresher only governs how stale daemon snapshots may get.
+/// Catalog/status refresh cadence in the steady state. Governs how
+/// stale daemon snapshots may get; the run loop itself is event-driven
+/// and wakes immediately on real input or subsystem updates.
 const REFRESH_INTERVAL: Duration = Duration::from_millis(750);
 /// Initial reconnect backoff used when the daemon is unreachable.
 /// Doubles on each failure up to [`REFRESH_INTERVAL`] so a freshly
 /// started daemon gets attached within ~2 s on a cold connect.
 const RECONNECT_INITIAL: Duration = Duration::from_millis(120);
-/// crossterm input poll interval. Kept tight so worst-case
-/// key-to-redraw stays under the 16 ms target (origin: R29).
-const POLL_INTERVAL: Duration = Duration::from_millis(8);
+/// Background-input-thread tick cadence. The crossterm poll thread
+/// blocks for up to this long waiting for a key/mouse/paste/resize
+/// event; if the wait expires it emits one [`Event::Tick`] so any
+/// time-based UI work (e.g. download throughput averages) still moves.
+/// Idle CPU is bounded by this interval, not by any inline poll —
+/// the main loop blocks on `recv` so an idle TUI consumes ~0% CPU
+/// between ticks.
+const TICK_RATE: Duration = Duration::from_millis(250);
+
+/// Unified event funnel for the TUI run loop.
+///
+/// Every signal the loop reacts to — terminal input, periodic ticks,
+/// daemon-state refreshes, chat-stream chunks, embed/rerank results,
+/// HF-dialog updates, download progress — arrives on a single
+/// `mpsc::Receiver<Event>`. The loop blocks on `recv` so an idle TUI
+/// consumes no CPU; redraws happen only when an event landed or a
+/// keystroke flips the dirty flag inside `pump_input_with_writer`.
+///
+/// Variant wrappers (rather than a flat enum) preserve subsystem
+/// boundaries: `oai_client`, `hf_dialog`, `download_strip`, and the
+/// tab modules keep their own narrow event enums and just construct
+/// the wrapping `Event` at the push site.
+#[derive(Debug)]
+pub enum Event {
+  /// Terminal input — key, mouse, paste, resize. Pushed by the
+  /// background crossterm-poll thread.
+  Input(TermEvent),
+  /// Periodic wake when no input arrives within [`TICK_RATE`].
+  Tick,
+  /// Daemon-state update (catalog, status, favorites, last-params,
+  /// logs) plus the writer-task error surface. Pushed by
+  /// [`spawn_refresher`], [`spawn_logs_poller`], and [`spawn_writer`].
+  Refresh(RefreshTick),
+  /// Chat-completion stream chunk. Pushed by
+  /// [`crate::tui::oai_client::spawn_chat_stream`].
+  ChatStream(ChatStreamMsg),
+  /// Embed or rerank one-shot result. Pushed by the per-tab
+  /// `tokio::spawn` shim in `apply_embed_submit` / `apply_rerank_submit`.
+  Tab(crate::tui::tabs::TabEvent),
+  /// HF browser dialog update (search results, repo file listing).
+  /// Pushed by [`spawn_hf_search`] and [`spawn_hf_list_repo_files`].
+  HfDialog(crate::tui::hf_dialog::HfDialogEvent),
+  /// HF download progress / completion. Pushed by
+  /// [`spawn_download_task`].
+  Download(crate::tui::download_strip::DownloadEvent),
+}
 
 /// Commands the input pump asks the writer task to forward to the
 /// daemon. Keeping this enum narrow (vs. raw JSON) lets the type
@@ -84,7 +127,7 @@ pub enum WriterCmd {
 /// the loop to exit (the user pressed `q` / Ctrl+C). The `writer`
 /// channel is optional so unit tests and the inline test backend
 /// drive `pump_input` without spinning a daemon writer task.
-pub fn pump_input(app: &mut App, evt: Event) -> bool {
+pub fn pump_input(app: &mut App, evt: TermEvent) -> bool {
   pump_input_with_writer(app, evt, None)
 }
 
@@ -93,11 +136,11 @@ pub fn pump_input(app: &mut App, evt: Event) -> bool {
 /// `Submit` on the launch picker actually dispatches `start_model`.
 pub fn pump_input_with_writer(
   app: &mut App,
-  evt: Event,
+  evt: TermEvent,
   writer: Option<&mpsc::Sender<WriterCmd>>,
 ) -> bool {
   match evt {
-    Event::Key(key) if key.kind != KeyEventKind::Release => handle_key(app, key, writer),
+    TermEvent::Key(key) if key.kind != KeyEventKind::Release => handle_key(app, key, writer),
     _ => {}
   }
   app.should_exit
@@ -1165,12 +1208,10 @@ fn apply_confirmed(app: &mut App, action: ConfirmAction, writer: Option<&mpsc::S
           app.show_toast(format!("cancelled {cancelled_friendly_name}"));
           if let Some(promoted) = next {
             app.download_strip.install_active(&promoted);
-            let abort = spawn_download_task(
-              promoted,
-              app.options.offline,
-              app.download_strip.event_tx.clone(),
-            );
-            app.download_strip.active_abort = Some(abort);
+            if let Some(tx) = app.events_tx.clone() {
+              let abort = spawn_download_task(promoted, app.options.offline, tx);
+              app.download_strip.active_abort = Some(abort);
+            }
           }
         }
       }
@@ -1311,8 +1352,13 @@ fn apply_send_chat(app: &mut App) {
   let prompt = app.chat.prompt.buffer().to_string();
   let model_name = crate::util::paths::model_display_name(&managed.path);
   app.chat.reset_for_send();
-  let rx = spawn_chat_stream(managed.port, model_name, prompt);
-  app.chat.stream_rx = Some(rx);
+  // Without an events channel (unit tests), the local `streaming` flag
+  // is the only observable effect of submit. The real `run()` always
+  // primes `events_tx` so the chat task can land its `Event::ChatStream`
+  // chunks back on the main loop.
+  if let Some(tx) = app.events_tx.clone() {
+    spawn_chat_stream(managed.port, model_name, prompt, tx);
+  }
 }
 
 /// One-shot embedding call. Spawns a background task; the result is
@@ -1328,17 +1374,18 @@ fn apply_embed_submit(app: &mut App) {
   }
   let input = app.embed.input.buffer().to_string();
   let model_name = crate::util::paths::model_display_name(&managed.path);
-  let (tx, rx) = mpsc::unbounded_channel::<TabEvent>();
   app.embed.busy = true;
-  app.embed.pending = Some(rx);
   let port = managed.port;
-  tokio::spawn(async move {
-    let result = oai_embed(port, &model_name, &input).await;
-    let _ = tx.send(match result {
-      Ok(r) => TabEvent::EmbedOk(r),
-      Err(e) => TabEvent::EmbedErr(e),
+  if let Some(events_tx) = app.events_tx.clone() {
+    tokio::spawn(async move {
+      let result = oai_embed(port, &model_name, &input).await;
+      let evt = match result {
+        Ok(r) => TabEvent::EmbedOk(r),
+        Err(e) => TabEvent::EmbedErr(e),
+      };
+      let _ = events_tx.send(Event::Tab(evt)).await;
     });
-  });
+  }
 }
 
 /// Dispatch Enter on the Rerank tab. Behaviour branches on the
@@ -1388,17 +1435,18 @@ fn apply_rerank_submit(app: &mut App) {
   let query = app.rerank.query.buffer().to_string();
   let candidates = app.rerank.candidates.clone();
   let model_name = crate::util::paths::model_display_name(&managed.path);
-  let (tx, rx) = mpsc::unbounded_channel::<TabEvent>();
   app.rerank.busy = true;
-  app.rerank.pending = Some(rx);
   let port = managed.port;
-  tokio::spawn(async move {
-    let result = oai_rerank(port, &model_name, &query, &candidates).await;
-    let _ = tx.send(match result {
-      Ok(r) => TabEvent::RerankOk(r),
-      Err(e) => TabEvent::RerankErr(e),
+  if let Some(events_tx) = app.events_tx.clone() {
+    tokio::spawn(async move {
+      let result = oai_rerank(port, &model_name, &query, &candidates).await;
+      let evt = match result {
+        Ok(r) => TabEvent::RerankOk(r),
+        Err(e) => TabEvent::RerankErr(e),
+      };
+      let _ = events_tx.send(Event::Tab(evt)).await;
     });
-  });
+  }
 }
 
 /// Toggle the favorite for the focused model. Always applies the
@@ -1577,6 +1625,7 @@ fn build_yank_text(app: &App, action: Action) -> Option<String> {
 
 /// Background refresher that polls the daemon for catalog + status
 /// snapshots and forwards them as `RefreshTick`s to the run loop.
+#[derive(Debug)]
 pub enum RefreshTick {
   Catalog(Value),
   Status(Value),
@@ -1602,8 +1651,7 @@ pub enum RefreshTick {
   },
 }
 
-pub fn spawn_refresher(socket: PathBuf) -> mpsc::Receiver<RefreshTick> {
-  let (tx, rx) = mpsc::channel(16);
+pub fn spawn_refresher(socket: PathBuf, tx: mpsc::Sender<Event>) {
   tokio::spawn(async move {
     let mut backoff = RECONNECT_INITIAL;
     loop {
@@ -1616,21 +1664,21 @@ pub fn spawn_refresher(socket: PathBuf) -> mpsc::Receiver<RefreshTick> {
             return;
           }
           if let Ok(body) = client.call("list_models", None).await {
-            let _ = tx.send(RefreshTick::Catalog(body)).await;
+            let _ = tx.send(Event::Refresh(RefreshTick::Catalog(body))).await;
           }
           if let Ok(body) = client.call("status", None).await {
-            let _ = tx.send(RefreshTick::Status(body)).await;
+            let _ = tx.send(Event::Refresh(RefreshTick::Status(body))).await;
           }
           if let Ok(body) = client.call("favorite_list", None).await {
-            let _ = tx.send(RefreshTick::Favorites(body)).await;
+            let _ = tx.send(Event::Refresh(RefreshTick::Favorites(body))).await;
           }
           if let Ok(body) = client.call("last_params_list", None).await {
-            let _ = tx.send(RefreshTick::LastParams(body)).await;
+            let _ = tx.send(Event::Refresh(RefreshTick::LastParams(body))).await;
           }
           tokio::time::sleep(REFRESH_INTERVAL).await;
         }
         Err(_) => {
-          let _ = tx.send(RefreshTick::Disconnected).await;
+          let _ = tx.send(Event::Refresh(RefreshTick::Disconnected)).await;
           // Exponential backoff capped at REFRESH_INTERVAL: a cold
           // daemon comes up within ~2 s; a long outage doesn't spam
           // the connect attempt at 1.3 Hz.
@@ -1640,7 +1688,6 @@ pub fn spawn_refresher(socket: PathBuf) -> mpsc::Receiver<RefreshTick> {
       }
     }
   });
-  rx
 }
 
 /// Bound on outstanding writer commands. The TUI dispatches at human
@@ -1665,7 +1712,7 @@ const WRITER_CHANNEL_CAPACITY: usize = 64;
 pub fn spawn_writer(
   socket: PathBuf,
   daemon_opts: Option<crate::daemon::DaemonOptions>,
-  feedback: Option<mpsc::Sender<RefreshTick>>,
+  feedback: Option<mpsc::Sender<Event>>,
 ) -> mpsc::Sender<WriterCmd> {
   let (tx, mut rx) = mpsc::channel::<WriterCmd>(WRITER_CHANNEL_CAPACITY);
   tokio::spawn(async move {
@@ -1685,10 +1732,10 @@ pub fn spawn_writer(
             // method label so the toast still tells the user
             // something happened.
             let _ = fb
-              .send(RefreshTick::WriterError {
+              .send(Event::Refresh(RefreshTick::WriterError {
                 method: "connect",
                 message,
-              })
+              }))
               .await;
           }
           continue;
@@ -1699,7 +1746,9 @@ pub fn spawn_writer(
         let message = format!("{e}");
         log::warn!("writer call {method} failed: {message}");
         if let Some(fb) = &feedback {
-          let _ = fb.send(RefreshTick::WriterError { method, message }).await;
+          let _ = fb
+            .send(Event::Refresh(RefreshTick::WriterError { method, message }))
+            .await;
         }
       }
     }
@@ -1795,8 +1844,55 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
   }
 }
 
-/// Fully-featured TUI run-loop. Drives the App from real crossterm
-/// events + a daemon refresher, rendering on each tick.
+/// Background thread that owns the crossterm input stream. Blocks on
+/// `event::poll(timeout)` and emits one [`Event::Input`] per real
+/// event or one [`Event::Tick`] per [`TICK_RATE`] when no input
+/// arrived. Pattern lifted from kdash so an idle TUI blocks in the
+/// kernel rather than spinning a poll loop.
+fn spawn_input_thread(tx: mpsc::Sender<Event>) {
+  use std::time::Instant;
+  std::thread::spawn(move || {
+    let mut last_tick = Instant::now();
+    loop {
+      let timeout = TICK_RATE
+        .checked_sub(last_tick.elapsed())
+        .unwrap_or(Duration::ZERO);
+      match event::poll(timeout) {
+        Ok(true) => match event::read() {
+          Ok(evt) => {
+            if tx.blocking_send(Event::Input(evt)).is_err() {
+              return;
+            }
+          }
+          Err(_) => return,
+        },
+        Ok(false) => {}
+        Err(_) => return,
+      }
+      if last_tick.elapsed() >= TICK_RATE {
+        if tx.blocking_send(Event::Tick).is_err() {
+          return;
+        }
+        last_tick = Instant::now();
+      }
+    }
+  });
+}
+
+/// Capacity for the unified TUI event channel. Sized for a worst-case
+/// burst of chat-stream tokens (one chunk per couple of ms) plus
+/// daemon refreshes plus input — 256 covers any realistic spike
+/// without forcing the chat task to await on backpressure. Progress
+/// events from the download strip use `try_send` so the firehose
+/// drops frames before this fills.
+const EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// Fully-featured TUI run-loop. Drives the App from a single mpsc
+/// funnel: a background thread pumps crossterm input + tick events,
+/// and every subsystem (daemon refresher, log poller, chat stream,
+/// embed/rerank, HF dialog, download progress) pushes into the same
+/// channel. The main loop blocks on `recv` so an idle TUI consumes
+/// no CPU; redraws only happen when an event actually changed state.
 pub async fn run(
   app: App,
   socket: PathBuf,
@@ -1836,52 +1932,35 @@ pub async fn run(
   let mut terminal = Terminal::new(backend)?;
 
   let mut app = app;
-  let mut refresh_rx = spawn_refresher(socket.clone());
-  let current_launch = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-  let mut logs_rx = spawn_logs_poller(socket.clone(), current_launch.clone());
-  // Feedback channel for writer-task failures (e.g. `start_model`
-  // rejected because `llama-server` isn't configured). The writer
-  // sends `RefreshTick::WriterError` here; the run-loop drains it
-  // alongside `refresh_rx` / `logs_rx`.
-  let (writer_feedback_tx, mut writer_feedback_rx) =
-    mpsc::channel::<RefreshTick>(WRITER_CHANNEL_CAPACITY);
-  let writer_tx = spawn_writer(socket, daemon_opts, Some(writer_feedback_tx));
+  let (events_tx, mut events_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
+  app.events_tx = Some(events_tx.clone());
 
-  loop {
-    // Mirror the focused launch id to the logs poller so the next
-    // tick fetches the right buffer. `unwrap_or_else(into_inner)`
-    // recovers from a poisoned mutex instead of crashing the TUI at
-    // 125 Hz — the data inside is a plain `Option<String>` we can
-    // safely replace regardless of who panicked previously.
+  // Background producers.
+  spawn_input_thread(events_tx.clone());
+  spawn_refresher(socket.clone(), events_tx.clone());
+  let current_launch = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+  spawn_logs_poller(socket.clone(), current_launch.clone(), events_tx.clone());
+  let writer_tx = spawn_writer(socket, daemon_opts, Some(events_tx.clone()));
+
+  // Prime the screen once before blocking on the event channel so
+  // the user sees the dashboard frame even before the first refresh
+  // tick lands.
+  terminal.draw(|f| crate::tui::render::render(f, &mut app))?;
+
+  while let Some(evt) = events_rx.recv().await {
+    // Mirror the focused launch id to the logs poller so its next
+    // tick fetches the right buffer.
     *current_launch
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) =
       app.focused_managed().map(|m| m.launch_id.clone());
 
-    terminal.draw(|f| crate::tui::render::render(f, &mut app))?;
-
-    // Drain any background ticks without blocking — keeps render
-    // latency tight (~16 ms target) regardless of daemon RTT.
-    while let Ok(tick) = refresh_rx.try_recv() {
-      apply_refresh(&mut app, tick);
+    let needs_redraw = handle_event(&mut app, evt, &writer_tx);
+    if app.should_exit {
+      break;
     }
-    while let Ok(tick) = logs_rx.try_recv() {
-      apply_refresh(&mut app, tick);
-    }
-    while let Ok(tick) = writer_feedback_rx.try_recv() {
-      apply_refresh(&mut app, tick);
-    }
-    drain_chat_stream(&mut app);
-    drain_embed_pending(&mut app);
-    drain_rerank_pending(&mut app);
-    drain_hf_dialog(&mut app);
-    drain_download_strip(&mut app);
-
-    if event::poll(POLL_INTERVAL)? {
-      let evt = event::read()?;
-      if pump_input_with_writer(&mut app, evt, Some(&writer_tx)) {
-        break;
-      }
+    if needs_redraw {
+      terminal.draw(|f| crate::tui::render::render(f, &mut app))?;
     }
   }
 
@@ -1895,6 +1974,59 @@ pub async fn run(
   execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
   terminal.show_cursor()?;
   Ok(())
+}
+
+/// Dispatch one [`Event`] into the right subsystem handler.
+/// Returns `true` when the resulting state change warrants a fresh
+/// redraw — `false` only for pure ticks that didn't service any
+/// debounced work. Centralising the decision here keeps the run-loop
+/// body the kdash-style three liner (block on recv → dispatch → draw
+/// if dirty) and gives a single place to flip the dirty-flag policy
+/// per variant if a future tab needs to skip redraws cheaply.
+fn handle_event(app: &mut App, evt: Event, writer_tx: &mpsc::Sender<WriterCmd>) -> bool {
+  match evt {
+    Event::Input(term_evt) => {
+      pump_input_with_writer(app, term_evt, Some(writer_tx));
+      true
+    }
+    Event::Tick => {
+      // The HF dialog's debounced live search fires off the tick
+      // rather than carrying its own timer task — the unified loop
+      // wakes at TICK_RATE so the check is essentially free.
+      let before_in_flight = app
+        .hf_dialog
+        .as_ref()
+        .map(|s| s.search_in_flight)
+        .unwrap_or(false);
+      service_hf_dialog_debounce(app);
+      let after_in_flight = app
+        .hf_dialog
+        .as_ref()
+        .map(|s| s.search_in_flight)
+        .unwrap_or(false);
+      before_in_flight != after_in_flight
+    }
+    Event::Refresh(tick) => {
+      apply_refresh(app, tick);
+      true
+    }
+    Event::ChatStream(msg) => {
+      apply_chat_stream(app, msg);
+      true
+    }
+    Event::Tab(tab_evt) => {
+      apply_tab_event(app, tab_evt);
+      true
+    }
+    Event::HfDialog(hf_evt) => {
+      apply_hf_dialog_event(app, hf_evt);
+      true
+    }
+    Event::Download(dl_evt) => {
+      apply_download_event(app, dl_evt);
+      true
+    }
+  }
 }
 
 fn apply_refresh(app: &mut App, tick: RefreshTick) {
@@ -1964,8 +2096,8 @@ const LOGS_POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub fn spawn_logs_poller(
   socket: PathBuf,
   current: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-) -> mpsc::Receiver<RefreshTick> {
-  let (tx, rx) = mpsc::channel(8);
+  tx: mpsc::Sender<Event>,
+) {
   tokio::spawn(async move {
     // Exponential backoff mirrors `spawn_refresher` so a daemon
     // outage doesn't produce a 2 Hz connect-attempt rate. Reset on
@@ -1996,7 +2128,9 @@ pub fn spawn_logs_poller(
                     .collect()
                 })
                 .unwrap_or_default();
-              let _ = tx.send(RefreshTick::Logs { launch_id, lines }).await;
+              let _ = tx
+                .send(Event::Refresh(RefreshTick::Logs { launch_id, lines }))
+                .await;
             }
           }
           Err(_) => {
@@ -2016,7 +2150,6 @@ pub fn spawn_logs_poller(
       }
     }
   });
-  rx
 }
 
 /// Public escape-hatch for tests + the smoke test that drive the
@@ -2046,120 +2179,27 @@ pub async fn launch(
   run(app, socket.to_path_buf(), daemon_opts).await
 }
 
-/// Drain any pending [`ChatStreamMsg`] frames into `app.chat`.
-/// Returns true when the stream finished or errored this call so
-/// the caller can release the receiver slot.
-pub fn drain_chat_stream(app: &mut App) -> bool {
-  // First collect frames without holding a long borrow over the
-  // chat state, then apply them. Receiver lives on `app.chat`, so
-  // splitting the borrow is the easiest way to keep the borrow
-  // checker happy.
-  let mut frames: Vec<ChatStreamMsg> = Vec::new();
-  let mut take_rx = false;
-  if let Some(rx) = app.chat.stream_rx.as_mut() {
-    loop {
-      match rx.try_recv() {
-        Ok(msg) => {
-          let terminal = matches!(
-            msg,
-            ChatStreamMsg::Finished { .. } | ChatStreamMsg::Error(_)
-          );
-          frames.push(msg);
-          if terminal {
-            take_rx = true;
-            break;
-          }
-        }
-        Err(mpsc::error::TryRecvError::Empty) => break,
-        Err(mpsc::error::TryRecvError::Disconnected) => {
-          take_rx = true;
-          if app.chat.streaming {
-            // Sender side dropped without a terminal frame — treat
-            // as a clean finish so the UI doesn't appear stuck.
-            frames.push(ChatStreamMsg::Finished {
-              finish_reason: None,
-            });
-          }
-          break;
-        }
-      }
-    }
-  }
-  let mut finished = false;
-  for msg in frames {
-    match msg {
-      ChatStreamMsg::Delta(s) => app.chat.append_delta(&s),
-      ChatStreamMsg::Finished { finish_reason } => {
-        app.chat.mark_finished(finish_reason);
-        finished = true;
-      }
-      ChatStreamMsg::Error(e) => {
-        app.chat.mark_error(e);
-        finished = true;
-      }
-    }
-  }
-  if take_rx {
-    app.chat.stream_rx = None;
-  }
-  finished
-}
-
-/// Outcome of one tab-event drain step.
-#[derive(Debug, Clone)]
-enum DrainOutcome<E> {
-  /// No event ready; receiver stays.
-  Empty,
-  /// Event matched; receiver should be dropped.
-  Event(E),
-  /// Receiver disconnected; receiver should be dropped, busy flag reset.
-  Disconnected,
-}
-
-/// Drain one tab's pending receiver. Returns the outcome so the
-/// caller can update both the receiver slot and any per-tab state
-/// (busy flag, result, error) without two-closure-with-shared-app
-/// borrow checker conflicts.
-fn drain_tab_pending(
-  pending: &mut Option<mpsc::UnboundedReceiver<TabEvent>>,
-) -> DrainOutcome<TabEvent> {
-  let Some(rx) = pending.as_mut() else {
-    return DrainOutcome::Empty;
-  };
-  match rx.try_recv() {
-    Ok(evt) => {
-      *pending = None;
-      DrainOutcome::Event(evt)
-    }
-    Err(mpsc::error::TryRecvError::Empty) => DrainOutcome::Empty,
-    Err(mpsc::error::TryRecvError::Disconnected) => {
-      *pending = None;
-      DrainOutcome::Disconnected
-    }
+/// Apply one [`ChatStreamMsg`] to `app.chat`. Replaces the prior
+/// `drain_chat_stream(app)` polling helper: the unified `Event` loop
+/// hands each chunk in one at a time, so the receiver lives nowhere
+/// on app state.
+pub fn apply_chat_stream(app: &mut App, msg: ChatStreamMsg) {
+  match msg {
+    ChatStreamMsg::Delta(s) => app.chat.append_delta(&s),
+    ChatStreamMsg::Finished { finish_reason } => app.chat.mark_finished(finish_reason),
+    ChatStreamMsg::Error(e) => app.chat.mark_error(e),
   }
 }
 
-/// Drain the embed pending receiver. Records success or surfaces
-/// the error message on the embed tab state.
-pub fn drain_embed_pending(app: &mut App) {
-  match drain_tab_pending(&mut app.embed.pending) {
-    DrainOutcome::Event(TabEvent::EmbedOk(result)) => app.embed.record(result),
-    DrainOutcome::Event(TabEvent::EmbedErr(msg)) => app.embed.record_error(msg),
-    DrainOutcome::Event(_) => {}
-    DrainOutcome::Disconnected => app.embed.busy = false,
-    DrainOutcome::Empty => {}
-  }
-}
-
-/// Drain the rerank pending receiver. Mirrors
-/// [`drain_embed_pending`].
-pub fn drain_rerank_pending(app: &mut App) {
-  match drain_tab_pending(&mut app.rerank.pending) {
-    DrainOutcome::Event(TabEvent::RerankOk(ranked)) => app.rerank.record(ranked),
-    DrainOutcome::Event(TabEvent::RerankErr(msg)) => app.rerank.record_error(msg),
-    DrainOutcome::Event(_) => {}
-    DrainOutcome::Disconnected => app.rerank.busy = false,
-    DrainOutcome::Empty => {}
+/// Apply one [`TabEvent`] (embed or rerank result) to the right pane.
+/// Replaces `drain_embed_pending` / `drain_rerank_pending` — the
+/// unified loop hands one event in at a time.
+pub fn apply_tab_event(app: &mut App, evt: TabEvent) {
+  match evt {
+    TabEvent::EmbedOk(result) => app.embed.record(result),
+    TabEvent::EmbedErr(msg) => app.embed.record_error(msg),
+    TabEvent::RerankOk(ranked) => app.rerank.record(ranked),
+    TabEvent::RerankErr(msg) => app.rerank.record_error(msg),
   }
 }
 
@@ -2199,6 +2239,10 @@ enum HfDialogOutcome {
 fn handle_hf_dialog_input(app: &mut App, key: KeyEvent, _writer: Option<&mpsc::Sender<WriterCmd>>) {
   use crate::tui::hf_dialog::HfStage;
   use crate::tui::input_field::InputOutcome;
+  // Cloned out before the `&mut app.hf_dialog` borrow lands so the spawn
+  // helpers can keep their `Option<Sender>` signature without forcing
+  // every caller to thread the tx explicitly.
+  let events_tx = app.events_tx.clone();
   let outcome = {
     let Some(state) = app.hf_dialog.as_mut() else {
       return;
@@ -2209,7 +2253,7 @@ fn handle_hf_dialog_input(app: &mut App, key: KeyEvent, _writer: Option<&mpsc::S
           InputOutcome::Handled => HfDialogOutcome::None,
           InputOutcome::Submit => match state.submit_search() {
             Some(repo_id) => {
-              spawn_hf_list_repo_files(state, repo_id);
+              spawn_hf_list_repo_files(state, repo_id, events_tx.clone());
               HfDialogOutcome::None
             }
             None => HfDialogOutcome::Toast("type a query, paste a slug, or pick a row"),
@@ -2229,7 +2273,7 @@ fn handle_hf_dialog_input(app: &mut App, key: KeyEvent, _writer: Option<&mpsc::S
             }
             KeyCode::Enter => match state.submit_search() {
               Some(repo_id) => {
-                spawn_hf_list_repo_files(state, repo_id);
+                spawn_hf_list_repo_files(state, repo_id, events_tx.clone());
                 HfDialogOutcome::None
               }
               None => HfDialogOutcome::Toast("type a query, paste a slug, or pick a row"),
@@ -2240,13 +2284,13 @@ fn handle_hf_dialog_input(app: &mut App, key: KeyEvent, _writer: Option<&mpsc::S
             }
             KeyCode::Char('n') => {
               if let Some(cursor) = state.advance_page() {
-                spawn_hf_search(state, cursor);
+                spawn_hf_search(state, cursor, events_tx.clone());
               }
               HfDialogOutcome::None
             }
             KeyCode::Char('p') => {
               if let Some(cursor) = state.retreat_page() {
-                spawn_hf_search(state, cursor);
+                spawn_hf_search(state, cursor, events_tx.clone());
               }
               HfDialogOutcome::None
             }
@@ -2318,13 +2362,12 @@ fn enqueue_hf_pull(app: &mut App, repo: String, row: crate::tui::hf_dialog::Pick
   // replaces the earlier "<200 ms elapsed" heuristic that conflated
   // a fast network with a real cache hit.
   if let Some(cached_path) = probe_cached_pull(&repo, &row.all_filenames()) {
-    let _ = app
-      .download_strip
-      .event_tx
-      .send(DownloadEvent::AlreadyCached {
+    if let Some(tx) = &app.events_tx {
+      let _ = tx.try_send(Event::Download(DownloadEvent::AlreadyCached {
         repo_id: repo.clone(),
         cached_path,
-      });
+      }));
+    }
     return;
   }
   let pull = QueuedPull {
@@ -2339,12 +2382,10 @@ fn enqueue_hf_pull(app: &mut App, repo: String, row: crate::tui::hf_dialog::Pick
   if app.download_strip.active.is_none() {
     if let Some(promoted) = app.download_strip.promote_next() {
       app.download_strip.install_active(&promoted);
-      let abort = spawn_download_task(
-        promoted,
-        app.options.offline,
-        app.download_strip.event_tx.clone(),
-      );
-      app.download_strip.active_abort = Some(abort);
+      if let Some(tx) = app.events_tx.clone() {
+        let abort = spawn_download_task(promoted, app.options.offline, tx);
+        app.download_strip.active_abort = Some(abort);
+      }
     }
   }
 }
@@ -2403,11 +2444,17 @@ fn probe_cached_pull(repo_id: &str, filenames: &[String]) -> Option<std::path::P
 fn spawn_download_task(
   pull: crate::tui::download_strip::QueuedPull,
   offline: bool,
-  tx: tokio::sync::mpsc::UnboundedSender<crate::tui::download_strip::DownloadEvent>,
+  tx: mpsc::Sender<Event>,
 ) -> tokio::task::AbortHandle {
   use crate::init::download::{DownloadOptions, RepoSpec};
   use crate::init::fetch;
   let handle = tokio::spawn(async move {
+    let push_dl = |evt: crate::tui::download_strip::DownloadEvent| {
+      let tx = tx.clone();
+      async move {
+        let _ = tx.send(Event::Download(evt)).await;
+      }
+    };
     let spec = match RepoSpec::parse(&format!(
       "{}:{}",
       pull.repo_id,
@@ -2415,10 +2462,11 @@ fn spawn_download_task(
     )) {
       Ok(s) => s,
       Err(e) => {
-        let _ = tx.send(crate::tui::download_strip::DownloadEvent::Error {
+        push_dl(crate::tui::download_strip::DownloadEvent::Error {
           repo_id: pull.repo_id.clone(),
           message: e.to_string(),
-        });
+        })
+        .await;
         return;
       }
     };
@@ -2442,15 +2490,17 @@ fn spawn_download_task(
     };
     match crate::init::download::download_repo(&spec, &fetch_client, &options).await {
       Ok(_) => {
-        let _ = tx.send(crate::tui::download_strip::DownloadEvent::Finished {
+        push_dl(crate::tui::download_strip::DownloadEvent::Finished {
           repo_id: pull.repo_id.clone(),
-        });
+        })
+        .await;
       }
       Err(e) => {
-        let _ = tx.send(crate::tui::download_strip::DownloadEvent::Error {
+        push_dl(crate::tui::download_strip::DownloadEvent::Error {
           repo_id: pull.repo_id.clone(),
           message: e.to_string(),
-        });
+        })
+        .await;
       }
     }
   });
@@ -2469,9 +2519,21 @@ fn spawn_download_task(
 /// per-file `Finished` callback — `bytes_done.saturating_add` is
 /// clamped to `bytes_total` so the strip can't overshoot 100%.
 struct StripProgress {
-  tx: tokio::sync::mpsc::UnboundedSender<crate::tui::download_strip::DownloadEvent>,
+  tx: mpsc::Sender<Event>,
   repo_id: String,
   inner: std::sync::Mutex<StripProgressInner>,
+}
+
+impl StripProgress {
+  /// Push a `DownloadEvent` onto the unified TUI channel from a sync
+  /// trait-method context. Bounded `try_send` so a wedged main loop
+  /// drops progress frames rather than blocking the download path —
+  /// progress is firehose, the next chunk reflects the same state.
+  /// `Finished` / `Error` / `Started` are infrequent enough that
+  /// dropping them is acceptable under the same logic.
+  fn push(&self, evt: crate::tui::download_strip::DownloadEvent) {
+    let _ = self.tx.try_send(Event::Download(evt));
+  }
 }
 
 #[derive(Default)]
@@ -2494,12 +2556,12 @@ impl crate::init::download::DownloadProgress for StripProgress {
     inner.file_sizes = files.iter().cloned().collect();
     inner.bytes_total = files.iter().map(|(_, n)| *n).sum();
     inner.bytes_done = 0;
-    let _ = self
-      .tx
-      .send(crate::tui::download_strip::DownloadEvent::Started {
-        repo_id: self.repo_id.clone(),
-        bytes_total: inner.bytes_total,
-      });
+    let bytes_total = inner.bytes_total;
+    drop(inner);
+    self.push(crate::tui::download_strip::DownloadEvent::Started {
+      repo_id: self.repo_id.clone(),
+      bytes_total,
+    });
   }
 
   fn on_file_started(&self, _filename: &str, _size: u64, _index: usize, _total: usize) {
@@ -2524,13 +2586,11 @@ impl crate::init::download::DownloadProgress for StripProgress {
     let bytes_done = inner.bytes_done;
     let bytes_total = inner.bytes_total;
     drop(inner);
-    let _ = self
-      .tx
-      .send(crate::tui::download_strip::DownloadEvent::Progress {
-        repo_id: self.repo_id.clone(),
-        bytes_done,
-        bytes_total,
-      });
+    self.push(crate::tui::download_strip::DownloadEvent::Progress {
+      repo_id: self.repo_id.clone(),
+      bytes_done,
+      bytes_total,
+    });
   }
 
   fn on_bytes_progress(&self, _filename: &str, bytes_in_file: u64) {
@@ -2547,43 +2607,57 @@ impl crate::init::download::DownloadProgress for StripProgress {
     let bytes_done = inner.bytes_done;
     let bytes_total = inner.bytes_total;
     drop(inner);
-    let _ = self
-      .tx
-      .send(crate::tui::download_strip::DownloadEvent::Progress {
-        repo_id: self.repo_id.clone(),
-        bytes_done,
-        bytes_total,
-      });
+    self.push(crate::tui::download_strip::DownloadEvent::Progress {
+      repo_id: self.repo_id.clone(),
+      bytes_done,
+      bytes_total,
+    });
   }
 }
 
-/// Spawn a background `init::hf_api::search` task whose result is
-/// shipped back over the dialog's mpsc. Tagged with the dialog's
-/// current `query_seq` so the drain can discard stale responses.
-fn spawn_hf_search(state: &mut crate::tui::hf_dialog::HfDialogState, cursor: Option<String>) {
+/// Spawn a background `init::hf_api::search` task whose result lands
+/// on the unified TUI event channel as
+/// `Event::HfDialog(HfDialogEvent::Search*)`. Tagged with the dialog's
+/// current `query_seq` so the apply step can discard stale responses.
+/// `events_tx` is `None` only in tests that drive the dialog without
+/// a tokio runtime — the dispatch is then a no-op.
+fn spawn_hf_search(
+  state: &mut crate::tui::hf_dialog::HfDialogState,
+  cursor: Option<String>,
+  events_tx: Option<mpsc::Sender<Event>>,
+) {
   use crate::init::hf_api;
-  let tx = state.event_tx.clone();
   let query = state.input.buffer().to_string();
   let sort = state.sort;
   let seq = state.query_seq;
   let offline = state.offline;
   state.mark_dispatched();
+  let Some(tx) = events_tx else {
+    return;
+  };
   tokio::spawn(async move {
     let fetch_client = build_tui_fetch_client(offline);
     let evt = match hf_api::search(&fetch_client, &query, sort, cursor.as_deref()).await {
       Ok(page) => crate::tui::hf_dialog::HfDialogEvent::SearchResults { seq, page },
       Err(e) => crate::tui::hf_dialog::HfDialogEvent::SearchFailed { seq, error: e },
     };
-    let _ = tx.send(evt);
+    let _ = tx.send(Event::HfDialog(evt)).await;
   });
 }
 
-/// Spawn a background `list_repo_files` task whose result is
-/// shipped back over the dialog's mpsc.
-fn spawn_hf_list_repo_files(state: &mut crate::tui::hf_dialog::HfDialogState, repo_id: String) {
+/// Spawn a background `list_repo_files` task whose result lands on
+/// the unified TUI event channel as
+/// `Event::HfDialog(HfDialogEvent::RepoFiles*)`.
+fn spawn_hf_list_repo_files(
+  state: &mut crate::tui::hf_dialog::HfDialogState,
+  repo_id: String,
+  events_tx: Option<mpsc::Sender<Event>>,
+) {
   use crate::init::hf_api;
-  let tx = state.event_tx.clone();
   let offline = state.offline;
+  let Some(tx) = events_tx else {
+    return;
+  };
   tokio::spawn(async move {
     let fetch_client = build_tui_fetch_client(offline);
     let evt = match hf_api::list_repo_files(&fetch_client, &repo_id).await {
@@ -2596,7 +2670,7 @@ fn spawn_hf_list_repo_files(state: &mut crate::tui::hf_dialog::HfDialogState, re
         error,
       },
     };
-    let _ = tx.send(evt);
+    let _ = tx.send(Event::HfDialog(evt)).await;
   });
 }
 
@@ -2614,124 +2688,113 @@ fn build_tui_fetch_client(offline: bool) -> crate::init::fetch::FetchClient {
     .unwrap_or_else(|_| FetchClient::offline())
 }
 
-/// Drain pending DownloadEvents into the strip. Promotes the next
+/// Apply one [`DownloadEvent`] to the strip. Promotes the next
 /// queued pull when the active one finishes / errors / hits the
 /// cache; surfaces a toast when a cache-hit short-circuit lands.
-pub fn drain_download_strip(app: &mut App) {
+pub fn apply_download_event(app: &mut App, evt: crate::tui::download_strip::DownloadEvent) {
   use crate::tui::download_strip::DownloadEvent;
-  loop {
-    let evt = app.download_strip.event_rx.try_recv();
-    let evt = match evt {
-      Ok(e) => e,
-      Err(_) => break,
-    };
-    let next_pull = match evt {
-      DownloadEvent::Started {
-        repo_id,
-        bytes_total,
-      } => {
-        app.download_strip.apply_started(&repo_id, bytes_total);
-        None
+  let next_pull = match evt {
+    DownloadEvent::Started {
+      repo_id,
+      bytes_total,
+    } => {
+      app.download_strip.apply_started(&repo_id, bytes_total);
+      None
+    }
+    DownloadEvent::Progress {
+      repo_id,
+      bytes_done,
+      bytes_total,
+    } => {
+      app
+        .download_strip
+        .apply_progress(&repo_id, bytes_done, bytes_total);
+      None
+    }
+    DownloadEvent::Finished { repo_id } => {
+      let label = app
+        .download_strip
+        .active
+        .as_ref()
+        .map(|a| a.friendly_name.clone());
+      let next = app.download_strip.apply_finished(&repo_id);
+      if let Some(name) = label {
+        app.show_toast(format!("downloaded {name}"));
       }
-      DownloadEvent::Progress {
-        repo_id,
-        bytes_done,
-        bytes_total,
-      } => {
-        app
-          .download_strip
-          .apply_progress(&repo_id, bytes_done, bytes_total);
-        None
-      }
-      DownloadEvent::Finished { repo_id } => {
-        let label = app
-          .download_strip
-          .active
-          .as_ref()
-          .map(|a| a.friendly_name.clone());
-        let next = app.download_strip.apply_finished(&repo_id);
-        if let Some(name) = label {
-          app.show_toast(format!("downloaded {name}"));
-        }
-        next
-      }
-      DownloadEvent::Error { repo_id, message } => {
-        app.download_strip.apply_error(&repo_id, message)
-      }
-      DownloadEvent::AlreadyCached {
-        repo_id,
-        cached_path,
-      } => {
-        let next = app
-          .download_strip
-          .apply_already_cached(&repo_id, cached_path);
-        if let Some(path) = app.download_strip.pending_cache_hit.take() {
-          app.show_toast(format!(
-            "already downloaded — {}",
-            path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
-          ));
-          // Select the matching catalog row (path equality) so the
-          // user lands on it. Best-effort — `models` may not yet
-          // reflect the just-cached file until the next refresh.
-          if let Some(idx) = app.models.iter().position(|m| m.path == path) {
-            // Find the row index in rendered_rows that matches this
-            // model path so the cursor visibly snaps.
-            let target = app.models[idx].path.clone();
-            let rows = app.rendered_rows();
-            if let Some(row_idx) = rows
-              .iter()
-              .position(|r| r.path().map(|p| p == target).unwrap_or(false))
-            {
-              app.list_cursor = row_idx;
-            }
+      next
+    }
+    DownloadEvent::Error { repo_id, message } => app.download_strip.apply_error(&repo_id, message),
+    DownloadEvent::AlreadyCached {
+      repo_id,
+      cached_path,
+    } => {
+      let next = app
+        .download_strip
+        .apply_already_cached(&repo_id, cached_path);
+      if let Some(path) = app.download_strip.pending_cache_hit.take() {
+        app.show_toast(format!(
+          "already downloaded — {}",
+          path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+        ));
+        // Select the matching catalog row (path equality) so the
+        // user lands on it. Best-effort — `models` may not yet
+        // reflect the just-cached file until the next refresh.
+        if let Some(idx) = app.models.iter().position(|m| m.path == path) {
+          // Find the row index in rendered_rows that matches this
+          // model path so the cursor visibly snaps.
+          let target = app.models[idx].path.clone();
+          let rows = app.rendered_rows();
+          if let Some(row_idx) = rows
+            .iter()
+            .position(|r| r.path().map(|p| p == target).unwrap_or(false))
+          {
+            app.list_cursor = row_idx;
           }
         }
-        next
       }
-    };
-    if let Some(pull) = next_pull {
-      app.download_strip.install_active(&pull);
-      let abort = spawn_download_task(
-        pull,
-        app.options.offline,
-        app.download_strip.event_tx.clone(),
-      );
+      next
+    }
+  };
+  if let Some(pull) = next_pull {
+    app.download_strip.install_active(&pull);
+    if let Some(tx) = app.events_tx.clone() {
+      let abort = spawn_download_task(pull, app.options.offline, tx);
       app.download_strip.active_abort = Some(abort);
     }
   }
 }
 
-/// Drain pending HF dialog events. Applies search / repo-listing
-/// results to the dialog state. Idempotent — safe to call every run-
-/// loop tick.
-pub fn drain_hf_dialog(app: &mut App) {
+/// Apply one [`HfDialogEvent`] to the dialog state. Replaces the
+/// prior `drain_hf_dialog` polling helper — the unified loop hands
+/// one event in at a time.
+pub fn apply_hf_dialog_event(app: &mut App, evt: crate::tui::hf_dialog::HfDialogEvent) {
+  use crate::tui::hf_dialog::HfDialogEvent;
   let Some(state) = app.hf_dialog.as_mut() else {
     return;
   };
-  use crate::tui::hf_dialog::HfDialogEvent;
-  loop {
-    match state.event_rx.try_recv() {
-      Ok(HfDialogEvent::SearchResults { seq, page }) => {
-        state.apply_search_results(seq, page);
-      }
-      Ok(HfDialogEvent::SearchFailed { seq, error }) => {
-        state.apply_search_failed(seq, error);
-      }
-      Ok(HfDialogEvent::RepoFiles { repo_id, files }) => {
-        state.apply_repo_files(&repo_id, files);
-      }
-      Ok(HfDialogEvent::RepoFilesFailed { repo_id, error }) => {
-        state.apply_repo_files_failed(&repo_id, &error);
-      }
-      Err(_) => break,
+  match evt {
+    HfDialogEvent::SearchResults { seq, page } => state.apply_search_results(seq, page),
+    HfDialogEvent::SearchFailed { seq, error } => state.apply_search_failed(seq, error),
+    HfDialogEvent::RepoFiles { repo_id, files } => state.apply_repo_files(&repo_id, files),
+    HfDialogEvent::RepoFilesFailed { repo_id, error } => {
+      state.apply_repo_files_failed(&repo_id, &error)
     }
   }
-  // Debounced live search (R107): fire a dispatch once the debounce
-  // window elapses since the last keystroke. Honours the `query_seq`
-  // monotonicity so a stale response can still be dropped.
+}
+
+/// Service the HF dialog's debounced live-search dispatch. The
+/// unified loop calls this on every tick — once the debounce window
+/// elapses since the last keystroke, it fires a fresh search. The
+/// `query_seq` monotonicity inside the dialog state still drops
+/// stale responses if the user keeps typing.
+pub fn service_hf_dialog_debounce(app: &mut App) {
+  let events_tx = app.events_tx.clone();
+  let Some(state) = app.hf_dialog.as_mut() else {
+    return;
+  };
   if state.search_due(std::time::Instant::now()) {
     let cursor = state.current_cursor.clone();
-    spawn_hf_search(state, cursor);
+    spawn_hf_search(state, cursor, events_tx);
   }
 }
 
@@ -2740,8 +2803,8 @@ mod tests {
   use super::*;
   use crossterm::event::{KeyEvent, KeyModifiers};
 
-  fn key(code: KeyCode, mods: KeyModifiers) -> Event {
-    Event::Key(KeyEvent::new(code, mods))
+  fn key(code: KeyCode, mods: KeyModifiers) -> TermEvent {
+    TermEvent::Key(KeyEvent::new(code, mods))
   }
 
   #[test]
@@ -3341,7 +3404,7 @@ mod tests {
       display_label: None,
     }];
     app.list_cursor = 2;
-    let evt = Event::Mouse(MouseEvent {
+    let evt = TermEvent::Mouse(MouseEvent {
       kind: MouseEventKind::ScrollDown,
       column: 0,
       row: 0,

@@ -15,9 +15,23 @@ use llamastash::config::loader::PortRange;
 use llamastash::daemon::{run_foreground, DaemonOptions};
 use llamastash::gguf::test_fixtures::build_minimal_gguf;
 use llamastash::ipc::{client::ClientError, Client};
+use llamastash::tui::events::Event;
 use llamastash::tui::oai_client::{embed, rerank, spawn_chat_stream, ChatStreamMsg};
 use serde_json::json;
+use tokio::sync::mpsc;
 use tokio::time::timeout;
+
+/// Spawn the chat stream against a fresh `mpsc::Sender<Event>` and
+/// return the receiver side. The integration tests below pre-date the
+/// kdash-style unified event channel and used to get back a
+/// `Receiver<ChatStreamMsg>` directly; this helper bridges them onto
+/// the new `Event::ChatStream(...)` envelope without rewriting every
+/// assertion.
+fn spawn_chat_stream_for_test(port: u16, model: &str, prompt: &str) -> mpsc::Receiver<Event> {
+  let (tx, rx) = mpsc::channel::<Event>(64);
+  spawn_chat_stream(port, model.to_string(), prompt.to_string(), tx);
+  rx
+}
 
 fn fake_binary() -> PathBuf {
   PathBuf::from(env!("CARGO_BIN_EXE_fake_llama_server"))
@@ -128,12 +142,12 @@ async fn drive_to_ready_port() -> (u16, tokio::task::JoinHandle<()>, PathBuf) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_stream_drains_deltas_and_signals_finished() {
   let (port, _daemon, _socket) = drive_to_ready_port().await;
-  let mut rx = spawn_chat_stream(port, "m".into(), "hello?".into());
+  let mut rx = spawn_chat_stream_for_test(port, "m", "hello?");
 
   let mut collected = String::new();
   let mut finished = false;
   let deadline = Duration::from_secs(3);
-  while let Ok(Some(msg)) = timeout(deadline, rx.recv()).await {
+  while let Ok(Some(Event::ChatStream(msg))) = timeout(deadline, rx.recv()).await {
     match msg {
       ChatStreamMsg::Delta(s) => collected.push_str(&s),
       ChatStreamMsg::Finished { .. } => {
@@ -164,15 +178,14 @@ async fn chat_stream_surfaces_http_4xx_as_error_message() {
   let (port, _daemon, _socket) = drive_to_ready_port().await;
   // The chat tab posts a JSON body containing the user's prompt; the
   // fake server treats the marker string as a request to return 400.
-  let mut rx = spawn_chat_stream(
-    port,
-    "m".to_string(),
-    "__TEST_INJECT_FAIL_400__".to_string(),
-  );
-  let msg = timeout(Duration::from_secs(2), rx.recv())
+  let mut rx = spawn_chat_stream_for_test(port, "m", "__TEST_INJECT_FAIL_400__");
+  let evt = timeout(Duration::from_secs(2), rx.recv())
     .await
     .expect("must receive an error within 2s")
     .expect("stream must yield at least one message");
+  let Event::ChatStream(msg) = evt else {
+    panic!("expected ChatStream event, got {evt:?}")
+  };
   match msg {
     ChatStreamMsg::Error(body) => {
       assert!(
@@ -187,14 +200,10 @@ async fn chat_stream_surfaces_http_4xx_as_error_message() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_stream_skips_malformed_sse_frame_and_emits_delta() {
   let (port, _daemon, _socket) = drive_to_ready_port().await;
-  let mut rx = spawn_chat_stream(
-    port,
-    "m".to_string(),
-    "__TEST_INJECT_MALFORMED_SSE__".to_string(),
-  );
+  let mut rx = spawn_chat_stream_for_test(port, "m", "__TEST_INJECT_MALFORMED_SSE__");
   let mut saw_delta = false;
   let mut saw_finished = false;
-  while let Some(msg) = timeout(Duration::from_secs(2), rx.recv())
+  while let Some(Event::ChatStream(msg)) = timeout(Duration::from_secs(2), rx.recv())
     .await
     .expect("timely")
   {

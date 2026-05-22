@@ -48,15 +48,21 @@ pub enum ChatStreamMsg {
 
 /// Spawn a tokio task that streams an OpenAI-compatible chat
 /// completion from `http://127.0.0.1:<port>/v1/chat/completions`
-/// against the supplied prompt. Forwards each delta over the
-/// returned channel; the renderer drains it without blocking.
+/// against the supplied prompt. Forwards each delta to the supplied
+/// unified-event channel wrapped as [`crate::tui::events::Event::ChatStream`]
+/// so the main loop wakes on every chunk and renders only when state
+/// actually changes.
 pub fn spawn_chat_stream(
   port: u16,
   model: String,
   prompt: String,
-) -> mpsc::Receiver<ChatStreamMsg> {
-  let (tx, rx) = mpsc::channel::<ChatStreamMsg>(32);
+  events_tx: mpsc::Sender<crate::tui::events::Event>,
+) {
   tokio::spawn(async move {
+    let send = |msg: ChatStreamMsg| {
+      let tx = events_tx.clone();
+      async move { tx.send(crate::tui::events::Event::ChatStream(msg)).await }
+    };
     let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
     let body = json!({
       "model": model,
@@ -67,16 +73,14 @@ pub fn spawn_chat_stream(
     let resp = match client.post(&url).json(&body).send().await {
       Ok(r) => r,
       Err(e) => {
-        let _ = tx.send(ChatStreamMsg::Error(format!("connect: {e}"))).await;
+        let _ = send(ChatStreamMsg::Error(format!("connect: {e}"))).await;
         return;
       }
     };
     if !resp.status().is_success() {
       let code = resp.status().as_u16();
       let err_body = resp.text().await.unwrap_or_default();
-      let _ = tx
-        .send(ChatStreamMsg::Error(format!("HTTP {code}: {err_body}")))
-        .await;
+      let _ = send(ChatStreamMsg::Error(format!("HTTP {code}: {err_body}"))).await;
       return;
     }
     let mut stream = resp.bytes_stream();
@@ -87,7 +91,7 @@ pub fn spawn_chat_stream(
       let bytes = match next_chunk {
         Ok(b) => b,
         Err(e) => {
-          let _ = tx.send(ChatStreamMsg::Error(format!("stream: {e}"))).await;
+          let _ = send(ChatStreamMsg::Error(format!("stream: {e}"))).await;
           return;
         }
       };
@@ -102,11 +106,10 @@ pub fn spawn_chat_stream(
             None => continue,
           };
           if payload == "[DONE]" {
-            let _ = tx
-              .send(ChatStreamMsg::Finished {
-                finish_reason: finish_reason.clone(),
-              })
-              .await;
+            let _ = send(ChatStreamMsg::Finished {
+              finish_reason: finish_reason.clone(),
+            })
+            .await;
             return;
           }
           let parsed: Result<ChatChunk, _> = serde_json::from_str(payload);
@@ -120,16 +123,15 @@ pub fn spawn_chat_stream(
             }
             if let Some(content) = choice.delta.content {
               if !content.is_empty() {
-                let _ = tx.send(ChatStreamMsg::Delta(content)).await;
+                let _ = send(ChatStreamMsg::Delta(content)).await;
               }
             }
           }
         }
       }
     }
-    let _ = tx.send(ChatStreamMsg::Finished { finish_reason }).await;
+    let _ = send(ChatStreamMsg::Finished { finish_reason }).await;
   });
-  rx
 }
 
 #[derive(Deserialize)]

@@ -4,8 +4,9 @@
 //! transitions are pure functions so the unit tests can exercise them
 //! without a tokio runtime; the async dispatch shim that fires
 //! `init::hf_api::search` / `list_repo_files` lives in `events.rs` and
-//! ships results back via the `mpsc::UnboundedSender<HfDialogEvent>`
-//! the dialog state owns.
+//! ships results back as `Event::HfDialog(HfDialogEvent)` on the
+//! unified TUI event channel — `events.rs` then dispatches into
+//! `apply_hf_dialog_event` / `state.apply_*`.
 //!
 //! Search is debounced (300 ms after the last keystroke). Each
 //! dispatch is tagged with the dialog's monotonic `query_seq`; the
@@ -20,7 +21,6 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
-use tokio::sync::mpsc;
 
 use crate::discovery::split_gguf::parse_shard_name;
 use crate::init::download::RepoSpec;
@@ -306,10 +306,6 @@ pub struct HfDialogState {
   /// File picker's per-row fit indicator. Refreshed at dialog-open
   /// time from `App::host_metrics` + the bundled benchmark snapshot.
   pub hardware_fit_ctx: HardwareFitContext,
-  /// Drain endpoint for background tasks. Created on `open`.
-  pub event_rx: mpsc::UnboundedReceiver<HfDialogEvent>,
-  /// Clonable sender background tasks use to ship results back.
-  pub event_tx: mpsc::UnboundedSender<HfDialogEvent>,
 }
 
 /// Debounce window — once this elapses after the last keystroke, the
@@ -353,7 +349,6 @@ impl HardwareFitContext {
 impl HfDialogState {
   /// Construct a fresh dialog in the Search stage.
   pub fn open(offline: bool, hardware_fit_ctx: HardwareFitContext) -> Self {
-    let (tx, rx) = mpsc::unbounded_channel();
     let mut input = InputField::new();
     input.enter_edit();
     Self {
@@ -378,8 +373,6 @@ impl HfDialogState {
       confirm_row: None,
       offline,
       hardware_fit_ctx,
-      event_rx: rx,
-      event_tx: tx,
     }
   }
 
