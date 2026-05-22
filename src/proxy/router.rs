@@ -289,27 +289,6 @@ where
   Ok(json_response(status, bytes))
 }
 
-/// Build the 503 `launch_failed` envelope used by Unit 4's
-/// fallback path when no Ready model is available. The
-/// `running: []` field is always present (R155); the message
-/// surfaces the supervisor's `cause` so clients see *why* the
-/// launch failed.
-pub(crate) fn launch_failed_response<I, S>(
-  cause: &str,
-  running: I,
-  requested_model: &str,
-) -> ProxyResponse
-where
-  I: IntoIterator<Item = S>,
-  S: Into<String>,
-{
-  let message =
-    format!("auto-start of `{requested_model}` failed and no running model is available: {cause}");
-  let error = ErrorObject::new("launch_failed", message).with_running(running);
-  let bytes = serde_json::to_vec(&ErrorResponse { error }).expect("json encoding of fixed shape");
-  Ok(json_response(StatusCode::SERVICE_UNAVAILABLE, bytes))
-}
-
 fn json_response(status: StatusCode, body: Vec<u8>) -> Response<BoxBody<Bytes, BodyError>> {
   let body = full_body(Bytes::from(body));
   Response::builder()

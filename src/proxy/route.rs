@@ -28,7 +28,7 @@ use std::sync::Arc;
 use http_body_util::{BodyExt, Limited};
 use hyper::body::{Bytes, Incoming};
 
-use crate::cli::resolve::{resolve_model, CatalogRow};
+use crate::cli::resolve::{resolve_model_with_candidates, CatalogRow, ResolveError};
 use crate::daemon::supervisor::ManagedState;
 use crate::discovery::DiscoveredModel;
 use crate::gguf::identity::ModelId;
@@ -194,23 +194,17 @@ pub(crate) async fn decide(state: &Arc<ProxyState>, body_model: Option<String>) 
   // we explicitly want to avoid on the hot path.
   let snap = state.ctx.catalog.snapshot().await;
   let rows: Vec<CatalogRow> = snap.iter().map(catalog_row_from_discovered).collect();
-  let resolved = match resolve_model(&rows, &requested) {
+  let resolved = match resolve_model_with_candidates(&rows, &requested) {
     Ok(r) => r,
-    Err(_) => {
-      // `resolve_model` collapses both 0- and N-match cases into
-      // the same `MODEL_NOT_FOUND` exit. Re-derive which by
-      // re-running the substring filter — cheap, and lets the
-      // proxy emit the right HTTP code (404 vs 400).
-      let candidates = substring_candidates(&rows, &requested);
-      return if candidates.is_empty() {
-        RouteDecision::NotFound {
-          requested_model: requested,
-        }
-      } else {
-        RouteDecision::Ambiguous {
-          requested_model: requested,
-          candidates: candidates.into_iter().map(|r| r.name()).collect(),
-        }
+    Err(ResolveError::Empty) | Err(ResolveError::None) => {
+      return RouteDecision::NotFound {
+        requested_model: requested,
+      };
+    }
+    Err(ResolveError::Many(candidates)) => {
+      return RouteDecision::Ambiguous {
+        requested_model: requested,
+        candidates: candidates.into_iter().map(|r| r.name()).collect(),
       };
     }
   };
@@ -243,34 +237,6 @@ pub(crate) async fn decide(state: &Arc<ProxyState>, body_model: Option<String>) 
     resolved_row: Box::new(resolved),
     arch,
   }
-}
-
-/// Recompute the substring candidates `resolve_model` saw. We
-/// duplicate a few lines of the resolver here so the proxy can
-/// distinguish "0 matches" (404) from "N matches" (400) without
-/// teaching the resolver itself a new exit code — keeping
-/// `cli::resolve` callers stable.
-fn substring_candidates<'a>(rows: &'a [CatalogRow], reference: &str) -> Vec<&'a CatalogRow> {
-  let needle = reference.trim();
-  if needle.is_empty() {
-    return Vec::new();
-  }
-  // Exact path / name first — same precedence as resolve_model.
-  let exact_path: Vec<&CatalogRow> = rows.iter().filter(|r| r.path == needle).collect();
-  if !exact_path.is_empty() {
-    return exact_path;
-  }
-  let exact_name: Vec<&CatalogRow> = rows.iter().filter(|r| r.name() == needle).collect();
-  if !exact_name.is_empty() {
-    return exact_name;
-  }
-  let lower = needle.to_lowercase();
-  rows
-    .iter()
-    .filter(|r| {
-      r.name().to_lowercase().contains(&lower) || r.parent.to_lowercase().contains(&lower)
-    })
-    .collect()
 }
 
 /// Project a discovered-model entry onto the `CatalogRow` shape the
@@ -376,9 +342,43 @@ pub(crate) async fn handle_not_running(
       // with the (empty) `running` list inline. Drop the requested
       // model name into the message so logs surface what was being
       // attempted.
-      super::router::launch_failed_response(&cause, Vec::<String>::new(), &requested_model)
+      launch_failed_response(&cause, Vec::<String>::new(), &requested_model)
     }
   }
+}
+
+/// Build the 503 `launch_failed` envelope used by the fallback path
+/// when no Ready model is available. The `running: []` field is
+/// always present (R155); the message surfaces the supervisor's
+/// `cause` so clients see *why* the launch failed.
+pub(crate) fn launch_failed_response<I, S>(
+  cause: &str,
+  running: I,
+  requested_model: &str,
+) -> ProxyResponse
+where
+  I: IntoIterator<Item = S>,
+  S: Into<String>,
+{
+  use super::openai::{ErrorObject, ErrorResponse};
+  use http_body_util::{combinators::BoxBody, BodyExt, Full};
+  use hyper::body::Bytes;
+  use hyper::Response;
+
+  let message =
+    format!("auto-start of `{requested_model}` failed and no running model is available: {cause}");
+  let error = ErrorObject::new("launch_failed", message).with_running(running);
+  let bytes = serde_json::to_vec(&ErrorResponse { error }).expect("json encoding of fixed shape");
+  let body: BoxBody<Bytes, super::router::BodyError> = Full::new(Bytes::from(bytes))
+    .map_err(|never| match never {})
+    .boxed();
+  Ok(
+    Response::builder()
+      .status(hyper::StatusCode::SERVICE_UNAVAILABLE)
+      .header(hyper::header::CONTENT_TYPE, "application/json")
+      .body(body)
+      .expect("static headers always parse"),
+  )
 }
 
 /// Resolve a display name for a CatalogRow that mirrors what
@@ -436,60 +436,7 @@ async fn collect_fallback_candidates(state: &Arc<ProxyState>) -> Vec<FallbackCan
   out
 }
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use crate::cli::resolve::CatalogRow;
-
-  fn row(path: &str, parent: &str) -> CatalogRow {
-    CatalogRow {
-      path: path.to_string(),
-      model_id: None,
-      parent: parent.to_string(),
-      source: "user".to_string(),
-      arch: Some("llama".to_string()),
-      quant: Some("Q4_K".to_string()),
-      native_ctx: Some(8192),
-      mode_hint: None,
-      parameter_label: None,
-      weights_bytes: None,
-      display_label: None,
-      parse_error: None,
-    }
-  }
-
-  #[test]
-  fn substring_candidates_returns_zero_for_unmatched() {
-    let rows = vec![row("/m/llama.gguf", "/m")];
-    assert!(substring_candidates(&rows, "phi").is_empty());
-  }
-
-  #[test]
-  fn substring_candidates_returns_multiple_for_ambiguous() {
-    let rows = vec![
-      row("/m/qwen-coder-7b.gguf", "/m"),
-      row("/m/qwen-coder-13b.gguf", "/m"),
-    ];
-    let cands = substring_candidates(&rows, "qwen-coder");
-    assert_eq!(cands.len(), 2);
-  }
-
-  #[test]
-  fn substring_candidates_unique_match_returns_one() {
-    let rows = vec![row("/m/qwen.gguf", "/m"), row("/m/llama.gguf", "/m")];
-    let cands = substring_candidates(&rows, "llama");
-    assert_eq!(cands.len(), 1);
-  }
-
-  #[tokio::test]
-  async fn buffer_and_extract_empty_body_returns_none_model() {
-    use http_body_util::Full;
-    use hyper::body::Bytes;
-    // Build an `Incoming`-shaped pipe via hyper's test helpers: the
-    // simplest path is to construct a hyper Request and pull its
-    // body. We can't construct an `Incoming` directly outside hyper
-    // — so this is exercised end-to-end in tests/proxy_routing.rs
-    // instead. Inline test left as a documentation marker.
-    let _ = Full::new(Bytes::from_static(b""));
-  }
-}
+// Matcher behaviour is covered by `cli::resolve` unit tests, which
+// exercise `resolve_model_with_candidates` directly. End-to-end
+// ambiguity / not_found handling (proxy → 400 / 404) is covered by
+// `tests/proxy_routing.rs`.
