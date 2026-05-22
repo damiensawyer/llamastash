@@ -36,15 +36,15 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
   - [ ] Adaptive hints with priority ranks so that order doesn't matter.
   - [ ] Adaptive columns in model list. With priority ranks so that order doesn't matter.
   - [ ] No visible severity encoding in the render (CPU temp 92 °C displays the same as 65 °C VRAM). a temp/severity glyph double encoded so color isn't load-bearing.
-  - [x] ~~Ctrl+Q to Ctrl+K~~ — kill-daemon moved to `Ctrl+K` to avoid macOS "quit app" muscle-memory collision.
+  - [x] ~~Ctrl+Q to Ctrl+K~~ — kill-daemon on `Ctrl+K`.
   - [ ] Fix: HF dialog binds only ↑↓ Enter Esc in the table. The actual interactive surface uses typing-to-filter, n/p to paginate, o to sort, and Backspace to back through stages — none
         of which appear in the help overlay because they're handled procedurally in events.rs. The dialog's own footer is the only discoverability surface for them. Real users will
         discover them by trial; the global help screen will quietly lie by omission.
-  - [ ] Add Shift+T for previous theme.
-  - [ ] do alt keybindings of yank for c,p,u anywhere in app.
-  - [ ] Remap 'd'. maybe to 'Shift+p'
-  - [ ] Map all destructive actions behind Ctr (ctrl+s,k,r,d). All navigation actions behind Shif.
-  - [ ] Dedup keybindings.
+  - [x] ~~Add Shift+T for previous theme.~~ — `Shift+T` reverses the theme cycle via a new `CycleThemePrev` action.
+  - [x] ~~do alt keybindings of yank for c,p,u anywhere in app.~~ — `y` is now a vi-style alias for `c` (yank curl / copy logs) in nav focuses; `u` and `p` still single-bound.
+  - [x] ~~Remap 'd'. maybe to 'Shift+p'~~ — HF pull dialog opens with `Shift+P` ("P" for Pull).
+  - [x] ~~Map all destructive actions behind Ctr (ctrl+s,k,r,d). All navigation actions behind Shif.~~ — stop = `Ctrl+S`, kill = `Ctrl+K`, restart = `Ctrl+R`, delete = `Ctrl+D`, cancel-download = `Ctrl+X`. Shift-letter pane jumps (`Shift+M/L/C/E/R/S/P`) cover navigation.
+  - [x] ~~Dedupe keybindings.~~ — flat `DEFAULT_BINDINGS: &[Binding]` with a `FocusSet` bitfield per row replaces the seven per-focus tables (91 entries → ~52). Public `KeyMap` API preserved; one row per action drives all surfaces via `Action::description_for(focus)`.
   - [x] ~~Use unicode label for Tab etc in keybinds~~ — Tab is `↹` on Linux/Win, `⇥` on macOS; Enter is `⏎` everywhere; modifiers `⌃ ⌥ ⌘` on macOS only, `Ctrl+ / Alt+ / Super+` on PC. Shift glyph (`⇧`) no longer carries a `+` joiner.
 
 - [ ] **In progress**: Proxy router that maps a single endpoint to running models by model name. If the model isn't running, start it; if launch fails, fall back to a running model when one is available; otherwise error. Keep it OpenCode / π compatible so agents and tools can hit one URL.

@@ -12,6 +12,56 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
+// ─── Compile-time label builders ────────────────────────────────
+//
+// `ctrl_label!("k")` expands to `"⌃k"` on macOS and `"Ctrl+k"` on
+// Linux / Windows. Same shape for `alt_label!` and `super_label!`.
+// `concat!` is const-evaluable so the binding table pays no runtime
+// cost; any new chord in [`DEFAULT_BINDINGS`] just uses the macro
+// inline, no per-letter `const` needed.
+
+#[macro_export]
+macro_rules! ctrl_label {
+  ($k:literal) => {{
+    #[cfg(target_os = "macos")]
+    {
+      concat!("⌃", $k)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+      concat!("Ctrl+", $k)
+    }
+  }};
+}
+
+#[macro_export]
+macro_rules! alt_label {
+  ($k:literal) => {{
+    #[cfg(target_os = "macos")]
+    {
+      concat!("⌥", $k)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+      concat!("Alt+", $k)
+    }
+  }};
+}
+
+#[macro_export]
+macro_rules! super_label {
+  ($k:literal) => {{
+    #[cfg(target_os = "macos")]
+    {
+      concat!("⌘", $k)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+      concat!("Super+", $k)
+    }
+  }};
+}
+
 /// Where the user's focus is on screen. Drives which key bindings
 /// are accepted *and* which ones the help bar surfaces. Distinct
 /// from "what's rendered" — multiple overlays can stack but only
@@ -51,6 +101,75 @@ pub enum Focus {
   HfDialog,
 }
 
+/// Bitfield of [`Focus`] values, used to express which focuses a
+/// [`Binding`] is active in. Eight focuses fit in a `u8`; the
+/// representation is hand-rolled so we don't depend on the
+/// `bitflags` crate for a 30-line abstraction.
+///
+/// One row per `Action` in [`DEFAULT_BINDINGS`] is paired with a
+/// `FocusSet` that lists every focus the binding fires in — kdash-
+/// style flat table instead of per-focus duplication. Multi-focus
+/// reach (e.g. `Tab` cycles panes in every TUI focus) becomes one
+/// row tagged with [`FocusSet::TUI`] rather than five copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FocusSet(u8);
+
+impl FocusSet {
+  pub const EMPTY: Self = Self(0);
+  pub const LIST: Self = Self(1 << 0);
+  pub const FILTER: Self = Self(1 << 1);
+  pub const RIGHT_PANE: Self = Self(1 << 2);
+  pub const CHAT_INPUT: Self = Self(1 << 3);
+  pub const EMBED_INPUT: Self = Self(1 << 4);
+  pub const RERANK_INPUT: Self = Self(1 << 5);
+  pub const CONFIRM_POPUP: Self = Self(1 << 6);
+  pub const HF_DIALOG: Self = Self(1 << 7);
+
+  /// Models list + right pane (non-input). The "browsing" surfaces.
+  pub const NAV: Self = Self(Self::LIST.0 | Self::RIGHT_PANE.0);
+  /// All three text-input focuses (Chat / Embed / Rerank).
+  pub const INPUT: Self = Self(Self::CHAT_INPUT.0 | Self::EMBED_INPUT.0 | Self::RERANK_INPUT.0);
+  /// Every primary TUI focus — navigation + text inputs. Excludes
+  /// the dedicated overlay focuses (`ConfirmPopup`, `HfDialog`,
+  /// `Filter`) which capture input differently.
+  pub const TUI: Self = Self(Self::NAV.0 | Self::INPUT.0);
+
+  pub const fn contains(self, focus: Focus) -> bool {
+    self.0 & focus.as_bit().0 != 0
+  }
+
+  pub const fn union(self, other: Self) -> Self {
+    Self(self.0 | other.0)
+  }
+
+  pub const fn bits(self) -> u8 {
+    self.0
+  }
+}
+
+impl std::ops::BitOr for FocusSet {
+  type Output = Self;
+  fn bitor(self, other: Self) -> Self {
+    self.union(other)
+  }
+}
+
+impl Focus {
+  /// Single-bit `FocusSet` for this focus.
+  pub const fn as_bit(self) -> FocusSet {
+    match self {
+      Focus::List => FocusSet::LIST,
+      Focus::Filter => FocusSet::FILTER,
+      Focus::RightPane => FocusSet::RIGHT_PANE,
+      Focus::ChatInput => FocusSet::CHAT_INPUT,
+      Focus::EmbedInput => FocusSet::EMBED_INPUT,
+      Focus::RerankInput => FocusSet::RERANK_INPUT,
+      Focus::ConfirmPopup => FocusSet::CONFIRM_POPUP,
+      Focus::HfDialog => FocusSet::HF_DIALOG,
+    }
+  }
+}
+
 /// Symbolic action a binding triggers. Renderers / event handlers
 /// match on this rather than the raw key so config overrides only
 /// touch the table, not the dispatch.
@@ -78,6 +197,9 @@ pub enum Action {
   YankCurl,
   YankPath,
   CycleTheme,
+  /// Cycle to the previous theme — overshoot recovery for the
+  /// forward `t:theme` chord. Bound to `Shift+T`.
+  CycleThemePrev,
   /// Snap focus back to the Models list. Bound to `Esc` in the
   /// right pane (closes the pane) and in the AdvancedPanel
   /// overlay. The LaunchPicker is no longer a modal — Settings
@@ -106,7 +228,7 @@ pub enum Action {
   /// Show or hide the modal help overlay (bound to `?`).
   ToggleHelp,
   /// Ask the daemon to stop the focused managed launch. Bound to
-  /// `s` in [`Focus::List`].
+  /// `Ctrl+S` in the navigation focuses.
   StopModel,
   /// Enter edit / text-capture mode on the active right-pane tab
   /// (Chat / Embed / Rerank). Bound to `e` in [`Focus::RightPane`].
@@ -170,7 +292,9 @@ pub enum Action {
   CycleValuePrev,
 }
 
-/// One binding in the table.
+/// One binding in the flat keymap. `scopes` lists every focus the
+/// binding fires in — a single row replaces what used to be a copy
+/// per focus.
 #[derive(Debug, Clone, Copy)]
 pub struct Binding {
   pub key: KeyCode,
@@ -178,32 +302,35 @@ pub struct Binding {
   pub action: Action,
   /// Short label rendered in the help bar (e.g. `↑` or `Ctrl+D`).
   pub label: &'static str,
-  /// One-word description shown next to the label
-  /// (e.g. `up` or `quit`).
+  /// Generic description shown when no focus-specific override is
+  /// available (see [`Action::description_for`]).
   pub description: &'static str,
+  /// Focuses this binding is active in. The dispatcher filters by
+  /// this; the help bar/overlay reads only the bindings whose scope
+  /// contains the current focus.
+  pub scopes: FocusSet,
 }
 
-/// Default keymap. Static so the help bar can iterate without
-/// allocating; config overrides land in a follow-up that overlays
-/// changes onto a clone of this slice.
-pub const DEFAULT_BINDINGS: &[(Focus, &[Binding])] = &[
-  (Focus::List, LIST_BINDINGS),
-  (Focus::Filter, FILTER_BINDINGS),
-  (Focus::RightPane, RIGHT_PANE_BINDINGS),
-  (Focus::ChatInput, CHAT_INPUT_BINDINGS),
-  (Focus::EmbedInput, EMBED_INPUT_BINDINGS),
-  (Focus::RerankInput, RERANK_INPUT_BINDINGS),
-  (Focus::ConfirmPopup, CONFIRM_POPUP_BINDINGS),
-  (Focus::HfDialog, HF_DIALOG_BINDINGS),
-];
-
-const LIST_BINDINGS: &[Binding] = &[
+/// Default keymap — one row per (action, key) chord, scoped to the
+/// focuses where the binding fires. Replaces the v1 per-focus table
+/// of 91 entries; kdash-style flat list keeps `Tab/⇧Tab/Esc/Enter`
+/// from duplicating across every input focus.
+///
+/// Adding a new binding: pick the smallest [`FocusSet`] that
+/// captures every focus the action should fire in. Repeat the
+/// `Action` value if the same action has multiple chords (e.g. `q`
+/// and `Ctrl+C` both map to `Quit`). Same-key collisions across
+/// disjoint scopes are fine — the dispatcher walks the flat list
+/// and picks the first match for the current focus.
+pub const DEFAULT_BINDINGS: &[Binding] = &[
+  // ─── Always-on chords across the nav focuses ────────────────
   Binding {
     key: KeyCode::Char('?'),
     mods: KeyModifiers::NONE,
     action: Action::ToggleHelp,
     label: "?",
     description: "help",
+    scopes: FocusSet::NAV,
   },
   Binding {
     key: KeyCode::Char('q'),
@@ -211,34 +338,83 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::Quit,
     label: "q",
     description: "quit",
-  },
-  Binding {
-    key: KeyCode::Char('r'),
-    mods: KeyModifiers::CONTROL,
-    action: Action::RestartDaemon,
-    label: CTRL_R_LABEL,
-    description: "restart daemon",
-  },
-  Binding {
-    key: KeyCode::Char('k'),
-    mods: KeyModifiers::CONTROL,
-    action: Action::KillDaemon,
-    label: CTRL_K_LABEL,
-    description: "kill daemon",
+    scopes: FocusSet::NAV,
   },
   Binding {
     key: KeyCode::Char('c'),
     mods: KeyModifiers::CONTROL,
     action: Action::Quit,
-    label: CTRL_C_LABEL,
+    label: crate::ctrl_label!("c"),
     description: "quit",
+    scopes: FocusSet::NAV,
   },
+  Binding {
+    key: KeyCode::Char('t'),
+    mods: KeyModifiers::NONE,
+    action: Action::CycleTheme,
+    label: "t",
+    description: "theme",
+    scopes: FocusSet::NAV,
+  },
+  Binding {
+    key: KeyCode::Char('T'),
+    mods: KeyModifiers::SHIFT,
+    action: Action::CycleThemePrev,
+    label: "T",
+    description: "prev theme",
+    scopes: FocusSet::NAV,
+  },
+  // ─── Daemon-level / destructive (all behind Ctrl) ───────────
+  Binding {
+    key: KeyCode::Char('r'),
+    mods: KeyModifiers::CONTROL,
+    action: Action::RestartDaemon,
+    label: crate::ctrl_label!("r"),
+    description: "restart daemon",
+    scopes: FocusSet::NAV,
+  },
+  Binding {
+    key: KeyCode::Char('k'),
+    mods: KeyModifiers::CONTROL,
+    action: Action::KillDaemon,
+    label: crate::ctrl_label!("k"),
+    description: "kill daemon",
+    scopes: FocusSet::LIST,
+  },
+  Binding {
+    key: KeyCode::Char('s'),
+    mods: KeyModifiers::CONTROL,
+    action: Action::StopModel,
+    label: crate::ctrl_label!("s"),
+    description: "stop",
+    scopes: FocusSet::NAV,
+  },
+  Binding {
+    key: KeyCode::Char('d'),
+    mods: KeyModifiers::CONTROL,
+    action: Action::DeleteModel,
+    label: crate::ctrl_label!("d"),
+    description: "delete model",
+    scopes: FocusSet::LIST,
+  },
+  Binding {
+    key: KeyCode::Char('x'),
+    mods: KeyModifiers::CONTROL,
+    action: Action::CancelDownload,
+    label: crate::ctrl_label!("x"),
+    description: "cancel download",
+    scopes: FocusSet::NAV,
+  },
+  // ─── Motion (arrows + vi aliases) ───────────────────────────
+  // MoveUp/MoveDown carry `description_for(RightPane) = "scroll
+  // up/down"` so the right pane chip reads naturally.
   Binding {
     key: KeyCode::Up,
     mods: KeyModifiers::NONE,
     action: Action::MoveUp,
     label: "↑",
     description: "up",
+    scopes: FocusSet::NAV.union(FocusSet::HF_DIALOG),
   },
   Binding {
     key: KeyCode::Char('k'),
@@ -246,6 +422,7 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::MoveUp,
     label: "k",
     description: "up",
+    scopes: FocusSet::NAV,
   },
   Binding {
     key: KeyCode::Down,
@@ -253,6 +430,7 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::MoveDown,
     label: "↓",
     description: "down",
+    scopes: FocusSet::NAV.union(FocusSet::HF_DIALOG),
   },
   Binding {
     key: KeyCode::Char('j'),
@@ -260,6 +438,7 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::MoveDown,
     label: "j",
     description: "down",
+    scopes: FocusSet::NAV,
   },
   Binding {
     key: KeyCode::PageUp,
@@ -267,6 +446,7 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::PageUp,
     label: "PgUp",
     description: "page up",
+    scopes: FocusSet::LIST,
   },
   Binding {
     key: KeyCode::PageDown,
@@ -274,6 +454,7 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::PageDown,
     label: "PgDn",
     description: "page down",
+    scopes: FocusSet::LIST,
   },
   Binding {
     key: KeyCode::Char('g'),
@@ -281,6 +462,7 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::GoTop,
     label: "g",
     description: "top",
+    scopes: FocusSet::LIST,
   },
   Binding {
     key: KeyCode::Home,
@@ -288,6 +470,7 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::GoTop,
     label: "Home",
     description: "top",
+    scopes: FocusSet::LIST,
   },
   Binding {
     key: KeyCode::Char('G'),
@@ -295,6 +478,7 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::GoBottom,
     label: "G",
     description: "bottom",
+    scopes: FocusSet::LIST,
   },
   Binding {
     key: KeyCode::End,
@@ -302,13 +486,107 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::GoBottom,
     label: "End",
     description: "bottom",
+    scopes: FocusSet::LIST,
   },
+  // ─── Pane navigation (Tab in every TUI focus; vi aliases nav-only)
+  Binding {
+    key: KeyCode::Tab,
+    mods: KeyModifiers::NONE,
+    action: Action::NextFocus,
+    label: TAB_LABEL,
+    description: "next pane",
+    scopes: FocusSet::TUI,
+  },
+  Binding {
+    key: KeyCode::BackTab,
+    mods: KeyModifiers::SHIFT,
+    action: Action::PrevFocus,
+    label: SHIFT_TAB_LABEL,
+    description: "prev pane",
+    scopes: FocusSet::TUI,
+  },
+  Binding {
+    key: KeyCode::Char('l'),
+    mods: KeyModifiers::NONE,
+    action: Action::NextFocus,
+    label: "l",
+    description: "next pane",
+    scopes: FocusSet::NAV,
+  },
+  Binding {
+    key: KeyCode::Char('h'),
+    mods: KeyModifiers::NONE,
+    action: Action::PrevFocus,
+    label: "h",
+    description: "prev pane",
+    scopes: FocusSet::NAV,
+  },
+  // ─── Shift-letter quick-jumps (navigation policy: Shift = navigate)
+  Binding {
+    key: KeyCode::Char('M'),
+    mods: KeyModifiers::SHIFT,
+    action: Action::FocusList,
+    label: "M",
+    description: "models",
+    scopes: FocusSet::NAV,
+  },
+  Binding {
+    key: KeyCode::Char('L'),
+    mods: KeyModifiers::SHIFT,
+    action: Action::FocusLogsTab,
+    label: "L",
+    description: "logs",
+    scopes: FocusSet::NAV,
+  },
+  Binding {
+    key: KeyCode::Char('C'),
+    mods: KeyModifiers::SHIFT,
+    action: Action::FocusChatTab,
+    label: "C",
+    description: "chat/embed/rerank",
+    scopes: FocusSet::NAV,
+  },
+  Binding {
+    key: KeyCode::Char('E'),
+    mods: KeyModifiers::SHIFT,
+    action: Action::FocusChatTab,
+    label: "E",
+    description: "chat/embed/rerank",
+    scopes: FocusSet::NAV,
+  },
+  Binding {
+    key: KeyCode::Char('R'),
+    mods: KeyModifiers::SHIFT,
+    action: Action::FocusChatTab,
+    label: "R",
+    description: "chat/embed/rerank",
+    scopes: FocusSet::NAV,
+  },
+  Binding {
+    key: KeyCode::Char('S'),
+    mods: KeyModifiers::SHIFT,
+    action: Action::FocusSettingsTab,
+    label: "S",
+    description: "settings",
+    scopes: FocusSet::NAV,
+  },
+  // HF pull dialog. `P` is the "Pull" mnemonic.
+  Binding {
+    key: KeyCode::Char('P'),
+    mods: KeyModifiers::SHIFT,
+    action: Action::OpenHfDialog,
+    label: "P",
+    description: "pull from HF",
+    scopes: FocusSet::LIST,
+  },
+  // ─── Filter / favourite (List only) ─────────────────────────
   Binding {
     key: KeyCode::Char('/'),
     mods: KeyModifiers::NONE,
     action: Action::OpenFilter,
     label: "/",
     description: "filter",
+    scopes: FocusSet::LIST,
   },
   Binding {
     key: KeyCode::Char('f'),
@@ -316,20 +594,16 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::ToggleFavorite,
     label: "f",
     description: "favorite",
+    scopes: FocusSet::LIST,
   },
-  Binding {
-    key: KeyCode::Enter,
-    mods: KeyModifiers::NONE,
-    action: Action::OpenLaunchPicker,
-    label: ENTER_LABEL,
-    description: "launch",
-  },
+  // ─── Yank / copy. `y` is a vim-style alias for `c`. ─────────
   Binding {
     key: KeyCode::Char('u'),
     mods: KeyModifiers::NONE,
     action: Action::YankUrl,
     label: "u",
     description: "url",
+    scopes: FocusSet::NAV,
   },
   Binding {
     key: KeyCode::Char('c'),
@@ -337,6 +611,15 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::YankCurl,
     label: "c",
     description: "curl",
+    scopes: FocusSet::NAV,
+  },
+  Binding {
+    key: KeyCode::Char('y'),
+    mods: KeyModifiers::NONE,
+    action: Action::YankCurl,
+    label: "y",
+    description: "curl",
+    scopes: FocusSet::NAV,
   },
   Binding {
     key: KeyCode::Char('p'),
@@ -344,273 +627,32 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::YankPath,
     label: "p",
     description: "path",
+    scopes: FocusSet::NAV,
   },
+  // ─── Right-pane affordances (Settings / Logs) ───────────────
   Binding {
-    key: KeyCode::Char('t'),
+    key: KeyCode::Char('e'),
     mods: KeyModifiers::NONE,
-    action: Action::CycleTheme,
-    label: "t",
-    description: "theme",
+    action: Action::EnterEdit,
+    label: "e",
+    description: "edit",
+    scopes: FocusSet::RIGHT_PANE,
   },
   Binding {
     key: KeyCode::Char('s'),
     mods: KeyModifiers::NONE,
-    action: Action::StopModel,
+    action: Action::ToggleAutoScroll,
     label: "s",
-    description: "stop",
+    description: "auto-scroll",
+    scopes: FocusSet::RIGHT_PANE,
   },
-  // Tab/⇧+Tab cycle panes (Models → Logs → Chat/Embed/Rerank →
-  // Settings → wrap). ↑/↓ scroll the list cursor. The `→` chord is
-  // deliberately unbound on the Models list: arrow-right reads as
-  // "cycle value" everywhere else (Settings tab) and surfaced as
-  // an asymmetric pane-jump it confused users into pressing it for
-  // every navigation. Pane cycle is reachable via Tab/Shift+Tab or
-  // the vi `h`/`l` aliases (still bound below); Enter launches the
-  // focused model into the right pane.
-  Binding {
-    key: KeyCode::Tab,
-    mods: KeyModifiers::NONE,
-    action: Action::NextFocus,
-    label: TAB_LABEL,
-    description: "next pane",
-  },
-  Binding {
-    key: KeyCode::BackTab,
-    mods: KeyModifiers::SHIFT,
-    action: Action::PrevFocus,
-    label: SHIFT_TAB_LABEL,
-    description: "prev pane",
-  },
-  Binding {
-    key: KeyCode::Char('l'),
-    mods: KeyModifiers::NONE,
-    action: Action::NextFocus,
-    label: "l",
-    description: "next pane",
-  },
-  Binding {
-    key: KeyCode::Char('h'),
-    mods: KeyModifiers::NONE,
-    action: Action::PrevFocus,
-    label: "h",
-    description: "prev pane",
-  },
-  // Shift-letter quick-jumps so the user can hop straight to a
-  // specific surface without walking the focus chain. The lowercase
-  // counterparts (`m`/`l`/`c`/`s`) are already in use for unrelated
-  // actions, so the shifted form is the distinct keystroke.
-  Binding {
-    key: KeyCode::Char('M'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusList,
-    label: "M",
-    description: "models",
-  },
-  Binding {
-    key: KeyCode::Char('L'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusLogsTab,
-    label: "L",
-    description: "logs",
-  },
-  Binding {
-    key: KeyCode::Char('C'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusChatTab,
-    label: "C",
-    // `apply_focus_chat_tab` (events.rs) jumps to whichever mode tab
-    // is live for the focused model — Chat for chat models, Embed
-    // for embedding-only models, Rerank for rerankers. The
-    // description has to mirror that so the help pane doesn't lie.
-    description: "chat/embed/rerank",
-  },
-  // R / E mirror C: a model only ever exposes one of
-  // Chat/Embed/Rerank at a time, so all three keys map to the same
-  // "jump to mode tab" action. Lets a user with muscle memory for
-  // "press R for rerank" or "press E for embed" land on the right
-  // tab without thinking. The daemon-restart hotkey lives on Ctrl+R
-  // so this mnemonic stays free.
-  Binding {
-    key: KeyCode::Char('E'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusChatTab,
-    label: "E",
-    description: "chat/embed/rerank",
-  },
-  Binding {
-    key: KeyCode::Char('R'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusChatTab,
-    label: "R",
-    description: "chat/embed/rerank",
-  },
-  Binding {
-    key: KeyCode::Char('S'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusSettingsTab,
-    label: "S",
-    description: "settings",
-  },
-  // R104: `d` opens the HuggingFace pull dialog. Lowercase so the
-  // dialog is reachable with a single un-modified keystroke; Ctrl+D
-  // is reserved for delete-model on the focused row.
-  Binding {
-    key: KeyCode::Char('d'),
-    mods: KeyModifiers::NONE,
-    action: Action::OpenHfDialog,
-    label: "d",
-    description: "pull from HF",
-  },
-  // Ctrl+D deletes the focused model after a confirmation popup.
-  // Refusal-on-running is handled inside `apply_delete_model` so the
-  // binding stays uniform; the on-screen hint chip only renders for
-  // non-running rows (see `list_pane` hints).
-  Binding {
-    key: KeyCode::Char('d'),
-    mods: KeyModifiers::CONTROL,
-    action: Action::DeleteModel,
-    label: CTRL_D_LABEL,
-    description: "delete model",
-  },
-  // Ctrl+X cancels the currently-active HF download after a confirm
-  // popup. Queued downloads keep their place; the user presses Ctrl+X
-  // again on the next promoted pull. Refusal-on-idle is handled in
-  // `apply_cancel_download` so the binding is uniform and the chip
-  // strip on the download line is the discoverability surface.
-  Binding {
-    key: KeyCode::Char('x'),
-    mods: KeyModifiers::CONTROL,
-    action: Action::CancelDownload,
-    label: CTRL_X_LABEL,
-    description: "cancel download",
-  },
-];
-
-/// HF pull dialog (R104). The per-stage routing (Search / FilePicker
-/// / Confirm) lives in `events::handle_hf_dialog_input` because the
-/// dialog has stage-specific semantics that the static binding table
-/// can't capture (typing extends the query buffer; `n`/`p` paginate
-/// only in Search; Backspace toggles between sub-stages). What
-/// *does* belong here are the always-on keys the help bar needs to
-/// surface and the help-overlay needs to enumerate.
-const HF_DIALOG_BINDINGS: &[Binding] = &[
-  Binding {
-    key: KeyCode::Esc,
-    mods: KeyModifiers::NONE,
-    action: Action::Cancel,
-    label: ESC_LABEL,
-    description: "close",
-  },
-  Binding {
-    key: KeyCode::Up,
-    mods: KeyModifiers::NONE,
-    action: Action::MoveUp,
-    label: "↑",
-    description: "up",
-  },
-  Binding {
-    key: KeyCode::Down,
-    mods: KeyModifiers::NONE,
-    action: Action::MoveDown,
-    label: "↓",
-    description: "down",
-  },
-  Binding {
-    key: KeyCode::Enter,
-    mods: KeyModifiers::NONE,
-    action: Action::Submit,
-    label: ENTER_LABEL,
-    description: "open / confirm",
-  },
-];
-
-const FILTER_BINDINGS: &[Binding] = &[
-  Binding {
-    key: KeyCode::Esc,
-    mods: KeyModifiers::NONE,
-    action: Action::ClearFilter,
-    label: ESC_LABEL,
-    description: "clear",
-  },
-  // Filter is a live predicate (applies on every keystroke), so
-  // Enter has no apply semantics — it drills into the focused
-  // result row by opening the launch picker. See
-  // `handle_filter_input`'s `Submit` arm.
-  Binding {
-    key: KeyCode::Enter,
-    mods: KeyModifiers::NONE,
-    action: Action::Submit,
-    label: ENTER_LABEL,
-    description: "launch",
-  },
-];
-
-const RIGHT_PANE_BINDINGS: &[Binding] = &[
-  Binding {
-    key: KeyCode::Char('?'),
-    mods: KeyModifiers::NONE,
-    action: Action::ToggleHelp,
-    label: "?",
-    description: "help",
-  },
-  Binding {
-    key: KeyCode::Char('t'),
-    mods: KeyModifiers::NONE,
-    action: Action::CycleTheme,
-    label: "t",
-    description: "theme",
-  },
-  Binding {
-    key: KeyCode::Char('q'),
-    mods: KeyModifiers::NONE,
-    action: Action::Quit,
-    label: "q",
-    description: "quit",
-  },
-  Binding {
-    key: KeyCode::Char('c'),
-    mods: KeyModifiers::CONTROL,
-    action: Action::Quit,
-    label: CTRL_C_LABEL,
-    description: "quit",
-  },
-  Binding {
-    key: KeyCode::Enter,
-    mods: KeyModifiers::NONE,
-    action: Action::Submit,
-    label: ENTER_LABEL,
-    description: "launch (Settings)",
-  },
-  Binding {
-    key: KeyCode::Esc,
-    mods: KeyModifiers::NONE,
-    action: Action::FocusList,
-    label: ESC_LABEL,
-    description: "models list",
-  },
-  Binding {
-    key: KeyCode::Tab,
-    mods: KeyModifiers::NONE,
-    action: Action::NextFocus,
-    label: TAB_LABEL,
-    description: "next pane",
-  },
-  Binding {
-    key: KeyCode::BackTab,
-    mods: KeyModifiers::SHIFT,
-    action: Action::PrevFocus,
-    label: SHIFT_TAB_LABEL,
-    description: "prev pane",
-  },
-  // ←/→ change the focused Settings field's value. Outside the
-  // Settings tab the action is a no-op (see `apply_cycle_value`),
-  // so the keys don't double as pane navigation anywhere.
   Binding {
     key: KeyCode::Right,
     mods: KeyModifiers::NONE,
     action: Action::CycleValueNext,
     label: "→",
     description: "cycle value",
+    scopes: FocusSet::RIGHT_PANE,
   },
   Binding {
     key: KeyCode::Left,
@@ -618,205 +660,37 @@ const RIGHT_PANE_BINDINGS: &[Binding] = &[
     action: Action::CycleValuePrev,
     label: "←",
     description: "cycle value",
+    scopes: FocusSet::RIGHT_PANE,
   },
-  // vi aliases stay — h/l remain the canonical pane-cycle pair for
-  // users who don't want to leave the home row.
+  // ─── Enter — five Action variants across disjoint scopes ────
   Binding {
-    key: KeyCode::Char('l'),
+    key: KeyCode::Enter,
     mods: KeyModifiers::NONE,
-    action: Action::NextFocus,
-    label: "l",
-    description: "next pane",
+    action: Action::OpenLaunchPicker,
+    label: ENTER_LABEL,
+    description: "launch",
+    scopes: FocusSet::LIST,
   },
   Binding {
-    key: KeyCode::Char('h'),
+    key: KeyCode::Enter,
     mods: KeyModifiers::NONE,
-    action: Action::PrevFocus,
-    label: "h",
-    description: "prev pane",
+    action: Action::Submit,
+    label: ENTER_LABEL,
+    description: "submit",
+    scopes: FocusSet::FILTER
+      .union(FocusSet::RIGHT_PANE)
+      .union(FocusSet::EMBED_INPUT)
+      .union(FocusSet::RERANK_INPUT)
+      .union(FocusSet::CONFIRM_POPUP)
+      .union(FocusSet::HF_DIALOG),
   },
-  // `s` carries two meanings, dispatched tab-aware in
-  // `apply_action`: on the Logs tab it toggles auto-scroll; on the
-  // Settings tab it stops the focused launch. The binding row sits
-  // under `ToggleAutoScroll` so the dispatcher reads a single
-  // action; the per-tab semantics live in the handler.
-  Binding {
-    key: KeyCode::Char('s'),
-    mods: KeyModifiers::NONE,
-    action: Action::ToggleAutoScroll,
-    label: "s",
-    description: "auto-scroll",
-  },
-  // Round-8: yank affordances reachable from the right pane so the
-  // Settings tab can surface `p / u / c` without forcing the user
-  // back to the Models list. Yank handlers already check
-  // `focused_managed()` and emit toasts on misses, so the bindings
-  // stay safe on Logs / Settings without a managed launch.
-  Binding {
-    key: KeyCode::Char('u'),
-    mods: KeyModifiers::NONE,
-    action: Action::YankUrl,
-    label: "u",
-    description: "url",
-  },
-  Binding {
-    key: KeyCode::Char('c'),
-    mods: KeyModifiers::NONE,
-    action: Action::YankCurl,
-    label: "c",
-    description: "curl",
-  },
-  Binding {
-    key: KeyCode::Char('p'),
-    mods: KeyModifiers::NONE,
-    action: Action::YankPath,
-    label: "p",
-    description: "path",
-  },
-  Binding {
-    key: KeyCode::Char('e'),
-    mods: KeyModifiers::NONE,
-    action: Action::EnterEdit,
-    label: "e",
-    description: "edit",
-  },
-  // Arrows are the canonical surface — the Settings tab uses ↑/↓
-  // for row navigation and the Logs tab uses them for scroll. Vi
-  // aliases `j`/`k` follow so home-row users have a fallback.
-  // Ordering matters: `hint()` returns the first binding it finds,
-  // so the chip strip surfaces the arrow glyphs.
-  Binding {
-    key: KeyCode::Down,
-    mods: KeyModifiers::NONE,
-    action: Action::MoveDown,
-    label: "↓",
-    description: "scroll down",
-  },
-  Binding {
-    key: KeyCode::Up,
-    mods: KeyModifiers::NONE,
-    action: Action::MoveUp,
-    label: "↑",
-    description: "scroll up",
-  },
-  Binding {
-    key: KeyCode::Char('j'),
-    mods: KeyModifiers::NONE,
-    action: Action::MoveDown,
-    label: "j",
-    description: "scroll down",
-  },
-  Binding {
-    key: KeyCode::Char('k'),
-    mods: KeyModifiers::NONE,
-    action: Action::MoveUp,
-    label: "k",
-    description: "scroll up",
-  },
-  // Mirror the LIST_BINDINGS shift-letter quick-jumps so the user
-  // can hop between surfaces from either pane.
-  Binding {
-    key: KeyCode::Char('M'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusList,
-    label: "M",
-    description: "models",
-  },
-  Binding {
-    key: KeyCode::Char('L'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusLogsTab,
-    label: "L",
-    description: "logs",
-  },
-  Binding {
-    key: KeyCode::Char('C'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusChatTab,
-    label: "C",
-    // Mirrors the LIST_BINDINGS entry — `apply_focus_chat_tab` picks
-    // the first available of Chat/Embed/Rerank. Description must
-    // stay in sync across the two binding tables so the help
-    // overlay's `resolve_one` lifts a consistent string.
-    description: "chat/embed/rerank",
-  },
-  // R / E aliases for C — mirrors LIST_BINDINGS so the user can
-  // press the mnemonic for Rerank / Embed from the right pane too.
-  // Daemon restart is on Ctrl+R (handled in LIST_BINDINGS).
-  Binding {
-    key: KeyCode::Char('R'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusChatTab,
-    label: "R",
-    description: "chat/embed/rerank",
-  },
-  Binding {
-    key: KeyCode::Char('r'),
-    mods: KeyModifiers::CONTROL,
-    action: Action::RestartDaemon,
-    label: CTRL_R_LABEL,
-    description: "restart daemon",
-  },
-  Binding {
-    key: KeyCode::Char('E'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusChatTab,
-    label: "E",
-    description: "chat/embed/rerank",
-  },
-  Binding {
-    key: KeyCode::Char('S'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusSettingsTab,
-    label: "S",
-    description: "settings",
-  },
-  // Mirror LIST_BINDINGS so Ctrl+X cancels the active download from
-  // either pane. `apply_cancel_download` gates idle / non-active
-  // states so the binding stays uniform across focuses.
-  Binding {
-    key: KeyCode::Char('x'),
-    mods: KeyModifiers::CONTROL,
-    action: Action::CancelDownload,
-    label: CTRL_X_LABEL,
-    description: "cancel download",
-  },
-];
-
-const CHAT_INPUT_BINDINGS: &[Binding] = &[
-  Binding {
-    key: KeyCode::Esc,
-    mods: KeyModifiers::NONE,
-    action: Action::ExitEdit,
-    label: ESC_LABEL,
-    description: "exit edit",
-  },
-  Binding {
-    key: KeyCode::Tab,
-    mods: KeyModifiers::NONE,
-    action: Action::NextFocus,
-    label: TAB_LABEL,
-    description: "next pane",
-  },
-  Binding {
-    key: KeyCode::BackTab,
-    mods: KeyModifiers::SHIFT,
-    action: Action::PrevFocus,
-    label: SHIFT_TAB_LABEL,
-    description: "prev pane",
-  },
-  // Plain Enter so submit fires on every terminal — Ctrl+Enter is
-  // ambiguous unless the kitty keyboard protocol is active, which
-  // many terminals (gnome-terminal, konsole, macOS Terminal) don't
-  // implement. Shift+Enter inserts a newline in the prompt buffer
-  // (only distinguishable on kitty-protocol terminals; elsewhere it
-  // collapses to plain Enter and submits — fine for v1).
   Binding {
     key: KeyCode::Enter,
     mods: KeyModifiers::NONE,
     action: Action::SendChat,
     label: ENTER_LABEL,
     description: "send",
+    scopes: FocusSet::CHAT_INPUT,
   },
   Binding {
     key: KeyCode::Enter,
@@ -824,128 +698,40 @@ const CHAT_INPUT_BINDINGS: &[Binding] = &[
     action: Action::InsertNewline,
     label: SHIFT_ENTER_LABEL,
     description: "newline",
+    scopes: FocusSet::INPUT,
   },
   Binding {
     key: KeyCode::Char('r'),
     mods: KeyModifiers::CONTROL,
     action: Action::ToggleThinkCollapse,
-    label: CTRL_R_LABEL,
+    label: crate::ctrl_label!("r"),
     description: "toggle reasoning",
+    scopes: FocusSet::CHAT_INPUT,
   },
-];
-
-const EMBED_INPUT_BINDINGS: &[Binding] = &[
+  // ─── Esc — five disjoint actions across the focus families ──
+  Binding {
+    key: KeyCode::Esc,
+    mods: KeyModifiers::NONE,
+    action: Action::FocusList,
+    label: ESC_LABEL,
+    description: "models list",
+    scopes: FocusSet::RIGHT_PANE,
+  },
+  Binding {
+    key: KeyCode::Esc,
+    mods: KeyModifiers::NONE,
+    action: Action::ClearFilter,
+    label: ESC_LABEL,
+    description: "clear",
+    scopes: FocusSet::FILTER,
+  },
   Binding {
     key: KeyCode::Esc,
     mods: KeyModifiers::NONE,
     action: Action::ExitEdit,
     label: ESC_LABEL,
     description: "exit edit",
-  },
-  Binding {
-    key: KeyCode::Tab,
-    mods: KeyModifiers::NONE,
-    action: Action::NextFocus,
-    label: TAB_LABEL,
-    description: "next pane",
-  },
-  Binding {
-    key: KeyCode::BackTab,
-    mods: KeyModifiers::SHIFT,
-    action: Action::PrevFocus,
-    label: SHIFT_TAB_LABEL,
-    description: "prev pane",
-  },
-  // Plain Enter — see CHAT_INPUT_BINDINGS for the rationale.
-  Binding {
-    key: KeyCode::Enter,
-    mods: KeyModifiers::NONE,
-    action: Action::Submit,
-    label: ENTER_LABEL,
-    description: "embed",
-  },
-  Binding {
-    key: KeyCode::Enter,
-    mods: KeyModifiers::SHIFT,
-    action: Action::InsertNewline,
-    label: SHIFT_ENTER_LABEL,
-    description: "newline",
-  },
-];
-
-const RERANK_INPUT_BINDINGS: &[Binding] = &[
-  Binding {
-    key: KeyCode::Esc,
-    mods: KeyModifiers::NONE,
-    action: Action::ExitEdit,
-    label: ESC_LABEL,
-    description: "exit edit",
-  },
-  // Tab / Shift+Tab cycle panes everywhere — including inside the
-  // rerank input. Staging a candidate now rides on Enter while the
-  // candidate field is focused (see `apply_rerank_submit`), so the
-  // dedicated `+` / `=` chords retire.
-  Binding {
-    key: KeyCode::Tab,
-    mods: KeyModifiers::NONE,
-    action: Action::NextFocus,
-    label: TAB_LABEL,
-    description: "next pane",
-  },
-  Binding {
-    key: KeyCode::BackTab,
-    mods: KeyModifiers::SHIFT,
-    action: Action::PrevFocus,
-    label: SHIFT_TAB_LABEL,
-    description: "prev pane",
-  },
-  // ↑/↓ cycle the input field (query ↔ candidate). Two fields →
-  // both directions land on the same place, but binding both keeps
-  // the arrow surface symmetric with the Settings tab's field
-  // cycle.
-  Binding {
-    key: KeyCode::Down,
-    mods: KeyModifiers::NONE,
-    action: Action::NextField,
-    label: "↓",
-    description: "next field",
-  },
-  Binding {
-    key: KeyCode::Up,
-    mods: KeyModifiers::NONE,
-    action: Action::PrevField,
-    label: "↑",
-    description: "prev field",
-  },
-  // Plain Enter is dual-duty on the Rerank tab:
-  //   - in the Query field   → dispatch `/v1/rerank`
-  //   - in the Candidate field → stage the buffer onto the list
-  // The dispatcher (`apply_rerank_submit`) branches on the
-  // focused field so a single muscle-memory chord drives both
-  // tasks without a dedicated `+:stage` chord.
-  Binding {
-    key: KeyCode::Enter,
-    mods: KeyModifiers::NONE,
-    action: Action::Submit,
-    label: ENTER_LABEL,
-    description: "query/add candidate",
-  },
-  Binding {
-    key: KeyCode::Enter,
-    mods: KeyModifiers::SHIFT,
-    action: Action::InsertNewline,
-    label: SHIFT_ENTER_LABEL,
-    description: "newline",
-  },
-];
-
-const CONFIRM_POPUP_BINDINGS: &[Binding] = &[
-  Binding {
-    key: KeyCode::Enter,
-    mods: KeyModifiers::NONE,
-    action: Action::Submit,
-    label: ENTER_LABEL,
-    description: "confirm",
+    scopes: FocusSet::INPUT,
   },
   Binding {
     key: KeyCode::Esc,
@@ -953,21 +739,36 @@ const CONFIRM_POPUP_BINDINGS: &[Binding] = &[
     action: Action::Cancel,
     label: ESC_LABEL,
     description: "cancel",
+    scopes: FocusSet::CONFIRM_POPUP,
+  },
+  Binding {
+    key: KeyCode::Esc,
+    mods: KeyModifiers::NONE,
+    action: Action::Cancel,
+    label: ESC_LABEL,
+    description: "close",
+    scopes: FocusSet::HF_DIALOG,
+  },
+  // ─── Rerank field cycle (↑↓ inside rerank input only) ───────
+  // Collides with MoveUp/MoveDown on the same keys; disjoint
+  // scopes (RERANK_INPUT vs NAV|HF_DIALOG) keep them clean.
+  Binding {
+    key: KeyCode::Down,
+    mods: KeyModifiers::NONE,
+    action: Action::NextField,
+    label: "↓",
+    description: "next field",
+    scopes: FocusSet::RERANK_INPUT,
+  },
+  Binding {
+    key: KeyCode::Up,
+    mods: KeyModifiers::NONE,
+    action: Action::PrevField,
+    label: "↑",
+    description: "prev field",
+    scopes: FocusSet::RERANK_INPUT,
   },
 ];
-
-/// Bindings the help bar should show in the supplied focus.
-/// Looks at the compile-time defaults — runtime keymap overrides
-/// flow through [`KeyMap::bindings_for`] instead.
-#[cfg(test)]
-fn default_bindings_for(focus: Focus) -> &'static [Binding] {
-  for (f, b) in DEFAULT_BINDINGS {
-    if *f == focus {
-      return b;
-    }
-  }
-  &[]
-}
 
 // ─── Runtime keymap (config overrides) ──────────────────────────
 //
@@ -991,26 +792,53 @@ use std::collections::BTreeMap;
 /// route every key through [`KeyMap::action_for`] and the help
 /// overlay walks [`KeyMap::iter`] so a config tweak takes effect
 /// everywhere without touching the dispatcher.
+///
+/// Storage is a flat `Vec<Binding>` (one row per chord+scope);
+/// `per_focus` caches per-focus snapshots so `bindings_for(focus)`
+/// can return a `&[Binding]` slice. Rebuilt after `apply_overrides`.
 #[derive(Debug, Clone)]
 pub struct KeyMap {
-  by_focus: BTreeMap<Focus, Vec<Binding>>,
+  flat: Vec<Binding>,
+  per_focus: BTreeMap<Focus, Vec<Binding>>,
 }
 
 impl Default for KeyMap {
   fn default() -> Self {
-    let mut by_focus: BTreeMap<Focus, Vec<Binding>> = BTreeMap::new();
-    for (focus, rows) in DEFAULT_BINDINGS {
-      by_focus.insert(*focus, rows.to_vec());
-    }
-    KeyMap { by_focus }
+    let flat: Vec<Binding> = DEFAULT_BINDINGS.to_vec();
+    let per_focus = build_per_focus(&flat);
+    KeyMap { flat, per_focus }
   }
+}
+
+/// Rebuild the per-focus cache from the flat list. Called on
+/// construction and after every override pass.
+fn build_per_focus(flat: &[Binding]) -> BTreeMap<Focus, Vec<Binding>> {
+  let mut per_focus: BTreeMap<Focus, Vec<Binding>> = BTreeMap::new();
+  for focus in [
+    Focus::List,
+    Focus::Filter,
+    Focus::RightPane,
+    Focus::ChatInput,
+    Focus::EmbedInput,
+    Focus::RerankInput,
+    Focus::ConfirmPopup,
+    Focus::HfDialog,
+  ] {
+    let rows: Vec<Binding> = flat
+      .iter()
+      .filter(|b| b.scopes.contains(focus))
+      .copied()
+      .collect();
+    per_focus.insert(focus, rows);
+  }
+  per_focus
 }
 
 impl KeyMap {
   /// Look up the action triggered by `(key, mods)` in the supplied
   /// focus. Returns `None` when nothing matches.
   pub fn action_for(&self, focus: Focus, key: KeyCode, mods: KeyModifiers) -> Option<Action> {
-    self.by_focus.get(&focus).and_then(|rows| {
+    self.per_focus.get(&focus).and_then(|rows| {
       rows
         .iter()
         .find(|b| b.key == key && b.mods == mods)
@@ -1020,7 +848,7 @@ impl KeyMap {
 
   /// Bindings the help bar should show in the supplied focus.
   pub fn bindings_for(&self, focus: Focus) -> &[Binding] {
-    self.by_focus.get(&focus).map(Vec::as_slice).unwrap_or(&[])
+    self.per_focus.get(&focus).map(Vec::as_slice).unwrap_or(&[])
   }
 
   /// Iterator over every `(focus, bindings)` pair. Replaces direct
@@ -1028,17 +856,23 @@ impl KeyMap {
   /// walk the whole table.
   pub fn iter(&self) -> impl Iterator<Item = (Focus, &[Binding])> {
     self
-      .by_focus
+      .per_focus
       .iter()
       .map(|(focus, rows)| (*focus, rows.as_slice()))
   }
 
+  /// Iterator over every flat binding (no focus filtering). Used by
+  /// tests that need to walk the source-of-truth table.
+  pub fn flat(&self) -> &[Binding] {
+    &self.flat
+  }
+
   /// Overlay user-supplied `action → key_spec` pairs onto the
   /// keymap (kdash-style). For each override, every default
-  /// binding for that action across all focuses is removed; the
-  /// new binding is then inserted in every focus where the action
-  /// previously lived. Any existing binding at the new key spec in
-  /// those focuses is dropped to prevent ambiguous dispatch.
+  /// binding for that action is removed; a new binding is inserted
+  /// with the same scopes. Any existing binding at the new chord
+  /// inside those scopes is also dropped to prevent ambiguous
+  /// dispatch (and a warning surfaces the conflict).
   ///
   /// Returns human-readable warnings for unknown actions and
   /// unparseable key specs; the caller forwards them to
@@ -1063,45 +897,53 @@ impl KeyMap {
           continue;
         }
       };
+      // Find every existing row for this action; capture the union
+      // of their scopes and the first description we encounter.
+      let mut combined_scopes = FocusSet::EMPTY;
+      let mut description: &'static str = "";
+      for b in self.flat.iter() {
+        if b.action == action {
+          combined_scopes = combined_scopes.union(b.scopes);
+          if description.is_empty() {
+            description = b.description;
+          }
+        }
+      }
+      if combined_scopes.bits() == 0 {
+        warnings.push(format!(
+          "keybindings.{raw_action}: action has no default binding; nothing was rebound"
+        ));
+        continue;
+      }
       // Leak the runtime label so the resulting Binding fits the
       // `&'static str` slot. One-time at startup, never repeated.
       let leaked_label: &'static str = Box::leak(spec.label.into_boxed_str());
-      let mut any_focus_had_action = false;
-      for rows in self.by_focus.values_mut() {
-        let mut description: &'static str = "";
-        let mut rebuilt: Vec<Binding> = Vec::with_capacity(rows.len());
-        let mut had_action_here = false;
-        for b in rows.iter().copied() {
-          if b.action == action {
-            had_action_here = true;
-            if description.is_empty() {
-              description = b.description;
-            }
-            continue;
-          }
-          if b.key == spec.key && b.mods == spec.mods {
-            continue;
-          }
-          rebuilt.push(b);
+      // Drop every existing binding for this action, plus any other
+      // binding sitting on the new chord within the same scope set
+      // (would otherwise cause ambiguous dispatch).
+      self.flat.retain(|b| {
+        if b.action == action {
+          return false;
         }
-        if had_action_here {
-          any_focus_had_action = true;
-          rebuilt.push(Binding {
-            key: spec.key,
-            mods: spec.mods,
-            action,
-            label: leaked_label,
-            description,
-          });
+        // Same chord, overlapping scope → drop. Keep when scopes
+        // are disjoint (e.g. Esc means different things in
+        // ConfirmPopup vs HfDialog).
+        if b.key == spec.key && b.mods == spec.mods && b.scopes.bits() & combined_scopes.bits() != 0
+        {
+          return false;
         }
-        *rows = rebuilt;
-      }
-      if !any_focus_had_action {
-        warnings.push(format!(
-          "keybindings.{raw_action}: action has no default binding in any focus; nothing was rebound"
-        ));
-      }
+        true
+      });
+      self.flat.push(Binding {
+        key: spec.key,
+        mods: spec.mods,
+        action,
+        label: leaked_label,
+        description,
+        scopes: combined_scopes,
+      });
     }
+    self.per_focus = build_per_focus(&self.flat);
     warnings
   }
 }
@@ -1134,6 +976,8 @@ impl Action {
     ("yank_curl", Action::YankCurl),
     ("yank_path", Action::YankPath),
     ("cycle_theme", Action::CycleTheme),
+    ("cycle_theme_prev", Action::CycleThemePrev),
+    ("open_hf_dialog", Action::OpenHfDialog),
     ("focus_list", Action::FocusList),
     ("next_focus", Action::NextFocus),
     ("prev_focus", Action::PrevFocus),
@@ -1171,6 +1015,41 @@ impl Action {
   /// The canonical config-facing names, used in error messages.
   pub fn all_config_names() -> Vec<&'static str> {
     Self::CONFIG_NAMES.iter().map(|(n, _)| *n).collect()
+  }
+
+  /// Per-focus description override for actions whose meaning
+  /// varies across focuses. `Submit` is the main example —
+  /// "launch" in the filter, "send" in chat, "embed" in embed,
+  /// "open / confirm" in the HF dialog, etc. Returns `None` when
+  /// the generic [`Binding::description`] is the right label.
+  ///
+  /// Help-bar / overlay callers prefer this over the binding's
+  /// raw description so the chip text matches what the action
+  /// will actually do in the current pane.
+  pub fn description_for(self, focus: Focus) -> Option<&'static str> {
+    match (self, focus) {
+      (Action::Submit, Focus::Filter) => Some("launch"),
+      (Action::Submit, Focus::RightPane) => Some("launch (Settings)"),
+      (Action::Submit, Focus::EmbedInput) => Some("embed"),
+      (Action::Submit, Focus::RerankInput) => Some("query/add candidate"),
+      (Action::Submit, Focus::ConfirmPopup) => Some("confirm"),
+      (Action::Submit, Focus::HfDialog) => Some("open / confirm"),
+      // Motion in the right pane is scroll, not row movement. The
+      // Settings tab routes this in the handler.
+      (Action::MoveUp, Focus::RightPane) => Some("scroll up"),
+      (Action::MoveDown, Focus::RightPane) => Some("scroll down"),
+      // Cancel reads "close" in the HF dialog (dismiss the modal)
+      // and "cancel" in the confirm popup (cancel the destructive
+      // action).
+      (Action::Cancel, Focus::HfDialog) => Some("close"),
+      // `FocusList` is reachable from both the right pane (Esc =
+      // "models list") and the right pane via Shift+M (= "models").
+      // The two chords cluster under one help row; we want the more
+      // specific "models list" wording when read from the right
+      // pane context.
+      (Action::FocusList, Focus::RightPane) => Some("models list"),
+      _ => None,
+    }
   }
 }
 
@@ -1333,36 +1212,6 @@ pub const SUPER_PREFIX: &str = "⌘";
 #[cfg(not(target_os = "macos"))]
 pub const SUPER_PREFIX: &str = "Super+";
 
-// Pre-composed Ctrl+<letter> chord labels used in the static
-// binding tables. Keeping them platform-conditional here means
-// every binding entry just writes `CTRL_K_LABEL` instead of
-// repeating the `#[cfg]` machinery at every site.
-
-#[cfg(target_os = "macos")]
-pub const CTRL_R_LABEL: &str = "⌃r";
-#[cfg(not(target_os = "macos"))]
-pub const CTRL_R_LABEL: &str = "Ctrl+r";
-
-#[cfg(target_os = "macos")]
-pub const CTRL_K_LABEL: &str = "⌃k";
-#[cfg(not(target_os = "macos"))]
-pub const CTRL_K_LABEL: &str = "Ctrl+k";
-
-#[cfg(target_os = "macos")]
-pub const CTRL_C_LABEL: &str = "⌃c";
-#[cfg(not(target_os = "macos"))]
-pub const CTRL_C_LABEL: &str = "Ctrl+c";
-
-#[cfg(target_os = "macos")]
-pub const CTRL_D_LABEL: &str = "⌃d";
-#[cfg(not(target_os = "macos"))]
-pub const CTRL_D_LABEL: &str = "Ctrl+d";
-
-#[cfg(target_os = "macos")]
-pub const CTRL_X_LABEL: &str = "⌃x";
-#[cfg(not(target_os = "macos"))]
-pub const CTRL_X_LABEL: &str = "Ctrl+x";
-
 fn format_key_label(key: &KeyCode, mods: KeyModifiers) -> String {
   let mut out = String::new();
   if mods.contains(KeyModifiers::CONTROL) {
@@ -1418,15 +1267,21 @@ mod tests {
   /// the binding-shape tests below; production reads through
   /// `App::action_for` which routes via the active `KeyMap`.
   fn action_for(focus: Focus, key: KeyCode, mods: KeyModifiers) -> Option<Action> {
-    default_bindings_for(focus)
+    DEFAULT_BINDINGS
       .iter()
-      .find(|b| b.key == key && b.mods == mods)
+      .find(|b| b.scopes.contains(focus) && b.key == key && b.mods == mods)
       .map(|b| b.action)
   }
 
-  /// Helper: default bindings slice for a focus.
-  fn bindings_for(focus: Focus) -> &'static [Binding] {
-    default_bindings_for(focus)
+  /// Helper: default bindings list for a focus, filtered from the
+  /// flat slice. Allocates because the flat list isn't pre-grouped
+  /// per focus — fine in tests.
+  fn bindings_for(focus: Focus) -> Vec<Binding> {
+    DEFAULT_BINDINGS
+      .iter()
+      .filter(|b| b.scopes.contains(focus))
+      .copied()
+      .collect()
   }
 
   #[test]
@@ -1452,46 +1307,21 @@ mod tests {
   }
 
   #[test]
-  fn lowercase_d_in_list_focus_opens_hf_dialog() {
-    // Round-13: HF pull moved from Shift+D to lowercase `d` so it's
-    // reachable with a single unmodified keystroke. Ctrl+D is now
-    // bound to delete-model (see below).
+  fn shift_p_in_list_focus_opens_hf_dialog() {
+    // Navigation policy: "Pull" lives behind Shift+P (Shift =
+    // navigate). The `d` key is reserved for Ctrl+D = delete.
     assert_eq!(
-      action_for(Focus::List, KeyCode::Char('d'), KeyModifiers::NONE),
+      action_for(Focus::List, KeyCode::Char('P'), KeyModifiers::SHIFT),
       Some(Action::OpenHfDialog),
     );
   }
 
   #[test]
-  fn d_is_not_shadowed_in_any_sub_focus() {
-    // The dialog steals input via `Focus::HfDialog`; the binding
-    // must not also fire under another focus (e.g. RightPane or
-    // the input modes) where it would collide with an unrelated
-    // action.
-    use crate::tui::keybindings::Focus::*;
-    for focus in [
-      Filter,
-      RightPane,
-      ChatInput,
-      EmbedInput,
-      RerankInput,
-      ConfirmPopup,
-      HfDialog,
-    ] {
-      let action = action_for(focus, KeyCode::Char('d'), KeyModifiers::NONE);
-      assert!(
-        action.is_none() || action == Some(Action::OpenHfDialog),
-        "`d` collision under {focus:?}: {action:?}"
-      );
-    }
-  }
-
-  #[test]
-  fn shift_d_no_longer_opens_hf_dialog() {
-    // Round-13 retired Shift+D in favour of lowercase `d`. Pin the
-    // removal so a future refactor doesn't accidentally re-add it.
+  fn bare_d_no_longer_opens_hf_dialog() {
+    // Pin the retirement so a future refactor can't accidentally
+    // re-add `d` → OpenHfDialog.
     assert_eq!(
-      action_for(Focus::List, KeyCode::Char('D'), KeyModifiers::SHIFT),
+      action_for(Focus::List, KeyCode::Char('d'), KeyModifiers::NONE),
       None,
     );
   }
@@ -1884,7 +1714,7 @@ mod tests {
   fn format_key_label_ctrl_char_renders_with_ctrl_prefix() {
     assert_eq!(
       format_key_label(&KeyCode::Char('c'), KeyModifiers::CONTROL),
-      CTRL_C_LABEL
+      crate::ctrl_label!("c")
     );
   }
 

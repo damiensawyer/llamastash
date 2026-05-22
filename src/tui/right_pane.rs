@@ -548,7 +548,8 @@ mod tests {
 
   #[test]
   fn bottom_hint_chips_match_each_focus_tab_combo() {
-    use crate::tui::keybindings::{Focus, CTRL_R_LABEL, ENTER_LABEL};
+    use crate::tui::keybindings::{Focus, ENTER_LABEL};
+    let ctrl_r = crate::ctrl_label!("r");
     // Navigation focuses surface the entry-point keystroke per tab.
     assert_eq!(
       bottom_hint_chips(&app_with_focus(Focus::RightPane, RightTab::Logs)),
@@ -574,7 +575,7 @@ mod tests {
     // fresh app the field is *not* editing yet, so the chip strip
     // shows `e:edit` (no `Esc:clear` because the buffer is empty).
     let enter_send = format!("{ENTER_LABEL}:send");
-    let ctrl_r_think = format!("{CTRL_R_LABEL}:think");
+    let ctrl_r_think = format!("{ctrl_r}:think");
     assert_eq!(
       bottom_hint_chips(&app_with_focus(Focus::ChatInput, RightTab::Chat)),
       vec![
@@ -780,7 +781,8 @@ mod tests {
     // Rebinding `chat_input.exit_edit` (the canonical home for the
     // `ExitEdit` action) must flow through to the inline-edit chip
     // strip — same lookup, same focus, so the chip stays honest.
-    use crate::tui::keybindings::{Focus, KeyMap, CTRL_X_LABEL};
+    use crate::tui::keybindings::{Focus, KeyMap};
+    let ctrl_x_label = crate::ctrl_label!("x");
     use crate::tui::launch_picker::PickerField;
     use std::collections::BTreeMap;
     let mut keymap = KeyMap::default();
@@ -804,7 +806,7 @@ mod tests {
       String::new(),
     );
     let chips = bottom_hint_chips(&app);
-    let expected = format!("{CTRL_X_LABEL}:clear");
+    let expected = format!("{ctrl_x_label}:clear");
     assert!(
       chips.iter().any(|c| c == &expected),
       "expected rebound chip, got {chips:?}"

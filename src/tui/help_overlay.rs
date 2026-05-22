@@ -521,7 +521,13 @@ fn resolve_one(app: &App, focus: Focus, action: Action) -> Option<(String, Strin
     .map(|b| b.label)
     .collect::<Vec<_>>()
     .join(",");
-  let description = matches[0].description.to_string();
+  // Per-focus description override (e.g. `Submit` reads "embed" in
+  // EmbedInput, "send" in ChatInput). Falls back to the binding's
+  // generic description.
+  let description = action
+    .description_for(focus)
+    .unwrap_or(matches[0].description)
+    .to_string();
   Some((keys, description))
 }
 

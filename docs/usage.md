@@ -107,38 +107,51 @@ Each entry in `keybindings:` rebinds one action. Action names accept both snake_
 - Modifier chains: `ctrl+q`, `shift+tab`, `alt+enter`, `ctrl+shift+r`. Recognised modifiers: `ctrl`/`control`, `shift`, `alt`/`meta`, `super`/`cmd`.
 - Named keys: `enter`/`return`, `esc`/`escape`, `tab`, `backtab`, `space`, `backspace`/`bs`, `up`/`down`/`left`/`right`, `home`, `end`, `pgup`/`pageup`, `pgdn`/`pagedown`, `delete`/`del`, `insert`/`ins`, `f1`–`f12`.
 
-Override semantics mirror kdash: the action's existing default binding(s) are removed across every focus that used the action, and the new binding is inserted in those same focuses. Any binding that previously used the new key spec in those focuses is dropped to keep dispatch unambiguous. Unknown action names and unparseable specs log a warning at startup; the rebind is dropped, the rest of the keymap survives.
+Override semantics mirror kdash: the action's existing default binding(s) are removed and the new binding is inserted with the same focus scope. Any binding that previously used the new key spec in those scopes is dropped to keep dispatch unambiguous. Unknown action names and unparseable specs log a warning at startup; the rebind is dropped, the rest of the keymap survives.
 
-| Action name | Default key | Where it fires |
+The keybinding scheme follows two policies:
+
+- **Destructive actions live behind `Ctrl`** (stop, kill, restart, delete, cancel-download).
+- **Cross-pane navigation lives behind `Shift`** (`Shift+M/L/C/E/R/S/P` jump to surfaces; `Shift+Tab` reverses pane cycle).
+
+Bare letters are for tool actions (`f` favorite, `e` edit, `u/c/p` yank, `t` theme, `q` quit).
+
+| Action name | Default key(s) | Where it fires |
 |---|---|---|
-| `quit` | `q`, `ctrl+c` | List focus |
-| `move_up` / `move_down` | `↑`/`k`, `↓`/`j` | List, right pane |
+| `quit` | `q` · `ctrl+c` | Nav focuses |
+| `toggle_help` | `?` | Nav focuses |
+| `cycle_theme` | `t` | Nav focuses |
+| `cycle_theme_prev` | `shift+t` | Nav focuses — walks the theme list in reverse |
+| `restart_daemon` | `ctrl+r` | Nav focuses — confirmation popup |
+| `kill_daemon` | `ctrl+k` | List — confirmation popup |
+| `stop_model` | `ctrl+s` | Nav focuses — confirmation popup |
+| `delete_model` | `ctrl+d` | List — confirmation popup (refuses on a running launch) |
+| `cancel_download` | `ctrl+x` | Nav focuses — confirmation popup |
+| `move_up` / `move_down` | `↑` · `k`, `↓` · `j` | Nav focuses, HF dialog |
 | `page_up` / `page_down` | `PgUp` / `PgDn` | List |
-| `go_top` / `go_bottom` | `g` / `G` | List |
+| `go_top` / `go_bottom` | `g` · `Home`, `G` · `End` | List |
 | `open_filter` | `/` | List |
 | `clear_filter` | `Esc` | Filter input |
 | `toggle_favorite` | `f` | List |
 | `open_launch_picker` | `Enter` | List |
-| `submit` | `Enter` | Filter, picker, inline edit |
-| `cancel` | `Esc` | Picker, inline edit |
-| `yank_url` / `yank_curl` / `yank_path` | `u` / `c` / `p` | List |
-| `cycle_theme` | `t` | List |
-| `toggle_help` | `?` | List, right pane |
-| `stop_model` | `s` | List |
-| `restart_daemon` | `Ctrl+R` | List, right pane — shuts the daemon down and re-spawns; triggers a confirmation popup |
-| `kill_daemon` | `Ctrl+K` | List — triggers a confirmation popup |
-| `focus_list` | `Esc`, `Shift+M` | Right pane / tab inputs |
-| `focus_logs_tab` | `Shift+L` | List, right pane — gated on a running model |
-| `focus_chat_tab` | `Shift+C` | List, right pane — mode-appropriate (Chat / Embed / Rerank), gated on a running model |
-| `focus_settings_tab` | `Shift+S` | List, right pane — always available |
-| `next_focus` / `prev_focus` | `→`/`l`, `←`/`h` | Cross-pane navigation (arrows + vim-style; `Tab` is reserved for field cycling) |
-| `next_field` / `prev_field` | `Tab` / `Shift+Tab` | Right pane (Settings tab moves between editor rows) · Rerank input (cycles Query/Candidate) |
-| `cycle_value_next` / `cycle_value_prev` | `→` / `←` | Settings tab — cycles the focused row's value through pinned presets |
+| `open_hf_dialog` | `shift+p` | List — "Pull" mnemonic |
+| `submit` | `Enter` | Filter, right pane, embed, rerank, confirm popup, HF dialog |
+| `cancel` | `Esc` | Confirm popup, HF dialog |
+| `yank_url` / `yank_curl` / `yank_path` | `u`, `c` · `y`, `p` | Nav focuses — `y` is a vi-style alias for `c` |
+| `next_focus` / `prev_focus` | `Tab` · `l`, `Shift+Tab` · `h` | Universal pane cycle (TUI focuses); vi aliases are nav-only |
+| `focus_list` | `Esc` · `Shift+M` | Right pane / tab inputs |
+| `focus_logs_tab` | `Shift+L` | Nav focuses — gated on a running model |
+| `focus_chat_tab` | `Shift+C` · `Shift+E` · `Shift+R` | Nav focuses — picks mode-appropriate tab (Chat / Embed / Rerank), gated on running |
+| `focus_settings_tab` | `Shift+S` | Nav focuses — always available |
+| `next_field` / `prev_field` | `↓` / `↑` | Rerank input — cycles Query / Candidate |
+| `cycle_value_next` / `cycle_value_prev` | `→` / `←` | Right pane (Settings) — cycles the focused row's value |
 | `enter_edit` / `exit_edit` | `e` / `Esc` | Right pane → tab input |
-| `send_chat` | `Enter` (Shift+Enter inserts newline on kitty-protocol terminals) | Chat input |
+| `send_chat` | `Enter` | Chat input |
+| `insert_newline` | `Shift+Enter` | All input focuses (kitty-protocol terminals only) |
 | `toggle_think_collapse` | `Ctrl+r` | Chat input |
 | `toggle_auto_scroll` | `s` | Right pane (Logs) |
-| `stage_rerank_candidate` | `Tab` | Rerank input — stages the candidate buffer and advances to the next field |
+
+The "nav focuses" alias means `List` + `RightPane`; "input focuses" means `ChatInput` + `EmbedInput` + `RerankInput`; "TUI focuses" is both groups combined.
 
 ### Environment variables
 
@@ -387,15 +400,18 @@ These are the defaults. Override any binding via the `keybindings:` block in `co
 | `/` | Open filter (predicate applies live as you type; `Enter` drills into the focused result by opening the launch picker; `Esc` walks back: exit edit → clear → close) |
 | `f` | Toggle favorite on focused model |
 | `Enter` | Open launch picker on focused model |
-| `y` / `Y` / `p` | Yank URL / curl / model path |
-| `t` | Cycle theme |
+| `u` / `c` / `p` | Yank URL / curl / model path. `y` is a vi-style alias for `c`. |
+| `t` / `Shift+T` | Cycle theme forward / backward |
 | `Tab` / `Shift+Tab` | Move focus across panes (`h` / `l` do the same — Left/Right arrows are intentionally unbound on Models to avoid an asymmetric pane-jump) |
 | `Shift+M` / `Shift+L` / `Shift+C` / `Shift+S` | Jump focus to Models / Logs / Chat / Settings respectively. `L` and `C` only fire when the focused model is running. |
-| `d` | Open the HuggingFace pull dialog (Models list focus only — search + sort + paginate, download via the pinned status strip) |
+| `Shift+P` | Open the HuggingFace pull dialog (Models list focus only — search + sort + paginate, download via the pinned status strip). "P" for Pull. |
+| `Ctrl+S` | Stop the focused running launch (any nav focus; opens a confirmation popup) |
+| `Ctrl+R` | Restart the daemon (any nav focus; opens a confirmation popup) |
+| `Ctrl+K` | Kill the daemon entirely (List focus; opens a confirmation popup) |
 | `Ctrl+D` | Delete the focused model from disk (idle rows only: `NotLaunched` / `Stopped` — opens a confirmation popup; HF-cache models remove the entire `models--<owner>--<repo>` directory to reclaim blob bytes) |
 | `Ctrl+X` | Cancel the currently-active HF download (any focus; opens a confirmation popup; queued pulls stay in line — press again on the next promoted pull) |
 
-### HuggingFace pull dialog (`Focus::HfDialog`, `d` from the Models list)
+### HuggingFace pull dialog (`Focus::HfDialog`, `Shift+P` from the Models list)
 
 Three-stage modal: **Search → File picker → Confirm**. Search runs live against the public `/api/models` endpoint (300 ms debounce); paste an `owner/repo[:filename]` slug + Enter to bypass search.
 
@@ -457,11 +473,15 @@ inheritance is visible at the row level.
 
 | Key | Action |
 |---|---|
-| `Tab` / `Shift+Tab` | In the Settings tab, moves between editor rows. In other right-pane tabs, no-op — use arrows / `h` / `l` to navigate panes. |
-| `l` / `h` | Cycle pane focus (Right arrow is only bound on the Settings tab for `cycle value`; Left arrow stays unbound on the list side) |
+| `Tab` / `Shift+Tab` | Cycle pane focus (universal across the TUI; `l` / `h` are vi aliases) |
+| `↑` / `↓` (or `k` / `j`) | Settings tab: move between editor rows. Logs tab: scroll the buffer. |
+| `←` / `→` | Settings tab: cycle the focused row's value through its preset list (no-op on other tabs) |
 | `Esc` / `Shift+M` | Return focus to the Models list |
-| `Shift+L` / `Shift+C` / `Shift+S` | Jump to Logs / Chat / Settings tab. `L` and `C` are gated on a running model. |
+| `Shift+L` / `Shift+C` / `Shift+S` / `Shift+E` / `Shift+R` | Jump to Logs / Chat / Settings tab. `L` and `C/E/R` are gated on a running model. |
 | `s` | Toggle Logs auto-scroll |
+| `c` (or `y`) | Logs tab: copy the full log buffer to clipboard |
+| `Ctrl+S` | Stop the focused running launch (confirmation popup) |
+| `e` | Enter edit mode on the active tab's input field |
 
 ### Chat tab (`Focus::ChatInput`)
 
@@ -478,15 +498,18 @@ inheritance is visible at the row level.
 |---|---|
 | (alphanumerics / Backspace) | Edit input |
 | `Enter` | Call `/v1/embeddings` |
+| `Shift+Enter` | Insert newline (kitty-protocol terminals only) |
+| `Tab` / `Shift+Tab` | Cycle pane focus |
 
 ### Rerank tab (`Focus::RerankInput`)
 
 | Key | Action |
 |---|---|
 | (alphanumerics / Backspace) | Edit current field |
-| `Tab` | Stage candidate buffer, or cycle to the next field (Query ↔ Candidate) |
-| `Shift+Tab` | Cycle back to the previous field |
-| `Enter` | Call `/v1/rerank` |
+| `↓` / `↑` | Cycle Query ↔ Candidate field |
+| `Enter` | Query field → call `/v1/rerank`. Candidate field → stage the buffer onto the candidate list. |
+| `Shift+Enter` | Insert newline (kitty-protocol terminals only) |
+| `Tab` / `Shift+Tab` | Cycle pane focus (universal; not field cycle) |
 
 ## Toasts
 

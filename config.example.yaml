@@ -131,27 +131,76 @@ probe_timeout_secs: 120
 #                               f1..f12
 #
 # Override semantics: the action's existing default binding(s) are
-# removed across every focus that used it, and the new binding is
-# inserted in those same focuses. Any binding that previously used
-# the new key spec in those focuses is dropped to keep dispatch
-# unambiguous. Unknown action names and unparseable specs log a
-# warning at startup — the rebind is dropped, the rest of the
-# keymap survives.
+# removed and the new binding is inserted with the same focus
+# scope. Any binding that previously used the new key spec inside
+# those scopes is dropped to keep dispatch unambiguous. Unknown
+# action names and unparseable specs log a warning at startup —
+# the rebind is dropped, the rest of the keymap survives.
 #
-# Valid action names (see docs/usage.md for the action → default
-# binding cheat-sheet):
-#   quit, move_up, move_down, page_up, page_down, go_top, go_bottom,
-#   open_filter, clear_filter, toggle_favorite, open_launch_picker,
-#   submit, cancel, yank_url, yank_curl,
-#   yank_path, cycle_theme, focus_list, next_focus, prev_focus,
-#   send_chat, toggle_think_collapse, toggle_auto_scroll,
-#   stage_rerank_candidate, toggle_help, stop_model, enter_edit,
-#   exit_edit, kill_daemon, next_field, prev_field,
-#   cycle_value_next, cycle_value_prev
+# Each line below is the action's *default* binding. Uncomment and
+# edit the right-hand side to rebind. Actions with more than one
+# default chord show the secondary key in a trailing comment.
 keybindings: {}
-#   quit: ctrl+q
-#   cycle_theme: T
-#   toggle_help: f1
+#  # ── Global / always-on ─────────────────────────────────────
+#  quit: q                            # also: ctrl+c
+#  toggle_help: '?'
+#  cycle_theme: t
+#  cycle_theme_prev: T                # i.e. shift+t
+#
+#  # ── Daemon-level (destructive — all behind Ctrl) ──────────
+#  restart_daemon: ctrl+r
+#  kill_daemon: ctrl+k
+#  stop_model: ctrl+s
+#  delete_model: ctrl+d
+#  cancel_download: ctrl+x
+#
+#  # ── Motion (Models list + right pane) ─────────────────────
+#  move_up: up                        # vi alias: k
+#  move_down: down                    # vi alias: j
+#  page_up: pgup
+#  page_down: pgdn
+#  go_top: g                          # also: home
+#  go_bottom: G                       # also: end
+#
+#  # ── Pane navigation ────────────────────────────────────────
+#  next_focus: tab                    # nav alias: l
+#  prev_focus: shift+tab              # nav alias: h
+#
+#  # ── Shift-letter quick-jumps to surfaces ──────────────────
+#  focus_list: M                      # i.e. shift+m
+#  focus_logs_tab: L
+#  focus_chat_tab: C                  # also: E, R (mnemonic aliases)
+#  focus_settings_tab: S
+#  open_hf_dialog: P                  # i.e. shift+p — "Pull"
+#
+#  # ── Models list local actions ─────────────────────────────
+#  open_filter: '/'
+#  clear_filter: esc                  # in filter focus
+#  toggle_favorite: f
+#  open_launch_picker: enter          # in list focus
+#  yank_url: u
+#  yank_curl: c                       # vi alias: y (yank)
+#  yank_path: p
+#
+#  # ── Right pane (Logs / Settings) ──────────────────────────
+#  enter_edit: e
+#  exit_edit: esc                     # in input focuses
+#  toggle_auto_scroll: s              # logs tab
+#  cycle_value_next: right            # settings tab
+#  cycle_value_prev: left
+#
+#  # ── Submit / cancel (Enter / Esc in multi-focus scopes) ───
+#  submit: enter                      # filter, right pane, embed, rerank, confirm popup, HF dialog
+#  send_chat: enter                   # chat input
+#  insert_newline: shift+enter        # all input focuses (kitty-protocol terminals)
+#  cancel: esc                        # confirm popup, HF dialog
+#
+#  # ── Field cycling (rerank input) ──────────────────────────
+#  next_field: down
+#  prev_field: up
+#
+#  # ── Chat-only chord ───────────────────────────────────────
+#  toggle_think_collapse: ctrl+r      # chat input
 
 # arch_defaults: user escape hatch over the built-in `(architecture,
 #   gpu_backend) → TypedKnobs` table that ships in the binary. Keys

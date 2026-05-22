@@ -553,7 +553,7 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
           let n = lines.len();
           let text = lines.join("\n");
           match clipboard::write(&text) {
-            Ok(backend) => app.show_toast(format!("copied logs ({n} lines) via {backend}")),
+            Ok(_) => app.show_toast(format!("copied logs ({n} lines)")),
             Err(e) => app.show_toast(format!("clipboard unavailable: {e}")),
           }
         }
@@ -568,7 +568,7 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
           _ => "",
         };
         match clipboard::write(&text) {
-          Ok(backend) => app.show_toast(format!("copied {label} via {backend}")),
+          Ok(_) => app.show_toast(format!("copied {label}")),
           Err(e) => {
             // Curl payloads are long enough to drown the toast on a
             // clipboard failure; trim aggressively for those while
@@ -582,14 +582,18 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
           }
         }
       } else {
-        // `Y` (yank-curl) is the only path that strictly requires a
-        // Ready model; the smart `y` fallback yields a string for
-        // any focused row, so this branch only fires for `Y`.
+        // `c` (yank-curl) is the only path that strictly requires a
+        // Ready model; the smart `y/c` fallback yields a string for
+        // any focused row, so this branch only fires for `c`.
         app.show_toast("nothing to copy — focus a Ready model");
       }
     }
     Action::CycleTheme => {
       app.cycle_theme();
+      app.show_toast(format!("theme → {}", app.options.theme.canonical()));
+    }
+    Action::CycleThemePrev => {
+      app.cycle_theme_prev();
       app.show_toast(format!("theme → {}", app.options.theme.canonical()));
     }
     Action::ToggleHelp => app.toggle_help(),
@@ -620,16 +624,9 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
       app.chat.collapse_thinks = !app.chat.collapse_thinks;
     }
     Action::ToggleAutoScroll => {
-      // `s` is double-duty in the right pane:
-      //  - Logs tab → toggle auto-scroll (legacy).
-      //  - Settings tab → stop the focused managed launch (round-8).
-      //  - Any other right tab → no-op so we don't accidentally
-      //    fire a stop or scroll toggle on Chat/Embed/Rerank.
-      // Only toggle auto-scroll on the Logs surface; on Settings let
-      // `apply_stop_model` handle the no-managed case (it toasts).
-      if app.focus == Focus::RightPane && app.right_tab == RightTab::Settings {
-        apply_stop_model(app);
-      } else if app.right_tab == RightTab::Logs {
+      // `s` toggles the Logs auto-scroll. Stop lives on `Ctrl+S`
+      // (destructive policy) so bare `s` has a single meaning.
+      if app.right_tab == RightTab::Logs {
         app.logs_state.auto_scroll = !app.logs_state.auto_scroll;
       }
     }
@@ -1381,7 +1378,11 @@ fn apply_rerank_submit(app: &mut App) {
   // Enter in the query field.
   app.rerank.stage_candidate();
   if app.rerank.candidates.is_empty() {
-    app.show_toast("stage at least one candidate (↓ to candidate field, Enter to add)");
+    let next = app.resolve_label(Focus::RerankInput, Action::NextField, "↓");
+    let submit = app.resolve_label(Focus::RerankInput, Action::Submit, "Enter");
+    app.show_toast(format!(
+      "stage at least one candidate ({next} to candidate field, {submit} to add)"
+    ));
     return;
   }
   let query = app.rerank.query.buffer().to_string();
@@ -2946,12 +2947,15 @@ mod tests {
   }
 
   #[test]
-  fn d_opens_hf_dialog_and_esc_closes_it() {
+  fn shift_p_opens_hf_dialog_and_esc_closes_it() {
     use crate::tui::hf_dialog::HfStage;
     let mut app = App::new(Default::default());
     assert!(app.hf_dialog.is_none());
-    pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::NONE));
-    let dialog = app.hf_dialog.as_ref().expect("`d` must open the HF dialog");
+    pump_input(&mut app, key(KeyCode::Char('P'), KeyModifiers::SHIFT));
+    let dialog = app
+      .hf_dialog
+      .as_ref()
+      .expect("Shift+P must open the HF dialog");
     assert_eq!(dialog.stage, HfStage::Search);
     assert!(
       dialog.input.is_editing(),
@@ -2981,7 +2985,7 @@ mod tests {
   fn hf_dialog_o_in_resting_mode_cycles_sort_key() {
     use crate::init::hf_api::HfSortKey;
     let mut app = App::new(Default::default());
-    pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Char('P'), KeyModifiers::SHIFT));
     assert_eq!(
       app.hf_dialog.as_ref().map(|d| d.sort),
       Some(HfSortKey::Downloads)
@@ -3302,7 +3306,7 @@ mod tests {
   fn hf_dialog_o_while_editing_is_typed_not_cycled() {
     use crate::init::hf_api::HfSortKey;
     let mut app = App::new(Default::default());
-    pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Char('P'), KeyModifiers::SHIFT));
     // Field is auto-edit on open, so `o` is typed.
     pump_input(&mut app, key(KeyCode::Char('o'), KeyModifiers::NONE));
     assert_eq!(
@@ -3640,12 +3644,12 @@ mod tests {
   }
 
   #[test]
-  fn s_on_running_row_stages_stop_confirm_popup() {
+  fn ctrl_s_on_running_row_stages_stop_confirm_popup() {
     let mut app = App::new(Default::default());
     app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
     app.managed = vec![ready_managed_for_events("/m/qwen.gguf", 41100)];
     app.go_top();
-    pump_input(&mut app, key(KeyCode::Char('s'), KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Char('s'), KeyModifiers::CONTROL));
     match app.confirm_dialog {
       Some(crate::tui::app::ConfirmAction::StopModel {
         ref launch_id,
@@ -3659,11 +3663,11 @@ mod tests {
   }
 
   #[test]
-  fn s_on_non_running_row_toasts_instead_of_staging_confirm() {
+  fn ctrl_s_on_non_running_row_toasts_instead_of_staging_confirm() {
     let mut app = App::new(Default::default());
     app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
     app.go_top();
-    pump_input(&mut app, key(KeyCode::Char('s'), KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Char('s'), KeyModifiers::CONTROL));
     assert!(app.confirm_dialog.is_none(), "no managed row = no popup");
     let toast = app.toast_message().unwrap_or("");
     assert!(toast.contains("nothing to stop"), "toast: {toast}");
@@ -3678,7 +3682,7 @@ mod tests {
     let (tx, mut rx) = mpsc::channel::<WriterCmd>(4);
     pump_input_with_writer(
       &mut app,
-      key(KeyCode::Char('s'), KeyModifiers::NONE),
+      key(KeyCode::Char('s'), KeyModifiers::CONTROL),
       Some(&tx),
     );
     assert!(app.confirm_dialog.is_some(), "confirm popup primed");
@@ -3702,7 +3706,7 @@ mod tests {
     let (tx, mut rx) = mpsc::channel::<WriterCmd>(4);
     pump_input_with_writer(
       &mut app,
-      key(KeyCode::Char('s'), KeyModifiers::NONE),
+      key(KeyCode::Char('s'), KeyModifiers::CONTROL),
       Some(&tx),
     );
     pump_input_with_writer(&mut app, key(KeyCode::Esc, KeyModifiers::NONE), Some(&tx));
@@ -4269,49 +4273,45 @@ mod tests {
   }
 
   #[test]
-  fn s_on_settings_tab_opens_stop_confirm_for_running_launch() {
-    // Round-8 dual-duty `s`: on the Logs tab it toggles
-    // auto-scroll; on the Settings tab with a managed launch it
-    // pops the stop-model confirm dialog (same path as `s` in the
-    // Models list).
+  fn ctrl_s_on_settings_tab_opens_stop_confirm_for_running_launch() {
+    // Destructive policy: Stop lives on Ctrl+S in both List and
+    // RightPane. Bare `s` on Settings is the Logs auto-scroll
+    // toggle and nothing else.
     let mut app = App::new(Default::default());
     app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
     app.managed = vec![ready_managed_for_events("/m/qwen.gguf", 41100)];
     app.go_top();
     app.focus = Focus::RightPane;
     app.right_tab = RightTab::Settings;
-    pump_input(&mut app, key(KeyCode::Char('s'), KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Char('s'), KeyModifiers::CONTROL));
     match app.confirm_dialog {
       Some(crate::tui::app::ConfirmAction::StopModel { ref launch_id, .. }) => {
         assert_eq!(launch_id, "L-41100");
       }
       ref other => panic!("expected StopModel confirm, got {other:?}"),
     }
-    // Auto-scroll must remain untouched — `s` on Settings is
+    // Auto-scroll must remain untouched — Ctrl+S on Settings is
     // routed away from the logs branch.
     assert!(
       app.logs_state.auto_scroll,
-      "Settings `s` must not toggle the logs auto-scroll"
+      "Settings Ctrl+S must not toggle the logs auto-scroll"
     );
   }
 
   #[test]
-  fn s_on_settings_tab_toasts_without_managed_launch() {
-    // F1 #5: pressing `s` on Settings for an unlaunched model used
-    // to be a silent no-op. Now it routes through
-    // `apply_stop_model` so the user sees the standard "nothing to
-    // stop" toast. The chip is still gated on a managed launch,
-    // but the keybinding is always live.
+  fn ctrl_s_on_settings_tab_toasts_without_managed_launch() {
+    // Stop on a non-running selection toasts instead of silently
+    // no-oping — same path as Ctrl+S anywhere else.
     let mut app = App::new(Default::default());
     app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
     app.go_top();
     app.focus = Focus::RightPane;
     app.right_tab = RightTab::Settings;
-    pump_input(&mut app, key(KeyCode::Char('s'), KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Char('s'), KeyModifiers::CONTROL));
     assert!(app.confirm_dialog.is_none());
     assert!(
       app.toast.is_some(),
-      "Settings `s` with no managed row must toast, not silently no-op"
+      "Settings Ctrl+S with no managed row must toast, not silently no-op"
     );
   }
 

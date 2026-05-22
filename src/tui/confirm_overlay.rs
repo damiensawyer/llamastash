@@ -127,7 +127,7 @@ fn describe(action: &ConfirmAction) -> (&'static str, String) {
         "Cancel the active pull `{friendly_name}`? Any partial file in the HF \
          cache stays where it is. Queued pulls behind this one keep their \
          place; press {} again on the next promoted pull to cancel it too.",
-        crate::tui::keybindings::CTRL_X_LABEL
+        crate::ctrl_label!("x")
       ),
     ),
   }

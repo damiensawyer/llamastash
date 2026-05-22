@@ -471,7 +471,12 @@ impl App {
       .bindings_for(focus)
       .iter()
       .find(|b| b.action == action)?;
-    Some(format!("{}:{}", b.label, b.description))
+    // Prefer the focus-specific override from `Action::description_for`
+    // so `Submit` in chat reads "send", in embed reads "embed", etc.
+    // Falls back to the binding's generic description for actions
+    // that don't vary across focuses.
+    let description = action.description_for(focus).unwrap_or(b.description);
+    Some(format!("{}:{}", b.label, description))
   }
 
   /// Like [`Self::hint`] but with a caller-supplied description
@@ -1221,6 +1226,26 @@ impl App {
       .unwrap_or(order.len() - 1);
     let next = order[(pos + 1) % order.len()];
     self.options.theme = next;
+  }
+
+  /// Reverse of [`Self::cycle_theme`] — walks the same active set
+  /// backwards. Bound to `Shift+T` so a user who overshoots the
+  /// theme they wanted with `t` can step back instead of cycling
+  /// through every theme to land on it again.
+  pub fn cycle_theme_prev(&mut self) {
+    use strum::IntoEnumIterator;
+    let order: Vec<ThemeName> = ThemeName::iter()
+      .filter(|t| *t != ThemeName::Custom || self.options.custom_palette.is_some())
+      .collect();
+    if order.is_empty() {
+      return;
+    }
+    let pos = order
+      .iter()
+      .position(|t| *t == self.options.theme)
+      .unwrap_or(0);
+    let prev = order[(pos + order.len() - 1) % order.len()];
+    self.options.theme = prev;
   }
 }
 
