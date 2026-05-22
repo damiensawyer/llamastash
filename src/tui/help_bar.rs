@@ -62,7 +62,7 @@ const GLOBAL_CHIPS: &[GlobalChip] = &[
     focus: Focus::List,
     actions: &[Action::OpenHfDialog],
   },
-  // RestartDaemon (Ctrl+R) and KillDaemon (Ctrl+Q) intentionally
+  // RestartDaemon (Ctrl+R) and KillDaemon (Ctrl+K) intentionally
   // do NOT appear in the global hint strip. Both are confirmation-
   // gated destructive actions; surfacing them in the always-on chip
   // row encourages muscle-memory misuse and crowds the title bar.
@@ -247,11 +247,12 @@ mod tests {
     let app = default_app();
     let text = global_hint_text(&app);
     assert!(text.contains("?:help"), "got: {text}");
-    // Tab/⇧+Tab is the canonical pane-cycle surface. The ⇧ glyph
-    // is the Nerd Font rendering of the Shift modifier (item 1).
-    // ←/→ are no longer pane-cycle keys (they cycle values in
-    // Settings now), so the chip carries only the Tab pair.
-    assert!(text.contains("Tab/⇧+Tab:panes"), "got: {text}");
+    // Tab/⇧+Tab is the canonical pane-cycle surface. Labels come
+    // from the shared key-label consts so the test stays correct on
+    // both PC (`↹` / `⇧↹`) and macOS (`⇥` / `⇧⇥`).
+    use crate::tui::keybindings::{SHIFT_TAB_LABEL, TAB_LABEL};
+    let expected_panes = format!("{TAB_LABEL}/{SHIFT_TAB_LABEL}:panes");
+    assert!(text.contains(&expected_panes), "got: {text}");
     // The legacy `Shift+` text must never appear — keymap rendering
     // routes every modifier through `format_key_label`, which
     // surfaces the glyph form.
@@ -363,7 +364,11 @@ mod tests {
       ..AppOptions::default()
     });
     let text = global_hint_text(&app);
-    assert!(text.contains("Ctrl+q:quit"), "got: {text}");
+    // Format depends on platform: `Ctrl+q` on PC, `⌃q` on macOS —
+    // pull the prefix from the same const the runtime uses.
+    use crate::tui::keybindings::CTRL_PREFIX;
+    let expected = format!("{CTRL_PREFIX}q:quit");
+    assert!(text.contains(&expected), "got: {text}");
     // The stale default `q:quit` chip — bare `q` rather than the
     // remapped `Ctrl+q` — must not appear. Anchor on the leading
     // separator so we don't false-match the tail of `Ctrl+q:quit`.

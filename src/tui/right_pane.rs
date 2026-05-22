@@ -548,7 +548,7 @@ mod tests {
 
   #[test]
   fn bottom_hint_chips_match_each_focus_tab_combo() {
-    use crate::tui::keybindings::Focus;
+    use crate::tui::keybindings::{Focus, CTRL_R_LABEL, ENTER_LABEL};
     // Navigation focuses surface the entry-point keystroke per tab.
     assert_eq!(
       bottom_hint_chips(&app_with_focus(Focus::RightPane, RightTab::Logs)),
@@ -573,12 +573,14 @@ mod tests {
     // Edit-mode focuses surface InputField-aware modal chips. In a
     // fresh app the field is *not* editing yet, so the chip strip
     // shows `e:edit` (no `Esc:clear` because the buffer is empty).
+    let enter_send = format!("{ENTER_LABEL}:send");
+    let ctrl_r_think = format!("{CTRL_R_LABEL}:think");
     assert_eq!(
       bottom_hint_chips(&app_with_focus(Focus::ChatInput, RightTab::Chat)),
       vec![
         "e:edit".to_string(),
-        "Enter:send".to_string(),
-        "Ctrl+r:think".to_string(),
+        enter_send.clone(),
+        ctrl_r_think.clone()
       ]
     );
     // Same field after the user enters edit mode — chip switches to
@@ -590,8 +592,8 @@ mod tests {
       bottom_hint_chips(&chat_app),
       vec![
         "Esc:stop edit".to_string(),
-        "Enter:send".to_string(),
-        "Ctrl+r:think".to_string(),
+        enter_send.clone(),
+        ctrl_r_think.clone(),
       ]
     );
     // After exiting edit but with a non-empty buffer (a `Esc` press
@@ -605,29 +607,29 @@ mod tests {
       vec![
         "e:edit".to_string(),
         "Esc:clear".to_string(),
-        "Enter:send".to_string(),
-        "Ctrl+r:think".to_string(),
+        enter_send,
+        ctrl_r_think,
       ]
     );
     // Embed mirrors the same shape (one fewer trailing chip).
     assert_eq!(
       bottom_hint_chips(&app_with_focus(Focus::EmbedInput, RightTab::Embed)),
-      vec!["e:edit".to_string(), "Enter:embed".to_string()]
+      vec!["e:edit".to_string(), format!("{ENTER_LABEL}:embed")]
     );
     // Rerank input: chip strip reflects the active sub-field's
     // editing state. Default field is Query (not editing, empty
-    // buffer) — `e:edit · Enter:rerank`.
+    // buffer) — `e:edit · ⏎:rerank`.
     let mut rerank_app = app_with_focus(Focus::RerankInput, RightTab::Rerank);
     assert_eq!(
       bottom_hint_chips(&rerank_app),
-      vec!["e:edit".to_string(), "Enter:rerank".to_string()]
+      vec!["e:edit".to_string(), format!("{ENTER_LABEL}:rerank")]
     );
     // Cycling to the candidate field swaps the Enter description
     // to `add candidate`.
     rerank_app.rerank.cycle_field();
     assert_eq!(
       bottom_hint_chips(&rerank_app),
-      vec!["e:edit".to_string(), "Enter:add candidate".to_string()]
+      vec!["e:edit".to_string(), format!("{ENTER_LABEL}:add candidate"),]
     );
     // Entering edit on the candidate field flips the modal chip.
     rerank_app.rerank.candidate_buffer.enter_edit();
@@ -635,7 +637,7 @@ mod tests {
       bottom_hint_chips(&rerank_app),
       vec![
         "Esc:stop edit".to_string(),
-        "Enter:add candidate".to_string(),
+        format!("{ENTER_LABEL}:add candidate"),
       ]
     );
   }
@@ -684,9 +686,10 @@ mod tests {
     // Open the picker — the user is now editing a staged launch.
     // Chips switch to launch+cycle. u/c are intentionally omitted
     // on the editable form.
+    use crate::tui::keybindings::ENTER_LABEL;
     app.open_launch_picker();
     let chips = bottom_hint_chips(&app);
-    assert!(chips.contains(&"Enter:launch".to_string()));
+    assert!(chips.contains(&format!("{ENTER_LABEL}:launch")));
     assert!(chips.contains(&"↑↓:cycle fields".to_string()));
     assert!(chips.contains(&"←→:cycle value".to_string()));
     assert!(chips.contains(&"p:path".to_string()));
@@ -777,7 +780,7 @@ mod tests {
     // Rebinding `chat_input.exit_edit` (the canonical home for the
     // `ExitEdit` action) must flow through to the inline-edit chip
     // strip — same lookup, same focus, so the chip stays honest.
-    use crate::tui::keybindings::{Focus, KeyMap};
+    use crate::tui::keybindings::{Focus, KeyMap, CTRL_X_LABEL};
     use crate::tui::launch_picker::PickerField;
     use std::collections::BTreeMap;
     let mut keymap = KeyMap::default();
@@ -801,8 +804,9 @@ mod tests {
       String::new(),
     );
     let chips = bottom_hint_chips(&app);
+    let expected = format!("{CTRL_X_LABEL}:clear");
     assert!(
-      chips.iter().any(|c| c == "Ctrl+x:clear"),
+      chips.iter().any(|c| c == &expected),
       "expected rebound chip, got {chips:?}"
     );
   }
@@ -811,14 +815,14 @@ mod tests {
   fn settings_bottom_chips_for_unlaunched_focus_show_launch_form() {
     // Unlaunched selection: the form is the only context, so the
     // chips read launch + cycle + path.
-    use crate::tui::keybindings::Focus;
+    use crate::tui::keybindings::{Focus, ENTER_LABEL};
     let mut app = App::new(AppOptions::default());
     app.models = vec![fake_model()];
     app.list_cursor = 2;
     app.focus = Focus::RightPane;
     app.right_tab = RightTab::Settings;
     let chips = bottom_hint_chips(&app);
-    assert!(chips.contains(&"Enter:launch".to_string()));
+    assert!(chips.contains(&format!("{ENTER_LABEL}:launch")));
     assert!(chips.contains(&"p:path".to_string()));
     assert!(!chips.iter().any(|c| c.contains("u:url")));
   }

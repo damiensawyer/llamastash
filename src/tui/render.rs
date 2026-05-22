@@ -480,7 +480,7 @@ fn build_models_hints(
   let enter_launch = || {
     app
       .hint_with(Focus::Filter, Action::Submit, "launch")
-      .unwrap_or_else(|| "Enter:launch".to_string())
+      .unwrap_or_else(|| format!("{}:launch", crate::tui::keybindings::ENTER_LABEL))
   };
   if filter_mode == FilterChipMode::Editing {
     // While editing only the in-edit chord is useful — `Esc:stop
@@ -987,15 +987,17 @@ mod tests {
 
   #[test]
   fn filter_chip_strip_switches_between_editing_and_resting() {
-    // Edit mode: chip strip surfaces `Enter:launch` (filter is a
+    // Edit mode: chip strip surfaces `⏎:launch` (filter is a
     // live predicate, so Enter drills into the focused row) plus
     // the in-edit chord (`Esc:stop edit`).
+    use crate::tui::keybindings::ENTER_LABEL;
+    let enter_launch = format!("{ENTER_LABEL}:launch");
     let mut app = App::new(AppOptions::default());
     app.open_filter();
     let editing = build_models_hints(&app, FilterChipMode::Editing, false, false);
     assert!(
-      editing.iter().any(|h| h == "Enter:launch"),
-      "editing mode must surface Enter:launch (filter is live, no apply): {editing:?}"
+      editing.iter().any(|h| h == &enter_launch),
+      "editing mode must surface {enter_launch} (filter is live, no apply): {editing:?}"
     );
     assert!(
       editing.iter().any(|h| h == "Esc:stop edit"),
@@ -1003,13 +1005,13 @@ mod tests {
     );
     assert!(
       !editing.iter().any(|h| h.contains("apply")),
-      "editing mode must NOT surface Enter:apply (filter applies live): {editing:?}"
+      "editing mode must NOT surface apply (filter applies live): {editing:?}"
     );
     assert!(
       !editing.iter().any(|h| h.contains("clear")),
       "editing mode must NOT surface clear: {editing:?}"
     );
-    // Resting mode: `e:edit`, `Esc:clear`, `Enter:launch`, plus a
+    // Resting mode: `e:edit`, `Esc:clear`, `⏎:launch`, plus a
     // navigation hint so the user knows arrows still work.
     let resting = build_models_hints(&app, FilterChipMode::Resting, false, false);
     assert!(
@@ -1021,12 +1023,12 @@ mod tests {
       "resting mode must surface clear chord: {resting:?}"
     );
     assert!(
-      resting.iter().any(|h| h == "Enter:launch"),
-      "resting mode must surface Enter:launch: {resting:?}"
+      resting.iter().any(|h| h == &enter_launch),
+      "resting mode must surface {enter_launch}: {resting:?}"
     );
     assert!(
       !resting.iter().any(|h| h.contains("apply")),
-      "resting mode must NOT surface Enter:apply: {resting:?}"
+      "resting mode must NOT surface apply: {resting:?}"
     );
     assert!(
       resting.iter().any(|h| h.contains("↑/↓")),

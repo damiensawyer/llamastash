@@ -26,6 +26,26 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 - [x] ~~Add copy feature for logs pane. When in log pane, c should copy the full log text to clipboard and show a visual confirmation.~~ — `c` on the Logs tab now copies the full buffer and toasts `copied logs (N lines) via {backend}`.
 - [x] ~~copy actions(url,path,curl,logs) should show a visual confirmation.~~ — toasts now read `copied URL/curl/path/logs via {backend}` so the user sees exactly what was copied.
 - [x] ~~The UI here in `init` doesn't look nice. Make those info inline with remaining UI.~~ — summary now renders via `cliclack::note` so every line keeps the panel border, then a single-line `outro` closes the session.
+- [ ] UI/UX UI beatifications/tweaks.
+  - [ ] Trim path names in model list grouping. Derive a short name. Show path in Right pane under the model name. It should be in muted color palette of the theme.
+  - [ ] Try some Padding for all panes.
+  - [ ] try 65x35 split for main panes
+  - [ ] Settings: when value is default it should be muted color. Else normal color
+  - [ ] No logo in small widths < 120w
+  - [ ] Adaptive Panes.
+  - [ ] Adaptive hints with priority ranks so that order doesn't matter.
+  - [ ] Adaptive columns in model list. With priority ranks so that order doesn't matter.
+  - [ ] No visible severity encoding in the render (CPU temp 92 °C displays the same as 65 °C VRAM). a temp/severity glyph double encoded so color isn't load-bearing.
+  - [ ] Map all destructive actions behind Ctr (ctrl+s,k,r,d). All navigation actions behind Shif.
+  - [x] ~~Ctrl+Q to Ctrl+K~~ — kill-daemon moved to `Ctrl+K` to avoid macOS "quit app" muscle-memory collision.
+  - [ ] Fix: HF dialog binds only ↑↓ Enter Esc in the table. The actual interactive surface uses typing-to-filter, n/p to paginate, o to sort, and Backspace to back through stages — none
+        of which appear in the help overlay because they're handled procedurally in events.rs. The dialog's own footer is the only discoverability surface for them. Real users will
+        discover them by trial; the global help screen will quietly lie by omission.
+  - [ ] Remap 'd'. maybe to 'Shift+p'
+  - [ ] Add Shift+T for previous theme.
+  - [ ] do alt keybindings of yank for c,p,u anywhere in app.
+  - [ ] Dedup keybindings.
+  - [x] ~~Use unicode label for Tab etc in keybinds~~ — Tab is `↹` on Linux/Win, `⇥` on macOS; Enter is `⏎` everywhere; modifiers `⌃ ⌥ ⌘` on macOS only, `Ctrl+ / Alt+ / Super+` on PC. Shift glyph (`⇧`) no longer carries a `+` joiner.
 
 - [ ] **In progress**: Proxy router that maps a single endpoint to running models by model name. If the model isn't running, start it; if launch fails, fall back to a running model when one is available; otherwise error. Keep it OpenCode / π compatible so agents and tools can hit one URL.
 
@@ -44,6 +64,7 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 
 ### Follow-up
 
+- [ ] No glyphs fallback.
 - [ ] **Release pipeline ops** — secret/token plumbing around `release.yml` and the org bootstrap.
   - [ ] Write `docs/runbooks/secret-rotation.md` — operational steps for rotating `CRATES_IO_TOKEN` + `GH_BUMP_TOKEN`. Referenced from [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md) §"Token rotation cadence".
 - [ ] Some HF downloaded models fail to start??

@@ -730,12 +730,18 @@ mod tests {
       ..AppOptions::default()
     });
     let frame = render_to_string(140, 36, &app);
+    use crate::tui::keybindings::CTRL_PREFIX;
+    let expected = format!("{CTRL_PREFIX}q");
     assert!(
-      frame.contains("Ctrl+q"),
+      frame.contains(&expected),
       "remapped quit key missing: {frame}"
     );
+    // The legacy comma-joined alias surface (`q,Ctrl+C`) was retired
+    // in round-6 in favour of one row per binding. Pin its absence
+    // so a future regression can't sneak it back.
+    let stale_aliases = format!("q,{CTRL_PREFIX}C");
     assert!(
-      !frame.contains("q,Ctrl+C"),
+      !frame.contains(&stale_aliases),
       "stale default quit aliases still rendered: {frame}"
     );
   }
@@ -762,8 +768,9 @@ mod tests {
     assert!(frame.contains("F12"), "F12 send binding missing:\n{frame}");
     // Embed/Rerank still on plain Enter so their per-part rows show
     // up with each binding's own description.
+    use crate::tui::keybindings::ENTER_LABEL;
     assert!(
-      frame.contains("Enter") && frame.contains("embed"),
+      frame.contains(ENTER_LABEL) && frame.contains("embed"),
       "embed row should remain visible after the chat-only override:\n{frame}"
     );
     assert!(

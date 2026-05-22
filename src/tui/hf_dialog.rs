@@ -761,8 +761,8 @@ fn render_header(
       muted,
     ));
   }
-  let submit = dialog_label(app, KeyAction::Submit, "Enter");
-  let cancel = dialog_label(app, KeyAction::Cancel, "Esc");
+  let submit = dialog_label(app, KeyAction::Submit, crate::tui::keybindings::ENTER_LABEL);
+  let cancel = dialog_label(app, KeyAction::Cancel, crate::tui::keybindings::ESC_LABEL);
   let lines = vec![
     Line::from(spans),
     Line::from(second),
@@ -1034,14 +1034,14 @@ fn render_confirm_body(
     Line::from(Span::styled(
       format!(
         "Press {} to confirm — the download enqueues in the status strip.",
-        dialog_label(app, KeyAction::Submit, "Enter")
+        dialog_label(app, KeyAction::Submit, crate::tui::keybindings::ENTER_LABEL)
       ),
       palette.muted_style(),
     )),
     Line::from(Span::styled(
       format!(
         "{} returns to the file picker.",
-        dialog_label(app, KeyAction::Cancel, "Esc")
+        dialog_label(app, KeyAction::Cancel, crate::tui::keybindings::ESC_LABEL)
       ),
       palette.muted_style(),
     )),
@@ -1061,8 +1061,8 @@ fn render_footer(
   // dialog-internal chords (`o`, `n`, `p`, `e`) aren't actions —
   // they're component-internal or stage-specific routing — so they
   // stay as literal labels.
-  let submit = dialog_label(app, KeyAction::Submit, "Enter");
-  let cancel = dialog_label(app, KeyAction::Cancel, "Esc");
+  let submit = dialog_label(app, KeyAction::Submit, crate::tui::keybindings::ENTER_LABEL);
+  let cancel = dialog_label(app, KeyAction::Cancel, crate::tui::keybindings::ESC_LABEL);
   let up = dialog_label(app, KeyAction::MoveUp, "↑");
   let down = dialog_label(app, KeyAction::MoveDown, "↓");
   let arrows = format!("{up}/{down}");

@@ -115,9 +115,7 @@ pub enum Action {
   /// navigation focus. Bound to `Esc` in each input focus.
   ExitEdit,
   /// Kill the daemon entirely (after a confirmation popup). Bound
-  /// to `Ctrl+Q` in the model list focus. (Pre-2026-05 this lived on
-  /// `Shift+Q`; remapped so an accidental capital `Q` while typing
-  /// doesn't surface the kill prompt.)
+  /// to `Ctrl+K` in the model list focus.
   KillDaemon,
   /// Restart the daemon (after a confirmation popup): shut the
   /// current daemon down and re-spawn a fresh one with the same
@@ -218,21 +216,21 @@ const LIST_BINDINGS: &[Binding] = &[
     key: KeyCode::Char('r'),
     mods: KeyModifiers::CONTROL,
     action: Action::RestartDaemon,
-    label: "Ctrl+R",
+    label: CTRL_R_LABEL,
     description: "restart daemon",
   },
   Binding {
-    key: KeyCode::Char('q'),
+    key: KeyCode::Char('k'),
     mods: KeyModifiers::CONTROL,
     action: Action::KillDaemon,
-    label: "Ctrl+Q",
+    label: CTRL_K_LABEL,
     description: "kill daemon",
   },
   Binding {
     key: KeyCode::Char('c'),
     mods: KeyModifiers::CONTROL,
     action: Action::Quit,
-    label: "Ctrl+C",
+    label: CTRL_C_LABEL,
     description: "quit",
   },
   Binding {
@@ -323,7 +321,7 @@ const LIST_BINDINGS: &[Binding] = &[
     key: KeyCode::Enter,
     mods: KeyModifiers::NONE,
     action: Action::OpenLaunchPicker,
-    label: "Enter",
+    label: ENTER_LABEL,
     description: "launch",
   },
   Binding {
@@ -373,14 +371,14 @@ const LIST_BINDINGS: &[Binding] = &[
     key: KeyCode::Tab,
     mods: KeyModifiers::NONE,
     action: Action::NextFocus,
-    label: "Tab",
+    label: TAB_LABEL,
     description: "next pane",
   },
   Binding {
     key: KeyCode::BackTab,
     mods: KeyModifiers::SHIFT,
     action: Action::PrevFocus,
-    label: "⇧+Tab",
+    label: SHIFT_TAB_LABEL,
     description: "prev pane",
   },
   Binding {
@@ -471,7 +469,7 @@ const LIST_BINDINGS: &[Binding] = &[
     key: KeyCode::Char('d'),
     mods: KeyModifiers::CONTROL,
     action: Action::DeleteModel,
-    label: "Ctrl+D",
+    label: CTRL_D_LABEL,
     description: "delete model",
   },
   // Ctrl+X cancels the currently-active HF download after a confirm
@@ -483,7 +481,7 @@ const LIST_BINDINGS: &[Binding] = &[
     key: KeyCode::Char('x'),
     mods: KeyModifiers::CONTROL,
     action: Action::CancelDownload,
-    label: "Ctrl+X",
+    label: CTRL_X_LABEL,
     description: "cancel download",
   },
 ];
@@ -500,7 +498,7 @@ const HF_DIALOG_BINDINGS: &[Binding] = &[
     key: KeyCode::Esc,
     mods: KeyModifiers::NONE,
     action: Action::Cancel,
-    label: "Esc",
+    label: ESC_LABEL,
     description: "close",
   },
   Binding {
@@ -521,7 +519,7 @@ const HF_DIALOG_BINDINGS: &[Binding] = &[
     key: KeyCode::Enter,
     mods: KeyModifiers::NONE,
     action: Action::Submit,
-    label: "Enter",
+    label: ENTER_LABEL,
     description: "open / confirm",
   },
 ];
@@ -531,7 +529,7 @@ const FILTER_BINDINGS: &[Binding] = &[
     key: KeyCode::Esc,
     mods: KeyModifiers::NONE,
     action: Action::ClearFilter,
-    label: "Esc",
+    label: ESC_LABEL,
     description: "clear",
   },
   // Filter is a live predicate (applies on every keystroke), so
@@ -542,7 +540,7 @@ const FILTER_BINDINGS: &[Binding] = &[
     key: KeyCode::Enter,
     mods: KeyModifiers::NONE,
     action: Action::Submit,
-    label: "Enter",
+    label: ENTER_LABEL,
     description: "launch",
   },
 ];
@@ -573,35 +571,35 @@ const RIGHT_PANE_BINDINGS: &[Binding] = &[
     key: KeyCode::Char('c'),
     mods: KeyModifiers::CONTROL,
     action: Action::Quit,
-    label: "Ctrl+C",
+    label: CTRL_C_LABEL,
     description: "quit",
   },
   Binding {
     key: KeyCode::Enter,
     mods: KeyModifiers::NONE,
     action: Action::Submit,
-    label: "Enter",
+    label: ENTER_LABEL,
     description: "launch (Settings)",
   },
   Binding {
     key: KeyCode::Esc,
     mods: KeyModifiers::NONE,
     action: Action::FocusList,
-    label: "Esc",
+    label: ESC_LABEL,
     description: "models list",
   },
   Binding {
     key: KeyCode::Tab,
     mods: KeyModifiers::NONE,
     action: Action::NextFocus,
-    label: "Tab",
+    label: TAB_LABEL,
     description: "next pane",
   },
   Binding {
     key: KeyCode::BackTab,
     mods: KeyModifiers::SHIFT,
     action: Action::PrevFocus,
-    label: "⇧+Tab",
+    label: SHIFT_TAB_LABEL,
     description: "prev pane",
   },
   // ←/→ change the focused Settings field's value. Outside the
@@ -756,7 +754,7 @@ const RIGHT_PANE_BINDINGS: &[Binding] = &[
     key: KeyCode::Char('r'),
     mods: KeyModifiers::CONTROL,
     action: Action::RestartDaemon,
-    label: "Ctrl+R",
+    label: CTRL_R_LABEL,
     description: "restart daemon",
   },
   Binding {
@@ -780,7 +778,7 @@ const RIGHT_PANE_BINDINGS: &[Binding] = &[
     key: KeyCode::Char('x'),
     mods: KeyModifiers::CONTROL,
     action: Action::CancelDownload,
-    label: "Ctrl+X",
+    label: CTRL_X_LABEL,
     description: "cancel download",
   },
 ];
@@ -790,21 +788,21 @@ const CHAT_INPUT_BINDINGS: &[Binding] = &[
     key: KeyCode::Esc,
     mods: KeyModifiers::NONE,
     action: Action::ExitEdit,
-    label: "Esc",
+    label: ESC_LABEL,
     description: "exit edit",
   },
   Binding {
     key: KeyCode::Tab,
     mods: KeyModifiers::NONE,
     action: Action::NextFocus,
-    label: "Tab",
+    label: TAB_LABEL,
     description: "next pane",
   },
   Binding {
     key: KeyCode::BackTab,
     mods: KeyModifiers::SHIFT,
     action: Action::PrevFocus,
-    label: "⇧+Tab",
+    label: SHIFT_TAB_LABEL,
     description: "prev pane",
   },
   // Plain Enter so submit fires on every terminal — Ctrl+Enter is
@@ -817,21 +815,21 @@ const CHAT_INPUT_BINDINGS: &[Binding] = &[
     key: KeyCode::Enter,
     mods: KeyModifiers::NONE,
     action: Action::SendChat,
-    label: "Enter",
+    label: ENTER_LABEL,
     description: "send",
   },
   Binding {
     key: KeyCode::Enter,
     mods: KeyModifiers::SHIFT,
     action: Action::InsertNewline,
-    label: "⇧+Enter",
+    label: SHIFT_ENTER_LABEL,
     description: "newline",
   },
   Binding {
     key: KeyCode::Char('r'),
     mods: KeyModifiers::CONTROL,
     action: Action::ToggleThinkCollapse,
-    label: "Ctrl+r",
+    label: CTRL_R_LABEL,
     description: "toggle reasoning",
   },
 ];
@@ -841,21 +839,21 @@ const EMBED_INPUT_BINDINGS: &[Binding] = &[
     key: KeyCode::Esc,
     mods: KeyModifiers::NONE,
     action: Action::ExitEdit,
-    label: "Esc",
+    label: ESC_LABEL,
     description: "exit edit",
   },
   Binding {
     key: KeyCode::Tab,
     mods: KeyModifiers::NONE,
     action: Action::NextFocus,
-    label: "Tab",
+    label: TAB_LABEL,
     description: "next pane",
   },
   Binding {
     key: KeyCode::BackTab,
     mods: KeyModifiers::SHIFT,
     action: Action::PrevFocus,
-    label: "⇧+Tab",
+    label: SHIFT_TAB_LABEL,
     description: "prev pane",
   },
   // Plain Enter — see CHAT_INPUT_BINDINGS for the rationale.
@@ -863,14 +861,14 @@ const EMBED_INPUT_BINDINGS: &[Binding] = &[
     key: KeyCode::Enter,
     mods: KeyModifiers::NONE,
     action: Action::Submit,
-    label: "Enter",
+    label: ENTER_LABEL,
     description: "embed",
   },
   Binding {
     key: KeyCode::Enter,
     mods: KeyModifiers::SHIFT,
     action: Action::InsertNewline,
-    label: "⇧+Enter",
+    label: SHIFT_ENTER_LABEL,
     description: "newline",
   },
 ];
@@ -880,7 +878,7 @@ const RERANK_INPUT_BINDINGS: &[Binding] = &[
     key: KeyCode::Esc,
     mods: KeyModifiers::NONE,
     action: Action::ExitEdit,
-    label: "Esc",
+    label: ESC_LABEL,
     description: "exit edit",
   },
   // Tab / Shift+Tab cycle panes everywhere — including inside the
@@ -891,14 +889,14 @@ const RERANK_INPUT_BINDINGS: &[Binding] = &[
     key: KeyCode::Tab,
     mods: KeyModifiers::NONE,
     action: Action::NextFocus,
-    label: "Tab",
+    label: TAB_LABEL,
     description: "next pane",
   },
   Binding {
     key: KeyCode::BackTab,
     mods: KeyModifiers::SHIFT,
     action: Action::PrevFocus,
-    label: "⇧+Tab",
+    label: SHIFT_TAB_LABEL,
     description: "prev pane",
   },
   // ↑/↓ cycle the input field (query ↔ candidate). Two fields →
@@ -929,14 +927,14 @@ const RERANK_INPUT_BINDINGS: &[Binding] = &[
     key: KeyCode::Enter,
     mods: KeyModifiers::NONE,
     action: Action::Submit,
-    label: "Enter",
+    label: ENTER_LABEL,
     description: "query/add candidate",
   },
   Binding {
     key: KeyCode::Enter,
     mods: KeyModifiers::SHIFT,
     action: Action::InsertNewline,
-    label: "⇧+Enter",
+    label: SHIFT_ENTER_LABEL,
     description: "newline",
   },
 ];
@@ -946,14 +944,14 @@ const CONFIRM_POPUP_BINDINGS: &[Binding] = &[
     key: KeyCode::Enter,
     mods: KeyModifiers::NONE,
     action: Action::Submit,
-    label: "Enter",
+    label: ENTER_LABEL,
     description: "confirm",
   },
   Binding {
     key: KeyCode::Esc,
     mods: KeyModifiers::NONE,
     action: Action::Cancel,
-    label: "Esc",
+    label: ESC_LABEL,
     description: "cancel",
   },
 ];
@@ -1257,46 +1255,143 @@ fn parse_key_token(tok: &str) -> Result<(KeyCode, bool), String> {
 
 /// Unicode glyph rendered in place of the `Shift+` modifier text.
 /// `⇧` (U+21E7) is the standard "Shift" symbol used by macOS
+/// Unicode glyph rendered in place of the `Shift+` modifier text.
+/// `⇧` (U+21E7) is the standard "Shift" symbol used by macOS
 /// keyboard-shortcut docs and is present in every monospace font
 /// shipped with terminals — no Nerd Font required. Centralised so
 /// renderers, tests, and binding tables can all reference the same
-/// character. The trailing `+` joiner mirrors `Ctrl+` / `Alt+` so
-/// the modifier+key relationship stays visually consistent.
+/// character. No `+` joiner — `⇧⏎` and `⇧⇥` / `⇧↹` read better
+/// than `⇧+Enter` / `⇧+Tab` and match the macOS HIG convention.
 pub const SHIFT_GLYPH: &str = "⇧";
+
+// ─── Platform-conditional key labels ───────────────────────────
+//
+// Tab and the modifier prefixes differ between PC and Apple
+// keyboards. macOS uses tight `⌃ ⌥ ⌘ ⇥` glyphs (no `+` joiner) that
+// every Mac user recognises from system menus. PC keyboards print
+// `↹` on the Tab keycap (two-arrow style) and don't have `⌃` /
+// `⌘` markings, so we keep the textual `Ctrl+` / `Alt+` / `Super+`
+// joiner there. `⇧` and the navigation glyphs (`↑↓←→`, `⏎`) are
+// universal — same on every platform — so they live as plain
+// `pub const` without cfg-gating.
+//
+// One source of truth for renderers, the static binding tables,
+// `format_key_label` (config-override path), and tests.
+
+/// `KeyCode::Enter` label. Universal Unicode "return" symbol
+/// (U+23CE) used in macOS docs, Linux desktop environments, and
+/// most modern keyboard cheatsheets.
+pub const ENTER_LABEL: &str = "⏎";
+
+/// `KeyCode::Esc` label. Kept as text on both platforms — the
+/// `⎋` glyph isn't printed on physical Esc keys and isn't widely
+/// recognised outside macOS docs.
+pub const ESC_LABEL: &str = "Esc";
+
+/// `KeyCode::Tab` label. PC keycaps print `↹` (U+21B9, two
+/// arrows hitting bars in opposite directions); macOS uses `⇥`
+/// (U+21E5, single arrow to bar). Both are in every monospace
+/// font.
+#[cfg(target_os = "macos")]
+pub const TAB_LABEL: &str = "⇥";
+#[cfg(not(target_os = "macos"))]
+pub const TAB_LABEL: &str = "↹";
+
+/// `KeyCode::BackTab` label. Equivalent to `Shift+Tab`. The
+/// shift glyph (`⇧`) prefixes the platform-appropriate Tab
+/// glyph, no `+` joiner.
+#[cfg(target_os = "macos")]
+pub const SHIFT_TAB_LABEL: &str = "⇧⇥";
+#[cfg(not(target_os = "macos"))]
+pub const SHIFT_TAB_LABEL: &str = "⇧↹";
+
+/// `Shift+Enter` chord label (e.g. newline-in-input). Same on
+/// both platforms.
+pub const SHIFT_ENTER_LABEL: &str = "⇧⏎";
+
+/// `Ctrl` modifier prefix. macOS uses the `⌃` (U+2303) glyph
+/// with no `+` joiner — it sits tight against the key letter
+/// (`⌃k`) the way Apple's HIG renders it. PC keeps `Ctrl+` since
+/// `⌃` is not printed on any PC keyboard.
+#[cfg(target_os = "macos")]
+pub const CTRL_PREFIX: &str = "⌃";
+#[cfg(not(target_os = "macos"))]
+pub const CTRL_PREFIX: &str = "Ctrl+";
+
+/// `Alt` modifier prefix. macOS uses `⌥` (U+2325, "option"
+/// glyph) without `+`. PC keeps `Alt+`.
+#[cfg(target_os = "macos")]
+pub const ALT_PREFIX: &str = "⌥";
+#[cfg(not(target_os = "macos"))]
+pub const ALT_PREFIX: &str = "Alt+";
+
+/// `Super` / `Cmd` modifier prefix. macOS uses `⌘` (U+2318).
+/// No default binding uses this, but config overrides can —
+/// hence the entry.
+#[cfg(target_os = "macos")]
+pub const SUPER_PREFIX: &str = "⌘";
+#[cfg(not(target_os = "macos"))]
+pub const SUPER_PREFIX: &str = "Super+";
+
+// Pre-composed Ctrl+<letter> chord labels used in the static
+// binding tables. Keeping them platform-conditional here means
+// every binding entry just writes `CTRL_K_LABEL` instead of
+// repeating the `#[cfg]` machinery at every site.
+
+#[cfg(target_os = "macos")]
+pub const CTRL_R_LABEL: &str = "⌃r";
+#[cfg(not(target_os = "macos"))]
+pub const CTRL_R_LABEL: &str = "Ctrl+r";
+
+#[cfg(target_os = "macos")]
+pub const CTRL_K_LABEL: &str = "⌃k";
+#[cfg(not(target_os = "macos"))]
+pub const CTRL_K_LABEL: &str = "Ctrl+k";
+
+#[cfg(target_os = "macos")]
+pub const CTRL_C_LABEL: &str = "⌃c";
+#[cfg(not(target_os = "macos"))]
+pub const CTRL_C_LABEL: &str = "Ctrl+c";
+
+#[cfg(target_os = "macos")]
+pub const CTRL_D_LABEL: &str = "⌃d";
+#[cfg(not(target_os = "macos"))]
+pub const CTRL_D_LABEL: &str = "Ctrl+d";
+
+#[cfg(target_os = "macos")]
+pub const CTRL_X_LABEL: &str = "⌃x";
+#[cfg(not(target_os = "macos"))]
+pub const CTRL_X_LABEL: &str = "Ctrl+x";
 
 fn format_key_label(key: &KeyCode, mods: KeyModifiers) -> String {
   let mut out = String::new();
   if mods.contains(KeyModifiers::CONTROL) {
-    out.push_str("Ctrl+");
+    out.push_str(CTRL_PREFIX);
   }
   if mods.contains(KeyModifiers::ALT) {
-    out.push_str("Alt+");
+    out.push_str(ALT_PREFIX);
   }
   if mods.contains(KeyModifiers::SUPER) {
-    out.push_str("Super+");
+    out.push_str(SUPER_PREFIX);
   }
   // Suppress an explicit Shift prefix when the key already encodes
   // Shift in its name or glyph:
   //  - Uppercase `Char` (terminal emits Shift+letter as `Char(C)`)
   //  - `BackTab` (the named code for Shift+Tab — adding the prefix
-  //    again would render as `⇧+⇧+Tab`, doubly emphasising Shift).
+  //    again would render as `⇧⇧⇥`, doubly emphasising Shift).
   let key_already_encodes_shift =
     matches!(key, KeyCode::Char(c) if c.is_ascii_uppercase()) || matches!(key, KeyCode::BackTab);
   let show_shift = mods.contains(KeyModifiers::SHIFT) && !key_already_encodes_shift;
   if show_shift {
     out.push_str(SHIFT_GLYPH);
-    out.push('+');
   }
   match key {
     KeyCode::Char(' ') => out.push_str("Space"),
     KeyCode::Char(c) => out.push(*c),
-    KeyCode::Enter => out.push_str("Enter"),
-    KeyCode::Esc => out.push_str("Esc"),
-    KeyCode::Tab => out.push_str("Tab"),
-    KeyCode::BackTab => {
-      out.push_str(SHIFT_GLYPH);
-      out.push_str("+Tab");
-    }
+    KeyCode::Enter => out.push_str(ENTER_LABEL),
+    KeyCode::Esc => out.push_str(ESC_LABEL),
+    KeyCode::Tab => out.push_str(TAB_LABEL),
+    KeyCode::BackTab => out.push_str(SHIFT_TAB_LABEL),
     KeyCode::Backspace => out.push_str("Backspace"),
     KeyCode::Up => out.push('↑'),
     KeyCode::Down => out.push('↓'),
@@ -1597,13 +1692,16 @@ mod tests {
     let ctrl_q = parse_key_spec("ctrl+q").unwrap();
     assert_eq!(ctrl_q.key, KeyCode::Char('q'));
     assert!(ctrl_q.mods.contains(KeyModifiers::CONTROL));
-    assert_eq!(ctrl_q.label, "Ctrl+q");
+    assert_eq!(ctrl_q.label, format!("{CTRL_PREFIX}q"));
 
+    // "Shift+Tab" parses to KeyCode::Tab + SHIFT modifier. The
+    // formatter renders that as `⇧` + TAB_LABEL (no `+` joiner) —
+    // which is byte-identical to SHIFT_TAB_LABEL.
     let shift_tab = parse_key_spec("Shift+Tab").unwrap();
     assert_eq!(shift_tab.key, KeyCode::Tab);
     assert!(shift_tab.mods.contains(KeyModifiers::SHIFT));
     assert_eq!(
-      shift_tab.label, "⇧+Tab",
+      shift_tab.label, SHIFT_TAB_LABEL,
       "Shift modifier renders as the ⇧ Unicode glyph"
     );
 
@@ -1756,10 +1854,11 @@ mod tests {
     // normally upcase it) but possible with kitty-protocol — keep
     // the modifier visible so the binding stays unambiguous. The
     // visible prefix is the Unicode glyph ⇧ (U+21E7), not the word
-    // "Shift".
+    // "Shift". No `+` joiner — `⇧q` reads cleaner than `⇧+q` and
+    // matches the macOS HIG.
     assert_eq!(
       format_key_label(&KeyCode::Char('q'), KeyModifiers::SHIFT),
-      "⇧+q"
+      "⇧q"
     );
   }
 
@@ -1768,13 +1867,13 @@ mod tests {
     // Regression guard: every Shift-aware label must surface the
     // glyph form. The legacy `Shift+` text must never reappear.
     let shift_tab = format_key_label(&KeyCode::BackTab, KeyModifiers::SHIFT);
-    assert_eq!(shift_tab, "⇧+Tab");
+    assert_eq!(shift_tab, SHIFT_TAB_LABEL);
     assert!(
       !shift_tab.contains("Shift"),
       "Shift+ text must not appear in any key label: {shift_tab}"
     );
     let shift_enter = format_key_label(&KeyCode::Enter, KeyModifiers::SHIFT);
-    assert_eq!(shift_enter, "⇧+Enter");
+    assert_eq!(shift_enter, SHIFT_ENTER_LABEL);
     assert!(
       !shift_enter.contains("Shift"),
       "Shift+ text must not appear in any key label: {shift_enter}"
@@ -1785,21 +1884,25 @@ mod tests {
   fn format_key_label_ctrl_char_renders_with_ctrl_prefix() {
     assert_eq!(
       format_key_label(&KeyCode::Char('c'), KeyModifiers::CONTROL),
-      "Ctrl+c"
+      CTRL_C_LABEL
     );
   }
 
   #[test]
   fn format_key_label_ctrl_shift_lowercase_emits_both_prefixes() {
+    // Ctrl + Shift + c. On PC this is `Ctrl+⇧c` (note: no `+` between
+    // the shift glyph and the char). On macOS it's `⌃⇧c`.
     let mods = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
-    assert_eq!(format_key_label(&KeyCode::Char('c'), mods), "Ctrl+⇧+c");
+    let expected = format!("{CTRL_PREFIX}⇧c");
+    assert_eq!(format_key_label(&KeyCode::Char('c'), mods), expected);
   }
 
   #[test]
   fn format_key_label_alt_char_renders_with_alt_prefix() {
+    let expected = format!("{ALT_PREFIX}x");
     assert_eq!(
       format_key_label(&KeyCode::Char('x'), KeyModifiers::ALT),
-      "Alt+x"
+      expected
     );
   }
 
@@ -1815,13 +1918,19 @@ mod tests {
   fn format_key_label_named_keys_render_with_their_word() {
     assert_eq!(
       format_key_label(&KeyCode::Enter, KeyModifiers::NONE),
-      "Enter"
+      ENTER_LABEL
     );
-    assert_eq!(format_key_label(&KeyCode::Esc, KeyModifiers::NONE), "Esc");
-    assert_eq!(format_key_label(&KeyCode::Tab, KeyModifiers::NONE), "Tab");
+    assert_eq!(
+      format_key_label(&KeyCode::Esc, KeyModifiers::NONE),
+      ESC_LABEL
+    );
+    assert_eq!(
+      format_key_label(&KeyCode::Tab, KeyModifiers::NONE),
+      TAB_LABEL
+    );
     assert_eq!(
       format_key_label(&KeyCode::BackTab, KeyModifiers::SHIFT),
-      "⇧+Tab"
+      SHIFT_TAB_LABEL
     );
     assert_eq!(
       format_key_label(&KeyCode::Backspace, KeyModifiers::NONE),
@@ -1869,19 +1978,20 @@ mod tests {
   #[test]
   fn format_key_label_combines_ctrl_alt_super_modifiers_in_order() {
     // Order is fixed (Ctrl → Alt → Super → Shift) so the rendered
-    // string is canonical — easier to grep for in help dumps.
+    // string is canonical — easier to grep for in help dumps. On PC
+    // the prefixes carry their own `+` joiner; on macOS the glyphs
+    // sit tight against each other.
     let mods = KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER;
-    assert_eq!(format_key_label(&KeyCode::F(5), mods), "Ctrl+Alt+Super+F5");
+    let expected = format!("{CTRL_PREFIX}{ALT_PREFIX}{SUPER_PREFIX}F5");
+    assert_eq!(format_key_label(&KeyCode::F(5), mods), expected);
   }
 
   #[test]
   fn format_key_label_combines_all_modifiers_with_shift_glyph_last() {
-    // Full chain — Shift sits in the Nerd Font glyph slot last.
+    // Full chain — Shift sits in the glyph slot last, no `+` joiner.
     let mods =
       KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::SHIFT;
-    assert_eq!(
-      format_key_label(&KeyCode::F(5), mods),
-      "Ctrl+Alt+Super+⇧+F5"
-    );
+    let expected = format!("{CTRL_PREFIX}{ALT_PREFIX}{SUPER_PREFIX}⇧F5");
+    assert_eq!(format_key_label(&KeyCode::F(5), mods), expected);
   }
 }

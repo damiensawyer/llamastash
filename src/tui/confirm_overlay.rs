@@ -59,8 +59,8 @@ pub fn render(
   // matches in the dispatcher (see `events::handle_key`) and stay
   // as the universal foot-gun-resistant fallback regardless of
   // what the user maps Submit/Cancel to.
-  let submit_label = keymap_label(app, KeyAction::Submit, "Enter");
-  let cancel_label = keymap_label(app, KeyAction::Cancel, "Esc");
+  let submit_label = keymap_label(app, KeyAction::Submit, crate::tui::keybindings::ENTER_LABEL);
+  let cancel_label = keymap_label(app, KeyAction::Cancel, crate::tui::keybindings::ESC_LABEL);
   let hint = Paragraph::new(Line::from(vec![
     Span::styled(
       format!("{submit_label} / y"),
@@ -126,7 +126,8 @@ fn describe(action: &ConfirmAction) -> (&'static str, String) {
       format!(
         "Cancel the active pull `{friendly_name}`? Any partial file in the HF \
          cache stays where it is. Queued pulls behind this one keep their \
-         place; press Ctrl+X again on the next promoted pull to cancel it too."
+         place; press {} again on the next promoted pull to cancel it too.",
+        crate::tui::keybindings::CTRL_X_LABEL
       ),
     ),
   }
@@ -157,9 +158,13 @@ mod tests {
 
   #[test]
   fn confirm_popup_labels_default_to_enter_esc() {
+    use crate::tui::keybindings::{ENTER_LABEL, ESC_LABEL};
     let app = App::new(AppOptions::default());
-    assert_eq!(keymap_label(&app, KeyAction::Submit, "fallback"), "Enter");
-    assert_eq!(keymap_label(&app, KeyAction::Cancel, "fallback"), "Esc");
+    assert_eq!(
+      keymap_label(&app, KeyAction::Submit, "fallback"),
+      ENTER_LABEL
+    );
+    assert_eq!(keymap_label(&app, KeyAction::Cancel, "fallback"), ESC_LABEL);
   }
 
   #[test]

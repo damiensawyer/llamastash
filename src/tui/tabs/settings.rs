@@ -580,9 +580,8 @@ mod tests {
       }
       joined.push('\n');
     }
-    assert!(
-      joined.contains("Enter again to launch with these settings."),
-      "{joined}"
-    );
+    use crate::tui::keybindings::ENTER_LABEL;
+    let expected = format!("{ENTER_LABEL} again to launch with these settings.");
+    assert!(joined.contains(&expected), "{joined}");
   }
 }
