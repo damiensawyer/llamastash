@@ -22,16 +22,38 @@ use tokio::sync::mpsc;
 /// construct a `Client`; rebuilding per request (chat / embed /
 /// rerank) drops the pool on every send. We don't talk to anything
 /// over TLS, but the build cost is non-trivial and the pool is what
-/// keeps successive sends to the same loopback port cheap. The
-/// timeout matches the previous per-call default.
+/// keeps successive sends to the same loopback port cheap.
+///
+/// Timeouts are tuned for streaming inference — `connect_timeout` and
+/// `read_timeout` catch a wedged daemon, while `timeout` (total
+/// wall-clock) is intentionally absent. A 27B reasoning model can
+/// easily spend a minute thinking before the first content byte; a
+/// 60-second total-request budget would abort the stream mid-flight
+/// and surface as the opaque "error decoding response body" reqwest
+/// returns for any body-stream failure.
 fn shared_oai_client() -> &'static reqwest::Client {
   static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
   CLIENT.get_or_init(|| {
     reqwest::Client::builder()
-      .timeout(Duration::from_secs(60))
+      .connect_timeout(Duration::from_secs(10))
+      .read_timeout(Duration::from_secs(120))
       .build()
       .expect("reqwest client should build with default features")
   })
+}
+
+/// Render a `reqwest::Error` plus the underlying source chain so chat
+/// failures don't collapse to the bare "error decoding response body"
+/// reqwest emits for every body-stream error.
+fn format_chain(err: &dyn std::error::Error) -> String {
+  let mut out = err.to_string();
+  let mut src = err.source();
+  while let Some(e) = src {
+    out.push_str(": ");
+    out.push_str(&e.to_string());
+    src = e.source();
+  }
+  out
 }
 
 /// Outcome of one `/v1/chat/completions` stream chunk.
@@ -112,7 +134,11 @@ pub fn spawn_chat_stream(
       Ok(r) => r,
       Err(e) => {
         guard.mark_finished();
-        let _ = send(ChatStreamMsg::Error(format!("connect: {e}"))).await;
+        let _ = send(ChatStreamMsg::Error(format!(
+          "connect: {}",
+          format_chain(&e)
+        )))
+        .await;
         return;
       }
     };
@@ -132,7 +158,11 @@ pub fn spawn_chat_stream(
         Ok(b) => b,
         Err(e) => {
           guard.mark_finished();
-          let _ = send(ChatStreamMsg::Error(format!("stream: {e}"))).await;
+          let _ = send(ChatStreamMsg::Error(format!(
+            "stream: {}",
+            format_chain(&e)
+          )))
+          .await;
           return;
         }
       };
