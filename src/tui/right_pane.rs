@@ -36,7 +36,16 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette, f
   // rects were written by `render_body`; we only touch `right_tabs`
   // here.
   app.hit_rects.borrow_mut().right_tabs = tab_rects;
-  let bottom_chips = bottom_hint_chips(app);
+  let bottom_chips_ranked = bottom_hint_chips(app);
+  // Pane border eats 2 cells; `bottom_hint_line` itself pads the
+  // strip with a leading + trailing space (2 more) so the picker
+  // budget is `area.width - 4`. Chips drop in rank order when the
+  // pane is too narrow for the full strip.
+  let bottom_chips = crate::tui::hint_picker::pick(
+    bottom_chips_ranked,
+    (area.width as usize).saturating_sub(4),
+    " · ",
+  );
   let border_color = palette.focus_border(focused);
 
   let mut outer = Block::default()
@@ -111,49 +120,45 @@ fn render_separator(frame: &mut Frame<'_>, area: Rect, palette: &Palette) {
 /// `c` / `u` are intentionally absent from the editable form: the
 /// running URL belongs to the live instance, not to whatever
 /// duplicate the user is staging.
-pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
+pub(crate) fn bottom_hint_chips(app: &App) -> Vec<crate::tui::hint_picker::RankedChip> {
+  use crate::tui::hint_picker::RankedChip;
   use crate::tui::keybindings::{Action, Focus};
-  let mut chips: Vec<String> = Vec::with_capacity(6);
-  let push = |c: &mut Vec<String>, h: Option<String>| {
+  let mut chips: Vec<RankedChip> = Vec::with_capacity(6);
+  let push = |c: &mut Vec<RankedChip>, rank: u8, h: Option<String>| {
     if let Some(h) = h {
-      c.push(h);
+      c.push(RankedChip::new(rank, h));
     }
   };
   /// Surface the `InputField` modal-contract chips for one of the
   /// tab inputs (chat / embed / rerank / candidate). Mirrors the
-  /// rule documented in `src/tui/input_field.rs`:
-  /// - editing → `Esc:stop edit`
-  /// - resting + buffer content → `e:edit · Esc:clear`
-  /// - resting + empty buffer → `e:edit` only (one more Esc walks
-  ///   back via `Action::ExitEdit`).
-  fn push_input_field_chips(c: &mut Vec<String>, editing: bool, empty: bool) {
+  /// rule documented in `src/tui/input_field.rs`. The modal-
+  /// contract chord is rank 10 — never drops — because it's the
+  /// escape hatch from the captured-input mode; losing it strands
+  /// the user mid-edit.
+  fn push_input_field_chips(c: &mut Vec<RankedChip>, editing: bool, empty: bool) {
     if editing {
-      c.push("Esc:stop edit".to_string());
+      c.push(RankedChip::new(10, "Esc:stop edit"));
       return;
     }
-    c.push("e:edit".to_string());
+    c.push(RankedChip::new(10, "e:edit"));
     if !empty {
-      c.push("Esc:clear".to_string());
+      c.push(RankedChip::new(20, "Esc:clear"));
     }
   }
   match (app.focus, app.right_tab) {
     // Edit-mode focuses surface the InputField's modal-contract
-    // chord under the user's current state:
-    // - editing: `Esc:stop edit` (Esc exits edit, buffer kept).
-    // - resting + non-empty buffer: `e:edit · Esc:clear` (second
-    //   Esc clears the buffer).
-    // - resting + empty buffer: `e:edit` only; one more Esc
-    //   walks back to the right pane via Action::ExitEdit.
-    // Plus the action-layer chips (Send / Embed / Rerank / ToggleThink).
+    // chord (rank 10) plus the action-layer chips (Send / Embed /
+    // Rerank / ToggleThink) at higher ranks.
     (Focus::ChatInput, _) => {
       push_input_field_chips(
         &mut chips,
         app.chat.prompt.is_editing(),
         app.chat.prompt.is_empty(),
       );
-      push(&mut chips, app.hint(Focus::ChatInput, Action::SendChat));
+      push(&mut chips, 30, app.hint(Focus::ChatInput, Action::SendChat));
       push(
         &mut chips,
+        40,
         app.hint_with(Focus::ChatInput, Action::ToggleThinkCollapse, "think"),
       );
     }
@@ -163,7 +168,7 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
         app.embed.input.is_editing(),
         app.embed.input.is_empty(),
       );
-      push(&mut chips, app.hint(Focus::EmbedInput, Action::Submit));
+      push(&mut chips, 30, app.hint(Focus::EmbedInput, Action::Submit));
     }
     (Focus::RerankInput, _) => {
       // Rerank has two `InputField`s (query / candidate); the
@@ -189,6 +194,7 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
       };
       push(
         &mut chips,
+        30,
         app.hint_with(Focus::RerankInput, Action::Submit, submit_desc),
       );
     }
@@ -196,6 +202,7 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
     (_, RightTab::Logs) => {
       push(
         &mut chips,
+        10,
         app.hint(Focus::RightPane, Action::ToggleAutoScroll),
       );
       // `c` is tab-aware: copies the full log buffer when the Logs
@@ -203,11 +210,12 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
       // `c:copy` chip so the binding is discoverable here.
       push(
         &mut chips,
+        20,
         app.hint_with(Focus::RightPane, Action::YankCurl, "copy"),
       );
     }
     (_, RightTab::Chat | RightTab::Embed | RightTab::Rerank) => {
-      push(&mut chips, app.hint(Focus::RightPane, Action::EnterEdit));
+      push(&mut chips, 10, app.hint(Focus::RightPane, Action::EnterEdit));
     }
     (_, RightTab::Settings) => {
       let running_readonly = app.launch_picker.is_none() && app.focused_managed().is_some();
@@ -215,16 +223,17 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
         // Read-only running view — `e` stages the launch-edit
         // picker, `c` (curl) / `u` (url) target the live instance,
         // `s` doubles as `stop` when the dispatcher sees it on
-        // Settings. `e` leads because the user's primary mutation
-        // here is "edit for next launch" — arrows no longer
-        // auto-stage the picker, so the chip is the discoverable
-        // path.
+        // Settings. `e` (rank 10) leads because the user's primary
+        // mutation here is "edit for next launch"; the yank trio
+        // drops first under width pressure.
         push(
           &mut chips,
+          10,
           app.hint_with(Focus::RightPane, Action::EnterEdit, "edit for launch"),
         );
         push(
           &mut chips,
+          20,
           app.hint_with(Focus::RightPane, Action::ToggleAutoScroll, "stop"),
         );
         // ↑/↓ scroll the read-only running-launch view (~17 rows).
@@ -234,11 +243,14 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
           app.hint_with(Focus::RightPane, Action::MoveDown, "scroll"),
           app.hint_with(Focus::RightPane, Action::MoveUp, "scroll"),
         ) {
-          chips.push(bidirectional_chip(&up, &down, "scroll"));
+          chips.push(RankedChip::new(
+            30,
+            bidirectional_chip(&up, &down, "scroll"),
+          ));
         }
-        push(&mut chips, app.hint(Focus::RightPane, Action::YankPath));
-        push(&mut chips, app.hint(Focus::RightPane, Action::YankUrl));
-        push(&mut chips, app.hint(Focus::RightPane, Action::YankCurl));
+        push(&mut chips, 40, app.hint(Focus::RightPane, Action::YankPath));
+        push(&mut chips, 50, app.hint(Focus::RightPane, Action::YankUrl));
+        push(&mut chips, 60, app.hint(Focus::RightPane, Action::YankCurl));
       } else if app.focused_path().is_some() {
         // Editable launch form — surface launch + the field/value
         // cycle pairs + `a:advanced` + `p:path`. No `u`/`c` here
@@ -246,6 +258,7 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
         // running instance.
         push(
           &mut chips,
+          10,
           app.hint_with(Focus::RightPane, Action::Submit, "launch"),
         );
         // When the picker was staged via `e` over a running launch
@@ -258,7 +271,7 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
         // the Models list.
         if app.launch_picker.is_some() && app.focused_managed().is_some() {
           if let Some(chip) = app.hint_with(Focus::RightPane, Action::FocusList, "discard") {
-            chips.push(chip);
+            chips.push(RankedChip::new(20, chip));
           }
         }
         // Surface `e:edit` so the extras row (and numeric / enum
@@ -288,11 +301,13 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
         if inline_editing {
           push(
             &mut chips,
+            30,
             app.hint_with(Focus::ChatInput, Action::ExitEdit, "clear"),
           );
         } else if focused_editable {
           push(
             &mut chips,
+            30,
             app.hint_with(Focus::RightPane, Action::EnterEdit, "edit"),
           );
         }
@@ -300,15 +315,21 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
           app.hint_with(Focus::RightPane, Action::MoveDown, "cycle fields"),
           app.hint_with(Focus::RightPane, Action::MoveUp, "cycle fields"),
         ) {
-          chips.push(bidirectional_chip(&up, &down, "cycle fields"));
+          chips.push(RankedChip::new(
+            40,
+            bidirectional_chip(&up, &down, "cycle fields"),
+          ));
         }
         if let (Some(next), Some(prev)) = (
           app.hint_with(Focus::RightPane, Action::CycleValueNext, "cycle value"),
           app.hint_with(Focus::RightPane, Action::CycleValuePrev, "cycle value"),
         ) {
-          chips.push(bidirectional_chip(&prev, &next, "cycle value"));
+          chips.push(RankedChip::new(
+            50,
+            bidirectional_chip(&prev, &next, "cycle value"),
+          ));
         }
-        push(&mut chips, app.hint(Focus::RightPane, Action::YankPath));
+        push(&mut chips, 60, app.hint(Focus::RightPane, Action::YankPath));
       }
     }
   }
@@ -665,38 +686,48 @@ mod tests {
     app
   }
 
+  /// Thin adapter so the in-module tests can keep asserting against
+  /// `Vec<String>` literals after the function moved to
+  /// `Vec<RankedChip>`. Returns the chip texts in source order.
+  fn chip_texts(app: &App) -> Vec<String> {
+    bottom_hint_chips(app)
+      .into_iter()
+      .map(|c| c.text)
+      .collect()
+  }
+
   #[test]
   fn bottom_hint_chips_match_each_focus_tab_combo() {
     use crate::tui::keybindings::{Focus, ENTER_LABEL};
     let ctrl_r = crate::ctrl_label!("r");
     // Navigation focuses surface the entry-point keystroke per tab.
     assert_eq!(
-      bottom_hint_chips(&app_with_focus(Focus::RightPane, RightTab::Logs)),
+      chip_texts(&app_with_focus(Focus::RightPane, RightTab::Logs)),
       vec!["s:auto-scroll".to_string(), "c:copy".to_string()]
     );
     assert_eq!(
-      bottom_hint_chips(&app_with_focus(Focus::RightPane, RightTab::Chat)),
+      chip_texts(&app_with_focus(Focus::RightPane, RightTab::Chat)),
       vec!["e:edit".to_string()]
     );
     assert_eq!(
-      bottom_hint_chips(&app_with_focus(Focus::RightPane, RightTab::Embed)),
+      chip_texts(&app_with_focus(Focus::RightPane, RightTab::Embed)),
       vec!["e:edit".to_string()]
     );
     assert_eq!(
-      bottom_hint_chips(&app_with_focus(Focus::RightPane, RightTab::Rerank)),
+      chip_texts(&app_with_focus(Focus::RightPane, RightTab::Rerank)),
       vec!["e:edit".to_string()]
     );
     // Settings on an unfocused selection has no model to act on,
     // so no chips fire — the bottom border stays bare instead of
     // teaching keys that no-op.
-    assert!(bottom_hint_chips(&app_with_focus(Focus::RightPane, RightTab::Settings)).is_empty());
+    assert!(chip_texts(&app_with_focus(Focus::RightPane, RightTab::Settings)).is_empty());
     // Edit-mode focuses surface InputField-aware modal chips. In a
     // fresh app the field is *not* editing yet, so the chip strip
     // shows `e:edit` (no `Esc:clear` because the buffer is empty).
     let enter_send = format!("{ENTER_LABEL}:send");
     let ctrl_r_think = format!("{ctrl_r}:think");
     assert_eq!(
-      bottom_hint_chips(&app_with_focus(Focus::ChatInput, RightTab::Chat)),
+      chip_texts(&app_with_focus(Focus::ChatInput, RightTab::Chat)),
       vec![
         "e:edit".to_string(),
         enter_send.clone(),
@@ -709,7 +740,7 @@ mod tests {
     let mut chat_app = app_with_focus(Focus::ChatInput, RightTab::Chat);
     chat_app.chat.prompt.enter_edit();
     assert_eq!(
-      bottom_hint_chips(&chat_app),
+      chip_texts(&chat_app),
       vec![
         "Esc:stop edit".to_string(),
         enter_send.clone(),
@@ -723,7 +754,7 @@ mod tests {
     chat_app.chat.prompt.set_text("hi");
     chat_app.chat.prompt.exit_edit();
     assert_eq!(
-      bottom_hint_chips(&chat_app),
+      chip_texts(&chat_app),
       vec![
         "e:edit".to_string(),
         "Esc:clear".to_string(),
@@ -733,7 +764,7 @@ mod tests {
     );
     // Embed mirrors the same shape (one fewer trailing chip).
     assert_eq!(
-      bottom_hint_chips(&app_with_focus(Focus::EmbedInput, RightTab::Embed)),
+      chip_texts(&app_with_focus(Focus::EmbedInput, RightTab::Embed)),
       vec!["e:edit".to_string(), format!("{ENTER_LABEL}:embed")]
     );
     // Rerank input: chip strip reflects the active sub-field's
@@ -741,20 +772,20 @@ mod tests {
     // buffer) — `e:edit · ⏎:rerank`.
     let mut rerank_app = app_with_focus(Focus::RerankInput, RightTab::Rerank);
     assert_eq!(
-      bottom_hint_chips(&rerank_app),
+      chip_texts(&rerank_app),
       vec!["e:edit".to_string(), format!("{ENTER_LABEL}:rerank")]
     );
     // Cycling to the candidate field swaps the Enter description
     // to `add candidate`.
     rerank_app.rerank.cycle_field();
     assert_eq!(
-      bottom_hint_chips(&rerank_app),
+      chip_texts(&rerank_app),
       vec!["e:edit".to_string(), format!("{ENTER_LABEL}:add candidate"),]
     );
     // Entering edit on the candidate field flips the modal chip.
     rerank_app.rerank.candidate_buffer.enter_edit();
     assert_eq!(
-      bottom_hint_chips(&rerank_app),
+      chip_texts(&rerank_app),
       vec![
         "Esc:stop edit".to_string(),
         format!("{ENTER_LABEL}:add candidate"),
@@ -793,7 +824,7 @@ mod tests {
     // `e:edit for launch` leads — it's the new explicit gate that
     // replaces the old auto-stage-on-arrow behaviour.
     assert_eq!(
-      bottom_hint_chips(&app),
+      chip_texts(&app),
       vec![
         "e:edit for launch".to_string(),
         "s:stop".to_string(),
@@ -808,7 +839,7 @@ mod tests {
     // on the editable form.
     use crate::tui::keybindings::ENTER_LABEL;
     app.open_launch_picker();
-    let chips = bottom_hint_chips(&app);
+    let chips = chip_texts(&app);
     assert!(chips.contains(&format!("{ENTER_LABEL}:launch")));
     assert!(chips.contains(&"↑↓:cycle fields".to_string()));
     assert!(chips.contains(&"←→:cycle value".to_string()));
@@ -832,14 +863,14 @@ mod tests {
     app.right_tab = RightTab::Settings;
     app.open_launch_picker();
     // Default focus lands on Ctx (editable) — baseline chip visible.
-    let baseline = bottom_hint_chips(&app);
+    let baseline = chip_texts(&app);
     assert!(baseline.contains(&"e:edit".to_string()));
     // Move focus onto a boolean knob — chip disappears.
     {
       let picker = app.launch_picker.as_mut().unwrap();
       picker.field = PickerField::Knob(crate::launch::flag_aliases::KnobField::FlashAttn);
     }
-    let on_bool = bottom_hint_chips(&app);
+    let on_bool = chip_texts(&app);
     assert!(
       !on_bool.contains(&"e:edit".to_string()),
       "e:edit must hide on boolean row: {on_bool:?}"
@@ -849,7 +880,7 @@ mod tests {
       let picker = app.launch_picker.as_mut().unwrap();
       picker.field = PickerField::Extras;
     }
-    let on_extras = bottom_hint_chips(&app);
+    let on_extras = chip_texts(&app);
     assert!(
       on_extras.contains(&"e:edit".to_string()),
       "e:edit must reappear on the editable Extras row: {on_extras:?}"
@@ -870,7 +901,7 @@ mod tests {
     app.right_tab = RightTab::Settings;
     app.open_launch_picker();
     // Baseline: picker open, no inline edit → e:edit visible.
-    let baseline = bottom_hint_chips(&app);
+    let baseline = chip_texts(&app);
     assert!(baseline.contains(&"e:edit".to_string()));
     assert!(!baseline.contains(&"Esc:clear".to_string()));
     // Open inline edit on a numeric field — chip flips.
@@ -881,7 +912,7 @@ mod tests {
         String::new(),
       );
     }
-    let inline = bottom_hint_chips(&app);
+    let inline = chip_texts(&app);
     assert!(inline.contains(&"Esc:clear".to_string()));
     assert!(!inline.contains(&"e:edit".to_string()));
     // Close inline edit, switch to extras editing — chip still flips.
@@ -890,7 +921,7 @@ mod tests {
       picker.inline_edit.close();
       picker.extras_input.enter_edit();
     }
-    let extras = bottom_hint_chips(&app);
+    let extras = chip_texts(&app);
     assert!(extras.contains(&"Esc:clear".to_string()));
     assert!(!extras.contains(&"e:edit".to_string()));
   }
@@ -924,7 +955,7 @@ mod tests {
       PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx),
       String::new(),
     );
-    let chips = bottom_hint_chips(&app);
+    let chips = chip_texts(&app);
     let expected = format!("{ctrl_x_label}:clear");
     assert!(
       chips.iter().any(|c| c == &expected),
@@ -942,7 +973,7 @@ mod tests {
     app.list_cursor = 2;
     app.focus = Focus::RightPane;
     app.right_tab = RightTab::Settings;
-    let chips = bottom_hint_chips(&app);
+    let chips = chip_texts(&app);
     assert!(chips.contains(&format!("{ENTER_LABEL}:launch")));
     assert!(chips.contains(&"p:path".to_string()));
     assert!(!chips.iter().any(|c| c.contains("u:url")));
@@ -967,7 +998,7 @@ mod tests {
     app.focus = crate::tui::keybindings::Focus::RightPane;
     app.right_tab = RightTab::Chat;
     assert_eq!(
-      bottom_hint_chips(&app),
+      chip_texts(&app),
       vec!["F4:edit".to_string()],
       "remapped enter_edit must flow into the chip"
     );
