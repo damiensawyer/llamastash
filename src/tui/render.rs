@@ -513,16 +513,28 @@ fn build_models_hints(
   filter_mode: FilterChipMode,
   on_running: bool,
   deletable: bool,
-) -> Vec<String> {
-  let mut out: Vec<String> = Vec::with_capacity(7);
+) -> Vec<crate::tui::hint_picker::RankedChip> {
+  use crate::tui::hint_picker::RankedChip;
+  let mut out: Vec<RankedChip> = Vec::with_capacity(7);
+  // `push_ranked` is the only Vec-shaping helper here so adding a
+  // new chip means picking a rank (lower = stickier under width
+  // pressure) — no risk of accidentally giving a hint silent
+  // priority through source order alone.
+  let mut push_ranked = |rank: u8, text: Option<String>| {
+    if let Some(t) = text {
+      out.push(RankedChip::new(rank, t));
+    }
+  };
   // Filter is a live predicate (applies on every keystroke), so
   // `Submit` carries `Enter:launch` semantics: drill into the
   // focused result. Override the binding's description to read as
   // the actual user-facing action.
   let enter_launch = || {
-    app
-      .hint_with(Focus::Filter, Action::Submit, "launch")
-      .unwrap_or_else(|| format!("{}:launch", crate::tui::keybindings::ENTER_LABEL))
+    Some(
+      app
+        .hint_with(Focus::Filter, Action::Submit, "launch")
+        .unwrap_or_else(|| format!("{}:launch", crate::tui::keybindings::ENTER_LABEL)),
+    )
   };
   if filter_mode == FilterChipMode::Editing {
     // While editing only the in-edit chord is useful — `Esc:stop
@@ -530,8 +542,8 @@ fn build_models_hints(
     // binding for Esc inside Focus::Filter is `ClearFilter`, but in
     // edit mode the field intercepts Esc first and exits edit; we
     // surface the actual observed behavior here.
-    out.push(enter_launch());
-    out.push("Esc:stop edit".to_string());
+    push_ranked(10, enter_launch());
+    push_ranked(20, Some("Esc:stop edit".to_string()));
     return out;
   }
   if filter_mode == FilterChipMode::Resting {
@@ -539,63 +551,46 @@ fn build_models_hints(
     // re-enters edit, `Esc` clears the buffer, `Enter` launches the
     // focused row. ↑/↓ scroll the filtered results without leaving
     // the filter focus.
-    out.push("e:edit".to_string());
-    if let Some(h) = app.hint(Focus::Filter, Action::ClearFilter) {
-      out.push(h);
-    }
-    out.push(enter_launch());
-    out.push("↑/↓:nav".to_string());
+    push_ranked(10, Some("e:edit".to_string()));
+    push_ranked(20, app.hint(Focus::Filter, Action::ClearFilter));
+    push_ranked(30, enter_launch());
+    push_ranked(40, Some("↑/↓:nav".to_string()));
     return out;
   }
-  {
-    // Audit §F5 #23: only surface `Enter:launch` when the cursor
-    // sits on a launchable row. `open_launch_picker` is silently a
-    // no-op on header rows (`★ Favorites`, `↺ Recent`, folder
-    // group headings), so showing the chip there would teach a
-    // binding that doesn't fire.
-    if app.focused_name().is_some() {
-      if let Some(h) = app.hint(Focus::List, Action::OpenLaunchPicker) {
-        out.push(h);
-      }
-    }
-    // When the cursor sits on a running row, `s:stop` is the most
-    // valuable next keystroke — hoist it ahead of `f:fav` so it
-    // doesn't get clipped first under width pressure and reads as
-    // the headline action for that row.
-    if on_running {
-      if let Some(h) = app.hint(Focus::List, Action::StopModel) {
-        out.push(h);
-      }
-    }
-    // `favorite` is the canonical description; override here to
-    // keep the chip terse without renaming the help-overlay entry.
-    if let Some(h) = app.hint_with(Focus::List, Action::ToggleFavorite, "fav") {
-      out.push(h);
-    }
-    if let Some(h) = app.hint(Focus::List, Action::YankPath) {
-      out.push(h);
-    }
-    if on_running {
-      if let Some(h) = app.hint(Focus::List, Action::YankUrl) {
-        out.push(h);
-      }
-      if let Some(h) = app.hint(Focus::List, Action::YankCurl) {
-        out.push(h);
-      }
-    }
-    // Delete-model chip is gated to *idle* rows only — see
-    // [`focused_row_is_deletable`] for the exact rule. Running
-    // (Ready / Loading / Launching), Error, and External rows hide
-    // the chip so we don't tempt the user toward a refusal or a
-    // delete that would crash an out-of-process llama-server. The
-    // keybinding still fires on those rows (it toasts the reason it
-    // refused) so muscle memory works — the chip is purely the
-    // discovery surface.
-    if app.focused_name().is_some() && deletable {
-      if let Some(h) = app.hint(Focus::List, Action::DeleteModel) {
-        out.push(h);
-      }
-    }
+  // Audit §F5 #23: only surface `Enter:launch` when the cursor
+  // sits on a launchable row. `open_launch_picker` is silently a
+  // no-op on header rows (`★ Favorites`, `↺ Recent`, folder
+  // group headings), so showing the chip there would teach a
+  // binding that doesn't fire.
+  if app.focused_name().is_some() {
+    push_ranked(10, app.hint(Focus::List, Action::OpenLaunchPicker));
+  }
+  // `s:stop` is the most valuable next keystroke when the cursor
+  // sits on a running row — rank 20 so it survives ahead of `fav`.
+  if on_running {
+    push_ranked(20, app.hint(Focus::List, Action::StopModel));
+  }
+  // `favorite` is the canonical description; override here to keep
+  // the chip terse without renaming the help-overlay entry.
+  push_ranked(
+    30,
+    app.hint_with(Focus::List, Action::ToggleFavorite, "fav"),
+  );
+  push_ranked(40, app.hint(Focus::List, Action::YankPath));
+  if on_running {
+    push_ranked(50, app.hint(Focus::List, Action::YankUrl));
+    push_ranked(60, app.hint(Focus::List, Action::YankCurl));
+  }
+  // Delete-model chip is gated to *idle* rows only — see
+  // [`focused_row_is_deletable`] for the exact rule. Running
+  // (Ready / Loading / Launching), Error, and External rows hide
+  // the chip so we don't tempt the user toward a refusal or a
+  // delete that would crash an out-of-process llama-server. The
+  // keybinding still fires on those rows (it toasts the reason it
+  // refused) so muscle memory works — the chip is purely the
+  // discovery surface.
+  if app.focused_name().is_some() && deletable {
+    push_ranked(70, app.hint(Focus::List, Action::DeleteModel));
   }
   out
 }
@@ -957,11 +952,11 @@ mod tests {
     );
     let stop_at = hints
       .iter()
-      .position(|h| h.contains("stop"))
+      .position(|h| h.text.contains("stop"))
       .expect("s:stop must appear when on_running");
     let fav_at = hints
       .iter()
-      .position(|h| h.contains("fav"))
+      .position(|h| h.text.contains("fav"))
       .expect("f:fav must appear");
     assert!(
       stop_at < fav_at,
@@ -981,10 +976,10 @@ mod tests {
       /*on_running=*/ false,
       /*deletable=*/ true,
     );
-    assert!(!hints.iter().any(|h| h.contains("stop")), "{hints:?}");
-    assert!(!hints.iter().any(|h| h.contains(":url")), "{hints:?}");
-    assert!(!hints.iter().any(|h| h.contains(":curl")), "{hints:?}");
-    assert!(hints.iter().any(|h| h.contains("fav")), "{hints:?}");
+    assert!(!hints.iter().any(|h| h.text.contains("stop")), "{hints:?}");
+    assert!(!hints.iter().any(|h| h.text.contains(":url")), "{hints:?}");
+    assert!(!hints.iter().any(|h| h.text.contains(":curl")), "{hints:?}");
+    assert!(hints.iter().any(|h| h.text.contains("fav")), "{hints:?}");
   }
 
   #[test]
@@ -995,7 +990,7 @@ mod tests {
     let empty_app = App::new(AppOptions::default());
     let empty_hints = build_models_hints(&empty_app, FilterChipMode::Inactive, false, false);
     assert!(
-      !empty_hints.iter().any(|h| h.contains("delete")),
+      !empty_hints.iter().any(|h| h.text.contains("delete")),
       "no focused name = no delete chip: {empty_hints:?}"
     );
 
@@ -1014,14 +1009,14 @@ mod tests {
     focused_app.go_top();
     let deletable_hints = build_models_hints(&focused_app, FilterChipMode::Inactive, false, true);
     assert!(
-      deletable_hints.iter().any(|h| h.contains("delete")),
+      deletable_hints.iter().any(|h| h.text.contains("delete")),
       "deletable focused row must surface delete chip: {deletable_hints:?}"
     );
 
     // Same focused row but deletable=false → chip hidden.
     let non_deletable = build_models_hints(&focused_app, FilterChipMode::Inactive, false, false);
     assert!(
-      !non_deletable.iter().any(|h| h.contains("delete")),
+      !non_deletable.iter().any(|h| h.text.contains("delete")),
       "non-deletable row must hide delete chip: {non_deletable:?}"
     );
   }
@@ -1037,42 +1032,42 @@ mod tests {
     app.open_filter();
     let editing = build_models_hints(&app, FilterChipMode::Editing, false, false);
     assert!(
-      editing.iter().any(|h| h == &enter_launch),
+      editing.iter().any(|h| h.text == enter_launch),
       "editing mode must surface {enter_launch} (filter is live, no apply): {editing:?}"
     );
     assert!(
-      editing.iter().any(|h| h == "Esc:stop edit"),
+      editing.iter().any(|h| h.text == "Esc:stop edit"),
       "editing mode must surface stop-edit chord: {editing:?}"
     );
     assert!(
-      !editing.iter().any(|h| h.contains("apply")),
+      !editing.iter().any(|h| h.text.contains("apply")),
       "editing mode must NOT surface apply (filter applies live): {editing:?}"
     );
     assert!(
-      !editing.iter().any(|h| h.contains("clear")),
+      !editing.iter().any(|h| h.text.contains("clear")),
       "editing mode must NOT surface clear: {editing:?}"
     );
     // Resting mode: `e:edit`, `Esc:clear`, `⏎:launch`, plus a
     // navigation hint so the user knows arrows still work.
     let resting = build_models_hints(&app, FilterChipMode::Resting, false, false);
     assert!(
-      resting.iter().any(|h| h == "e:edit"),
+      resting.iter().any(|h| h.text == "e:edit"),
       "resting mode must surface enter-edit chord: {resting:?}"
     );
     assert!(
-      resting.iter().any(|h| h.contains("clear")),
+      resting.iter().any(|h| h.text.contains("clear")),
       "resting mode must surface clear chord: {resting:?}"
     );
     assert!(
-      resting.iter().any(|h| h == &enter_launch),
+      resting.iter().any(|h| h.text == enter_launch),
       "resting mode must surface {enter_launch}: {resting:?}"
     );
     assert!(
-      !resting.iter().any(|h| h.contains("apply")),
+      !resting.iter().any(|h| h.text.contains("apply")),
       "resting mode must NOT surface apply: {resting:?}"
     );
     assert!(
-      resting.iter().any(|h| h.contains("↑/↓")),
+      resting.iter().any(|h| h.text.contains("↑/↓")),
       "resting mode must hint that arrows still navigate: {resting:?}"
     );
   }

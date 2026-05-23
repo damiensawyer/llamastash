@@ -533,9 +533,7 @@ fn layout_columns(content_w: usize) -> ColumnLayout {
   taken.sort_by_key(|(idx, _)| *idx);
   let visible: Vec<&'static Column> = taken.into_iter().map(|(_, c)| c).collect();
 
-  let name_w = content_w
-    .saturating_sub(MARKER_W + spent)
-    .max(MIN_NAME_W);
+  let name_w = content_w.saturating_sub(MARKER_W + spent).max(MIN_NAME_W);
   ColumnLayout { visible, name_w }
 }
 
@@ -556,14 +554,17 @@ pub enum FilterTitle<'a> {
 ///
 /// `hints` is the resolved chip strip — the caller (`render.rs`)
 /// builds it via `App::hint` so config-driven key overrides flow
-/// through to the title automatically. Hints are dropped from the
-/// tail under budget pressure; order them most-important-first.
+/// through to the title automatically. Each chip carries a priority
+/// rank; under budget pressure the [`hint_picker`](crate::tui::hint_picker)
+/// drops higher-rank chips first while keeping survivors in source
+/// order. Declaration order in the caller no longer determines
+/// drop order — rank does.
 #[derive(Debug, Clone)]
 pub struct TitleInputs<'a> {
   pub total: usize,
   pub area_width: usize,
   pub filter: FilterTitle<'a>,
-  pub hints: Vec<String>,
+  pub hints: Vec<crate::tui::hint_picker::RankedChip>,
 }
 
 /// Border colour for the Models pane based on focus. Delegates to
@@ -706,10 +707,6 @@ pub(crate) fn build_block_title(
   // title carries inside the block edge.
   let budget = input.area_width.saturating_sub(4);
 
-  // Local copy so we can drop entries under budget pressure without
-  // mutating the caller's Vec.
-  let mut hints: Vec<String> = input.hints.clone();
-
   // Filter slot text width (no styling here — we just need the cell
   // count for the budget calculation).
   let filter_text_width = match input.filter {
@@ -720,25 +717,19 @@ pub(crate) fn build_block_title(
     }
   };
 
+  // Structural width: ` count · filter_slot ` (no hints). The hint
+  // picker fits chips into whatever budget remains after that.
   let count = format!("Models [{}]", input.total);
-  // Trim hints from the tail until the line fits. The first hint
-  // (caller-chosen, typically `Enter:launch` or `Enter:apply`) is
-  // never dropped — agents and new users rely on it to bootstrap
-  // the keyboard surface. Hint separator is ` · ` (3 cells).
-  loop {
-    let mut width = 1; // leading space
-    width += count.chars().count();
-    width += 3; // ` · ` before filter slot
-    width += filter_text_width;
-    for h in &hints {
-      width += 3 + h.chars().count();
-    }
-    width += 1; // trailing space
-    if width <= budget || hints.len() <= 1 {
-      break;
-    }
-    hints.pop();
-  }
+  let structural_w = 1 + count.chars().count() + 3 + filter_text_width + 1;
+  // ` · ` separator before the *first* hint plus its own width is
+  // accounted for inside `pick`. We reserve 3 cells for the leading
+  // separator that joins the filter slot to the chip strip; if no
+  // chip fits, no separator is emitted (the loop below predicates
+  // on `!hints.is_empty()`).
+  let hint_budget = budget
+    .saturating_sub(structural_w)
+    .saturating_sub(3 /* ` · ` before first hint */);
+  let hints = crate::tui::hint_picker::pick(input.hints.clone(), hint_budget, " · ");
 
   // Now build the actual Line with styled spans.
   let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
@@ -1429,22 +1420,28 @@ mod tests {
   }
 
   /// Mirrors the chip list `render.rs::build_models_hints` produces
-  /// for the running-row, filter-inactive case. Kept inline here so
-  /// the in-module tests can exercise `build_block_title` directly
+  /// for the running-row, filter-inactive case (including the ranks
+  /// the picker uses to decide drop order). Kept inline here so the
+  /// in-module tests can exercise `build_block_title` directly
   /// without spinning an App.
-  fn full_hints() -> Vec<String> {
+  fn full_hints() -> Vec<crate::tui::hint_picker::RankedChip> {
+    use crate::tui::hint_picker::RankedChip;
     vec![
-      "Enter:launch".into(),
-      "s:stop".into(),
-      "f:fav".into(),
-      "p:path".into(),
-      "u:url".into(),
-      "c:curl".into(),
+      RankedChip::new(10, "Enter:launch"),
+      RankedChip::new(20, "s:stop"),
+      RankedChip::new(30, "f:fav"),
+      RankedChip::new(40, "p:path"),
+      RankedChip::new(50, "u:url"),
+      RankedChip::new(60, "c:curl"),
     ]
   }
 
-  fn filter_hints() -> Vec<String> {
-    vec!["Enter:apply".into(), "Esc:clear".into()]
+  fn filter_hints() -> Vec<crate::tui::hint_picker::RankedChip> {
+    use crate::tui::hint_picker::RankedChip;
+    vec![
+      RankedChip::new(10, "Enter:apply"),
+      RankedChip::new(20, "Esc:clear"),
+    ]
   }
 
   #[test]
@@ -1601,7 +1598,11 @@ mod tests {
         total: 3,
         area_width: 120,
         filter: FilterTitle::Inactive,
-        hints: vec!["Enter:launch".into(), "f:fav".into(), "p:path".into()],
+        hints: vec![
+          crate::tui::hint_picker::RankedChip::new(10, "Enter:launch"),
+          crate::tui::hint_picker::RankedChip::new(30, "f:fav"),
+          crate::tui::hint_picker::RankedChip::new(40, "p:path"),
+        ],
       },
       "/:filter",
       macchiato(),
@@ -1617,16 +1618,16 @@ mod tests {
   }
 
   #[test]
-  fn title_drops_hints_right_to_left_under_pressure() {
-    // A 40-col area can't fit the whole strip; the title builder
-    // should drop hints from the tail. With the chip order the
-    // caller supplies, the yank pair (u:url · c:curl) sits at the
-    // tail and is the first to go. `s:stop` now sits near the head
-    // so it survives — that's the point of the reorder.
+  fn title_drops_high_rank_hints_first_under_pressure() {
+    // A 60-col area can't fit the whole strip; the ranked picker
+    // drops the highest-rank chips first while the survivors keep
+    // source order. With the canonical ranks (Enter rank 10, stop
+    // rank 20, fav rank 30, path rank 40, url rank 50, curl rank
+    // 60), the yank trio (path/url/curl) is shed before stop/fav.
     let title = build_block_title(
       TitleInputs {
         total: 127,
-        area_width: 40,
+        area_width: 60,
         filter: FilterTitle::Inactive,
         hints: full_hints(),
       },
@@ -1636,17 +1637,22 @@ mod tests {
     );
     let text = title_text(&title);
     assert!(
-      text.contains("Enter:launch"),
-      "must never drop launch chip: {text:?}"
-    );
-    assert!(
       text.contains("Models [127]"),
       "must never drop the count: {text:?}"
     );
-    // The running-row hints sit at the tail and should drop first.
+    // The lower-rank chips survive.
+    assert!(
+      text.contains("Enter:launch"),
+      "Enter:launch (rank 10) must survive at 60 cols: {text:?}"
+    );
+    assert!(
+      text.contains("s:stop"),
+      "s:stop (rank 20) must survive at 60 cols: {text:?}"
+    );
+    // The highest-rank chip (c:curl rank 60) drops first.
     assert!(
       !text.contains("c:curl"),
-      "expected c:curl dropped at 40 cols: {text:?}"
+      "expected c:curl (rank 60) dropped at 60 cols: {text:?}"
     );
   }
 
@@ -1765,7 +1771,12 @@ mod tests {
     // the front of the strip.
     assert_eq!(
       ids,
-      vec![ColumnId::Arch, ColumnId::Quant, ColumnId::Ctx, ColumnId::Size]
+      vec![
+        ColumnId::Arch,
+        ColumnId::Quant,
+        ColumnId::Ctx,
+        ColumnId::Size
+      ]
     );
   }
 
@@ -1802,7 +1813,7 @@ mod tests {
         area_width: 80,
         total: 3,
         filter: FilterTitle::Inactive,
-        hints: vec!["Enter:launch".to_string()],
+        hints: vec![crate::tui::hint_picker::RankedChip::new(10, "Enter:launch")],
       },
       ":filter",
       palette,
@@ -1831,7 +1842,7 @@ mod tests {
       area_width: 80,
       total: 3,
       filter: FilterTitle::Inactive,
-      hints: vec!["Enter:launch".to_string()],
+      hints: vec![crate::tui::hint_picker::RankedChip::new(10, "Enter:launch")],
     };
     let focused = build_block_title(inputs(), "/:filter", palette, true);
     let unfocused = build_block_title(inputs(), "/:filter", palette, false);
