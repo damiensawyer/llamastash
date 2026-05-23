@@ -477,7 +477,7 @@ overhead/orchestrator.py
 
 ---
 
-- [ ] **Unit 8: First end-to-end results run + dated results page (resolves Q1, Q2, Q3, Q6)**
+- [x] **Unit 8: First end-to-end results run + dated results page (resolves Q1, Q2, Q6; Q3 still open pending NVIDIA/Metal data)**
 
 **Goal:** Run Suite B on the maintainer's primary backend(s), commit the per-host run JSON(s), generate the first dated `results-<DATE>.md`, and update the methodology doc with the actual answers to Q1 / Q2 / Q6.
 
