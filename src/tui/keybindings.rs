@@ -461,24 +461,101 @@ pub static DEFAULT_BINDINGS: std::sync::LazyLock<Vec<Binding>> =
 
 fn build_default_bindings() -> Vec<Binding> {
   let mut v: Vec<Binding> = Vec::new();
-  // Quit (q, Ctrl+C) — both surface in help.
+  // ─── Always-on chords across the nav focuses ────────────────
   v.extend_from_slice(&binds! {
-    action: Action::Quit,
-    scopes: FocusSet::NAV,
-    hint: "quit",
-    description: None,
+    action: Action::ToggleHelp, scopes: FocusSet::NAV,
+    hint: "help", description: None,
+    chords: [(KeyCode::Char('?'), KeyModifiers::NONE, "?", CAT_GLOBAL)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::Quit, scopes: FocusSet::NAV,
+    hint: "quit", description: None,
     chords: [
       (KeyCode::Char('q'), KeyModifiers::NONE, "q", CAT_GLOBAL),
       (KeyCode::Char('c'), KeyModifiers::CONTROL, crate::ctrl_label!("c"), CAT_GLOBAL),
     ],
   });
-  // GoTop / GoBottom — `g`/`Home` and `G`/`End` are co-primary;
-  // vim `0`/`$` are hidden aliases.
   v.extend_from_slice(&binds! {
-    action: Action::GoTop,
-    scopes: FocusSet::LIST,
-    hint: "top",
-    description: Some("top of list"),
+    action: Action::CycleTheme, scopes: FocusSet::NAV,
+    hint: "theme", description: Some("next theme"),
+    chords: [(KeyCode::Char('t'), KeyModifiers::NONE, "t", CAT_GLOBAL)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::CycleThemePrev, scopes: FocusSet::NAV,
+    hint: "prev theme", description: None,
+    chords: [(KeyCode::Char('T'), KeyModifiers::SHIFT, "T", CAT_GLOBAL)],
+  });
+  // ─── Daemon-level / destructive (all behind Ctrl) ───────────
+  v.extend_from_slice(&binds! {
+    action: Action::RestartDaemon, scopes: FocusSet::NAV,
+    hint: "restart", description: Some("restart daemon"),
+    chords: [(KeyCode::Char('r'), KeyModifiers::CONTROL, crate::ctrl_label!("r"), CAT_GLOBAL)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::KillDaemon, scopes: FocusSet::LIST,
+    hint: "kill", description: Some("kill daemon"),
+    chords: [(KeyCode::Char('k'), KeyModifiers::CONTROL, crate::ctrl_label!("k"), CAT_GLOBAL)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::StopModel, scopes: FocusSet::NAV,
+    hint: "stop", description: Some("stop launch"),
+    chords: [(KeyCode::Char('s'), KeyModifiers::CONTROL, crate::ctrl_label!("s"), CAT_STOP)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::DeleteModel, scopes: FocusSet::LIST,
+    hint: "delete", description: Some("delete from disk"),
+    chords: [(KeyCode::Char('d'), KeyModifiers::CONTROL, crate::ctrl_label!("d"), CAT_MODELS)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::CancelDownload, scopes: FocusSet::NAV,
+    hint: "cancel", description: Some("cancel download"),
+    chords: [(KeyCode::Char('x'), KeyModifiers::CONTROL, crate::ctrl_label!("x"), CAT_GLOBAL)],
+  });
+  // ─── Motion (arrows + vi aliases). ↑/↓ extend into HF_DIALOG ──
+  // for row selection; k/j stay NAV-only. Two `binds!` calls per
+  // direction because scope diverges per chord.
+  v.extend_from_slice(&binds! {
+    action: Action::MoveUp, scopes: FocusSet::NAV.union(FocusSet::HF_DIALOG),
+    hint: "up", description: Some("up/prev"),
+    chords: [(KeyCode::Up, KeyModifiers::NONE, "↑", CAT_GLOBAL)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::MoveUp, scopes: FocusSet::NAV,
+    hint: "up", description: Some("up/prev"),
+    chords: [(KeyCode::Char('k'), KeyModifiers::NONE, "k", CAT_GLOBAL)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::MoveDown, scopes: FocusSet::NAV.union(FocusSet::HF_DIALOG),
+    hint: "down", description: Some("down/next"),
+    chords: [(KeyCode::Down, KeyModifiers::NONE, "↓", CAT_GLOBAL)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::MoveDown, scopes: FocusSet::NAV,
+    hint: "down", description: Some("down/next"),
+    chords: [(KeyCode::Char('j'), KeyModifiers::NONE, "j", CAT_GLOBAL)],
+  });
+  // PageDown / PageUp — PgDn/PgUp canonical, Ctrl+F/B/U vim aliases.
+  v.extend_from_slice(&binds! {
+    action: Action::PageDown, scopes: FocusSet::LIST,
+    hint: "page down", description: None,
+    chords: [
+      (KeyCode::PageDown, KeyModifiers::NONE, "PgDn", CAT_MODELS),
+      (KeyCode::Char('f'), KeyModifiers::CONTROL, crate::ctrl_label!("f"), NO_CAT),
+    ],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::PageUp, scopes: FocusSet::LIST,
+    hint: "page up", description: None,
+    chords: [
+      (KeyCode::PageUp, KeyModifiers::NONE, "PgUp", CAT_MODELS),
+      (KeyCode::Char('b'), KeyModifiers::CONTROL, crate::ctrl_label!("b"), NO_CAT),
+      (KeyCode::Char('u'), KeyModifiers::CONTROL, crate::ctrl_label!("u"), NO_CAT),
+    ],
+  });
+  // GoTop / GoBottom — `g`/`Home` and `G`/`End` co-primary; `0`/`$` hidden.
+  v.extend_from_slice(&binds! {
+    action: Action::GoTop, scopes: FocusSet::LIST,
+    hint: "top", description: Some("top of list"),
     chords: [
       (KeyCode::Char('g'), KeyModifiers::NONE, "g", CAT_MODELS),
       (KeyCode::Home, KeyModifiers::NONE, "Home", CAT_MODELS),
@@ -486,554 +563,220 @@ fn build_default_bindings() -> Vec<Binding> {
     ],
   });
   v.extend_from_slice(&binds! {
-    action: Action::GoBottom,
-    scopes: FocusSet::LIST,
-    hint: "bottom",
-    description: Some("bottom of list"),
+    action: Action::GoBottom, scopes: FocusSet::LIST,
+    hint: "bottom", description: Some("bottom of list"),
     chords: [
       (KeyCode::Char('G'), KeyModifiers::SHIFT, "G", CAT_MODELS),
       (KeyCode::End, KeyModifiers::NONE, "End", CAT_MODELS),
       (KeyCode::Char('$'), KeyModifiers::NONE, "$", NO_CAT),
     ],
   });
-  // PageDown / PageUp — PgDn/PgUp are canonical; Ctrl+F/B/U are vim aliases.
+  // ─── Pane navigation. Tab/Shift+Tab fire in every TUI focus;
+  // vi h/l aliases NAV-only. Scope diverges → split into two calls.
   v.extend_from_slice(&binds! {
-    action: Action::PageDown,
-    scopes: FocusSet::LIST,
-    hint: "page down",
-    description: None,
-    chords: [
-      (KeyCode::PageDown, KeyModifiers::NONE, "PgDn", CAT_MODELS),
-      (KeyCode::Char('f'), KeyModifiers::CONTROL, crate::ctrl_label!("f"), NO_CAT),
-    ],
+    action: Action::NextFocus, scopes: FocusSet::TUI,
+    hint: "next pane", description: None,
+    chords: [(KeyCode::Tab, KeyModifiers::NONE, TAB_LABEL, CAT_GLOBAL)],
   });
   v.extend_from_slice(&binds! {
-    action: Action::PageUp,
-    scopes: FocusSet::LIST,
-    hint: "page up",
-    description: None,
-    chords: [
-      (KeyCode::PageUp, KeyModifiers::NONE, "PgUp", CAT_MODELS),
-      (KeyCode::Char('b'), KeyModifiers::CONTROL, crate::ctrl_label!("b"), NO_CAT),
-      (KeyCode::Char('u'), KeyModifiers::CONTROL, crate::ctrl_label!("u"), NO_CAT),
-    ],
+    action: Action::NextFocus, scopes: FocusSet::NAV,
+    hint: "next pane", description: None,
+    chords: [(KeyCode::Char('l'), KeyModifiers::NONE, "l", CAT_GLOBAL)],
   });
-  // YankCurl (c, y) — both surface; `y` is the vim-style alias.
   v.extend_from_slice(&binds! {
-    action: Action::YankCurl,
-    scopes: FocusSet::NAV,
-    hint: "curl",
-    description: Some("copy curl command"),
-    chords: [
-      (KeyCode::Char('c'), KeyModifiers::NONE, "c", CAT_YANK_CURL),
-      (KeyCode::Char('y'), KeyModifiers::NONE, "y", CAT_YANK_CURL),
-    ],
+    action: Action::PrevFocus, scopes: FocusSet::TUI,
+    hint: "prev pane", description: None,
+    chords: [(KeyCode::BackTab, KeyModifiers::SHIFT, SHIFT_TAB_LABEL, CAT_GLOBAL)],
   });
-  // EnterEdit (e, i) — `i` is the vim alias.
   v.extend_from_slice(&binds! {
-    action: Action::EnterEdit,
-    scopes: FocusSet::RIGHT_PANE,
-    hint: "edit",
-    description: Some("enter edit mode"),
-    chords: [
-      (KeyCode::Char('e'), KeyModifiers::NONE, "e", CAT_GLOBAL),
-      (KeyCode::Char('i'), KeyModifiers::NONE, "i", NO_CAT),
-    ],
+    action: Action::PrevFocus, scopes: FocusSet::NAV,
+    hint: "prev pane", description: None,
+    chords: [(KeyCode::Char('h'), KeyModifiers::NONE, "h", CAT_GLOBAL)],
+  });
+  // ─── Shift-letter quick-jumps (navigation policy: Shift = navigate)
+  v.extend_from_slice(&binds! {
+    action: Action::FocusList, scopes: FocusSet::NAV,
+    hint: "models", description: Some("models list"),
+    chords: [(KeyCode::Char('M'), KeyModifiers::SHIFT, "M", CAT_GLOBAL)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::FocusLogsTab, scopes: FocusSet::NAV,
+    hint: "logs", description: Some("logs tab"),
+    chords: [(KeyCode::Char('L'), KeyModifiers::SHIFT, "L", CAT_GLOBAL)],
   });
   // FocusChatTab — Shift+C/E/R all jump to the same tab; merge into
   // one help row via the (action, description) grouping in the overlay.
   v.extend_from_slice(&binds! {
-    action: Action::FocusChatTab,
-    scopes: FocusSet::NAV,
-    hint: "chat/embed/rerank",
-    description: Some("chat/embed/rerank"),
+    action: Action::FocusChatTab, scopes: FocusSet::NAV,
+    hint: "chat/embed/rerank", description: Some("chat/embed/rerank"),
     chords: [
       (KeyCode::Char('C'), KeyModifiers::SHIFT, "C", CAT_GLOBAL),
       (KeyCode::Char('E'), KeyModifiers::SHIFT, "E", CAT_GLOBAL),
       (KeyCode::Char('R'), KeyModifiers::SHIFT, "R", CAT_GLOBAL),
     ],
   });
-  // Single-chord or scope-divergent rows declared as explicit
-  // `Binding { ... }` literals — they can't share metadata via the
-  // `binds!` macro because either there's only one chord per action
-  // or each chord needs its own scope / category.
-  v.extend_from_slice(LITERAL_BINDINGS);
-  v
-}
-
-/// Bindings declared as explicit `Binding` literals — single-chord
-/// rows and groups whose scope or category diverges per chord.
-const LITERAL_BINDINGS: &[Binding] = &[
-  // ─── Always-on chords across the nav focuses ────────────────
-  Binding {
-    key: KeyCode::Char('?'),
-    mods: KeyModifiers::NONE,
-    action: Action::ToggleHelp,
-    label: "?",
-    hint: "help",
-    description: None,
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  // Quit (q, Ctrl+C) — see `binds!` group in `build_default_bindings`.
-  Binding {
-    key: KeyCode::Char('t'),
-    mods: KeyModifiers::NONE,
-    action: Action::CycleTheme,
-    label: "t",
-    hint: "theme",
-    description: Some("next theme"),
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::Char('T'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::CycleThemePrev,
-    label: "T",
-    hint: "prev theme",
-    description: None,
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  // ─── Daemon-level / destructive (all behind Ctrl) ───────────
-  Binding {
-    key: KeyCode::Char('r'),
-    mods: KeyModifiers::CONTROL,
-    action: Action::RestartDaemon,
-    label: crate::ctrl_label!("r"),
-    hint: "restart",
-    description: Some("restart daemon"),
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::Char('k'),
-    mods: KeyModifiers::CONTROL,
-    action: Action::KillDaemon,
-    label: crate::ctrl_label!("k"),
-    hint: "kill",
-    description: Some("kill daemon"),
-    scopes: FocusSet::LIST,
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::Char('s'),
-    mods: KeyModifiers::CONTROL,
-    action: Action::StopModel,
-    label: crate::ctrl_label!("s"),
-    hint: "stop",
-    description: Some("stop launch"),
-    scopes: FocusSet::NAV,
-    categories: CAT_STOP,
-  },
-  Binding {
-    key: KeyCode::Char('d'),
-    mods: KeyModifiers::CONTROL,
-    action: Action::DeleteModel,
-    label: crate::ctrl_label!("d"),
-    hint: "delete",
-    description: Some("delete from disk"),
-    scopes: FocusSet::LIST,
-    categories: CAT_MODELS,
-  },
-  Binding {
-    key: KeyCode::Char('x'),
-    mods: KeyModifiers::CONTROL,
-    action: Action::CancelDownload,
-    label: crate::ctrl_label!("x"),
-    hint: "cancel",
-    description: Some("cancel download"),
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  // ─── Motion (arrows + vi aliases) ───────────────────────────
-  // Motion lives in Global so a single row covers cursor movement,
-  // scroll, field-cycle, and dialog row selection. UI chips reshape
-  // per focus via `Action::hint_for` (Logs reads "scroll up", etc.).
-  Binding {
-    key: KeyCode::Up,
-    mods: KeyModifiers::NONE,
-    action: Action::MoveUp,
-    label: "↑",
-    hint: "up",
-    description: Some("up/prev"),
-    scopes: FocusSet::NAV.union(FocusSet::HF_DIALOG),
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::Char('k'),
-    mods: KeyModifiers::NONE,
-    action: Action::MoveUp,
-    label: "k",
-    hint: "up",
-    description: Some("up/prev"),
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::Down,
-    mods: KeyModifiers::NONE,
-    action: Action::MoveDown,
-    label: "↓",
-    hint: "down",
-    description: Some("down/next"),
-    scopes: FocusSet::NAV.union(FocusSet::HF_DIALOG),
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::Char('j'),
-    mods: KeyModifiers::NONE,
-    action: Action::MoveDown,
-    label: "j",
-    hint: "down",
-    description: Some("down/next"),
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  // PageUp / PageDown + vim Ctrl+B/F/U aliases — see `binds!` group.
-  // GoTop / GoBottom + Home/End + vim 0/$ aliases — see `binds!` group.
-  // ─── Pane navigation (Tab in every TUI focus; vi aliases nav-only)
-  Binding {
-    key: KeyCode::Tab,
-    mods: KeyModifiers::NONE,
-    action: Action::NextFocus,
-    label: TAB_LABEL,
-    hint: "next pane",
-    description: None,
-    scopes: FocusSet::TUI,
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::BackTab,
-    mods: KeyModifiers::SHIFT,
-    action: Action::PrevFocus,
-    label: SHIFT_TAB_LABEL,
-    hint: "prev pane",
-    description: None,
-    scopes: FocusSet::TUI,
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::Char('l'),
-    mods: KeyModifiers::NONE,
-    action: Action::NextFocus,
-    label: "l",
-    hint: "next pane",
-    description: None,
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::Char('h'),
-    mods: KeyModifiers::NONE,
-    action: Action::PrevFocus,
-    label: "h",
-    hint: "prev pane",
-    description: None,
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  // ─── Shift-letter quick-jumps (navigation policy: Shift = navigate)
-  Binding {
-    key: KeyCode::Char('M'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusList,
-    label: "M",
-    hint: "models",
-    description: Some("models list"),
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::Char('L'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusLogsTab,
-    label: "L",
-    hint: "logs",
-    description: Some("logs tab"),
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  // Shift+C / Shift+E / Shift+R (FocusChatTab) — see `binds!` group.
-  Binding {
-    key: KeyCode::Char('S'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusSettingsTab,
-    label: "S",
-    hint: "settings",
-    description: Some("settings tab"),
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  // HF pull dialog. `P` is the "Pull" mnemonic. Scoped to NAV so it
-  // fires from both Models and right pane (every non-input focus).
-  Binding {
-    key: KeyCode::Char('P'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::OpenHfDialog,
-    label: "P",
-    hint: "pull",
-    description: Some("pull from HF"),
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  // ─── Filter / favourite (List only) ─────────────────────────
-  Binding {
-    key: KeyCode::Char('/'),
-    mods: KeyModifiers::NONE,
-    action: Action::OpenFilter,
-    label: "/",
-    hint: "filter",
-    description: Some("open filter input"),
-    scopes: FocusSet::LIST,
-    categories: CAT_MODELS,
-  },
-  Binding {
-    key: KeyCode::Char('f'),
-    mods: KeyModifiers::NONE,
-    action: Action::ToggleFavorite,
-    label: "f",
-    hint: "favorite",
-    description: Some("toggle favorite ★"),
-    scopes: FocusSet::LIST,
-    categories: CAT_MODELS,
-  },
+  v.extend_from_slice(&binds! {
+    action: Action::FocusSettingsTab, scopes: FocusSet::NAV,
+    hint: "settings", description: Some("settings tab"),
+    chords: [(KeyCode::Char('S'), KeyModifiers::SHIFT, "S", CAT_GLOBAL)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::OpenHfDialog, scopes: FocusSet::NAV,
+    hint: "pull", description: Some("pull from HF"),
+    chords: [(KeyCode::Char('P'), KeyModifiers::SHIFT, "P", CAT_GLOBAL)],
+  });
+  // ─── Filter / favorite (LIST only) ──────────────────────────
+  v.extend_from_slice(&binds! {
+    action: Action::OpenFilter, scopes: FocusSet::LIST,
+    hint: "filter", description: Some("open filter input"),
+    chords: [(KeyCode::Char('/'), KeyModifiers::NONE, "/", CAT_MODELS)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::ToggleFavorite, scopes: FocusSet::LIST,
+    hint: "favorite", description: Some("toggle favorite ★"),
+    chords: [(KeyCode::Char('f'), KeyModifiers::NONE, "f", CAT_MODELS)],
+  });
   // ─── Yank / copy. `y` is a vim-style alias for `c`. ─────────
-  Binding {
-    key: KeyCode::Char('u'),
-    mods: KeyModifiers::NONE,
-    action: Action::YankUrl,
-    label: "u",
-    hint: "url",
-    description: Some("copy server URL"),
-    scopes: FocusSet::NAV,
-    categories: CAT_YANK,
-  },
-  // YankCurl (c, y vim alias) — see `binds!` group.
-  Binding {
-    key: KeyCode::Char('p'),
-    mods: KeyModifiers::NONE,
-    action: Action::YankPath,
-    label: "p",
-    hint: "path",
-    description: Some("copy file path"),
-    scopes: FocusSet::NAV,
-    categories: CAT_YANK,
-  },
+  v.extend_from_slice(&binds! {
+    action: Action::YankUrl, scopes: FocusSet::NAV,
+    hint: "url", description: Some("copy server URL"),
+    chords: [(KeyCode::Char('u'), KeyModifiers::NONE, "u", CAT_YANK)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::YankCurl, scopes: FocusSet::NAV,
+    hint: "curl", description: Some("copy curl command"),
+    chords: [
+      (KeyCode::Char('c'), KeyModifiers::NONE, "c", CAT_YANK_CURL),
+      (KeyCode::Char('y'), KeyModifiers::NONE, "y", CAT_YANK_CURL),
+    ],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::YankPath, scopes: FocusSet::NAV,
+    hint: "path", description: Some("copy file path"),
+    chords: [(KeyCode::Char('p'), KeyModifiers::NONE, "p", CAT_YANK)],
+  });
   // ─── Right-pane affordances (Settings / Logs) ───────────────
-  // EnterEdit (e, i vim alias) — see `binds!` group.
-  Binding {
-    key: KeyCode::Char('s'),
-    mods: KeyModifiers::NONE,
-    action: Action::ToggleAutoScroll,
-    label: "s",
-    hint: "auto-scroll",
-    description: None,
-    scopes: FocusSet::RIGHT_PANE,
-    categories: &[Category::Logs],
-  },
-  Binding {
-    key: KeyCode::Right,
-    mods: KeyModifiers::NONE,
-    action: Action::CycleValueNext,
-    label: "→",
-    hint: "next value",
-    description: None,
-    scopes: FocusSet::RIGHT_PANE,
-    categories: CAT_SETTINGS,
-  },
-  Binding {
-    key: KeyCode::Left,
-    mods: KeyModifiers::NONE,
-    action: Action::CycleValuePrev,
-    label: "←",
-    hint: "prev value",
-    description: None,
-    scopes: FocusSet::RIGHT_PANE,
-    categories: CAT_SETTINGS,
-  },
-  // ─── Enter — five Action variants across disjoint scopes ────
-  Binding {
-    key: KeyCode::Enter,
-    mods: KeyModifiers::NONE,
-    action: Action::OpenLaunchPicker,
-    label: ENTER_LABEL,
-    hint: "launch",
-    description: Some("launch focused model"),
-    scopes: FocusSet::LIST,
-    categories: CAT_MODELS,
-  },
-  Binding {
-    key: KeyCode::Enter,
-    mods: KeyModifiers::NONE,
+  v.extend_from_slice(&binds! {
+    action: Action::EnterEdit, scopes: FocusSet::RIGHT_PANE,
+    hint: "edit", description: Some("enter edit mode"),
+    chords: [
+      (KeyCode::Char('e'), KeyModifiers::NONE, "e", CAT_GLOBAL),
+      (KeyCode::Char('i'), KeyModifiers::NONE, "i", NO_CAT),
+    ],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::ToggleAutoScroll, scopes: FocusSet::RIGHT_PANE,
+    hint: "auto-scroll", description: None,
+    chords: [(KeyCode::Char('s'), KeyModifiers::NONE, "s", &[Category::Logs])],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::CycleValueNext, scopes: FocusSet::RIGHT_PANE,
+    hint: "next value", description: None,
+    chords: [(KeyCode::Right, KeyModifiers::NONE, "→", CAT_SETTINGS)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::CycleValuePrev, scopes: FocusSet::RIGHT_PANE,
+    hint: "prev value", description: None,
+    chords: [(KeyCode::Left, KeyModifiers::NONE, "←", CAT_SETTINGS)],
+  });
+  // ─── Enter — four Action variants across disjoint scopes ────
+  v.extend_from_slice(&binds! {
+    action: Action::OpenLaunchPicker, scopes: FocusSet::LIST,
+    hint: "launch", description: Some("launch focused model"),
+    chords: [(KeyCode::Enter, KeyModifiers::NONE, ENTER_LABEL, CAT_MODELS)],
+  });
+  v.extend_from_slice(&binds! {
     action: Action::Submit,
-    label: ENTER_LABEL,
-    hint: "submit",
-    description: Some("submit"),
     scopes: FocusSet::FILTER
       .union(FocusSet::RIGHT_PANE)
       .union(FocusSet::EMBED_INPUT)
       .union(FocusSet::RERANK_INPUT)
       .union(FocusSet::CONFIRM_POPUP)
       .union(FocusSet::HF_DIALOG),
-    categories: &[
-      Category::Models,
-      Category::Settings,
-      Category::InputTabs,
-      Category::HfDialog,
-    ],
-  },
-  Binding {
-    key: KeyCode::Enter,
-    mods: KeyModifiers::NONE,
-    action: Action::SendChat,
-    label: ENTER_LABEL,
-    hint: "send",
-    description: Some("send chat"),
-    scopes: FocusSet::CHAT_INPUT,
-    // Hidden from the help overlay; the merged Chat/Embed/Rerank
-    // section surfaces `Enter:submit` via the Submit binding above
-    // (Submit's scope doesn't include CHAT_INPUT — SendChat owns that
-    // focus — but the help row reads the same to the user).
-    categories: &[],
-  },
-  Binding {
-    key: KeyCode::Enter,
-    mods: KeyModifiers::SHIFT,
-    action: Action::InsertNewline,
-    label: SHIFT_ENTER_LABEL,
-    hint: "newline",
-    description: Some("insert newline"),
-    scopes: FocusSet::INPUT,
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::Char('r'),
-    mods: KeyModifiers::CONTROL,
-    action: Action::ToggleThinkCollapse,
-    label: crate::ctrl_label!("r"),
-    hint: "toggle reasoning",
-    description: Some("toggle <think> blocks"),
-    scopes: FocusSet::CHAT_INPUT,
-    categories: CAT_INPUT_TABS,
-  },
+    hint: "submit", description: Some("submit"),
+    chords: [(KeyCode::Enter, KeyModifiers::NONE, ENTER_LABEL, &[
+      Category::Models, Category::Settings, Category::InputTabs, Category::HfDialog,
+    ])],
+  });
+  // SendChat owns CHAT_INPUT-Enter; hidden from the overlay because
+  // the merged Chat/Embed/Rerank section surfaces it via Submit above.
+  v.extend_from_slice(&binds! {
+    action: Action::SendChat, scopes: FocusSet::CHAT_INPUT,
+    hint: "send", description: Some("send chat"),
+    chords: [(KeyCode::Enter, KeyModifiers::NONE, ENTER_LABEL, NO_CAT)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::InsertNewline, scopes: FocusSet::INPUT,
+    hint: "newline", description: Some("insert newline"),
+    chords: [(KeyCode::Enter, KeyModifiers::SHIFT, SHIFT_ENTER_LABEL, CAT_GLOBAL)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::ToggleThinkCollapse, scopes: FocusSet::CHAT_INPUT,
+    hint: "toggle reasoning", description: Some("toggle <think> blocks"),
+    chords: [(KeyCode::Char('r'), KeyModifiers::CONTROL, crate::ctrl_label!("r"), CAT_INPUT_TABS)],
+  });
   // ─── Esc — five disjoint actions across the focus families. ──
-  // The help overlay surfaces a single merged row under Global; the
-  // remaining four bindings still dispatch but hide from the overlay
-  // (empty `categories`).
-  Binding {
-    key: KeyCode::Esc,
-    mods: KeyModifiers::NONE,
-    action: Action::FocusList,
-    label: ESC_LABEL,
-    hint: "models list",
-    description: Some("cancel/clear/back"),
-    scopes: FocusSet::RIGHT_PANE,
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::Esc,
-    mods: KeyModifiers::NONE,
-    action: Action::ClearFilter,
-    label: ESC_LABEL,
-    hint: "clear",
-    description: Some("clear filter"),
-    scopes: FocusSet::FILTER,
-    categories: &[],
-  },
-  Binding {
-    key: KeyCode::Esc,
-    mods: KeyModifiers::NONE,
-    action: Action::ExitEdit,
-    label: ESC_LABEL,
-    hint: "exit edit",
-    description: None,
-    scopes: FocusSet::INPUT,
-    categories: &[],
-  },
-  Binding {
-    key: KeyCode::Esc,
-    mods: KeyModifiers::NONE,
-    action: Action::Cancel,
-    label: ESC_LABEL,
-    hint: "cancel",
-    description: Some("cancel prompt"),
-    scopes: FocusSet::CONFIRM_POPUP,
-    categories: &[],
-  },
-  Binding {
-    key: KeyCode::Esc,
-    mods: KeyModifiers::NONE,
-    action: Action::Cancel,
-    label: ESC_LABEL,
-    hint: "close",
-    description: Some("close dialog"),
-    scopes: FocusSet::HF_DIALOG,
-    categories: &[],
-  },
-  // ─── Rerank field cycle (↑↓ inside rerank input only) ───────
-  // Collides with MoveUp/MoveDown on the same keys; disjoint scopes
-  // (RERANK_INPUT vs NAV|HF_DIALOG) keep them clean. Hidden from the
-  // help overlay — the merged Chat/Embed/Rerank section keeps to
-  // shared chords (Enter, Shift+Enter, Ctrl+R).
-  Binding {
-    key: KeyCode::Down,
-    mods: KeyModifiers::NONE,
-    action: Action::NextField,
-    label: "↓",
-    hint: "next field",
-    description: None,
-    scopes: FocusSet::RERANK_INPUT,
-    categories: &[],
-  },
-  Binding {
-    key: KeyCode::Up,
-    mods: KeyModifiers::NONE,
-    action: Action::PrevField,
-    label: "↑",
-    hint: "prev field",
-    description: None,
-    scopes: FocusSet::RERANK_INPUT,
-    categories: &[],
-  },
-  // ─── HF dialog stage chords (display-only) ──────────────────
-  // The HF dialog's per-stage handler in `events::handle_hf_dialog_input`
-  // captures `o`, `n`, and `p` directly — these rows surface them in the
-  // help overlay's `HF pull dialog` section without going through the
-  // generic dispatcher (`scopes: HF_DIALOG`, never matched because the
-  // HF focus bypasses `KeyMap::action_for`).
-  Binding {
-    key: KeyCode::Char('o'),
-    mods: KeyModifiers::NONE,
-    action: Action::HfCycleSort,
-    label: "o",
-    hint: "sort",
-    description: Some("cycle sort order"),
-    scopes: FocusSet::HF_DIALOG,
-    categories: CAT_HF_DIALOG,
-  },
-  Binding {
-    key: KeyCode::Char('n'),
-    mods: KeyModifiers::NONE,
-    action: Action::HfNextPage,
-    label: "n",
-    hint: "next page",
-    description: Some("next page"),
-    scopes: FocusSet::HF_DIALOG,
-    categories: CAT_HF_DIALOG,
-  },
-  Binding {
-    key: KeyCode::Char('p'),
-    mods: KeyModifiers::NONE,
-    action: Action::HfPrevPage,
-    label: "p",
-    hint: "prev page",
-    description: Some("prev page"),
-    scopes: FocusSet::HF_DIALOG,
-    categories: CAT_HF_DIALOG,
-  },
-];
+  // The help overlay surfaces a single merged row under Global via
+  // the FocusList Esc; the rest dispatch but hide (empty `categories`).
+  v.extend_from_slice(&binds! {
+    action: Action::FocusList, scopes: FocusSet::RIGHT_PANE,
+    hint: "models list", description: Some("cancel/clear/back"),
+    chords: [(KeyCode::Esc, KeyModifiers::NONE, ESC_LABEL, CAT_GLOBAL)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::ClearFilter, scopes: FocusSet::FILTER,
+    hint: "clear", description: Some("clear filter"),
+    chords: [(KeyCode::Esc, KeyModifiers::NONE, ESC_LABEL, NO_CAT)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::ExitEdit, scopes: FocusSet::INPUT,
+    hint: "exit edit", description: None,
+    chords: [(KeyCode::Esc, KeyModifiers::NONE, ESC_LABEL, NO_CAT)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::Cancel, scopes: FocusSet::CONFIRM_POPUP,
+    hint: "cancel", description: Some("cancel prompt"),
+    chords: [(KeyCode::Esc, KeyModifiers::NONE, ESC_LABEL, NO_CAT)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::Cancel, scopes: FocusSet::HF_DIALOG,
+    hint: "close", description: Some("close dialog"),
+    chords: [(KeyCode::Esc, KeyModifiers::NONE, ESC_LABEL, NO_CAT)],
+  });
+  // ─── Rerank field cycle (↑↓ inside rerank input only). ──────
+  // Collides with MoveUp/MoveDown; disjoint scopes (RERANK_INPUT vs
+  // NAV|HF_DIALOG) keep them clean. Hidden from the overlay.
+  v.extend_from_slice(&binds! {
+    action: Action::NextField, scopes: FocusSet::RERANK_INPUT,
+    hint: "next field", description: None,
+    chords: [(KeyCode::Down, KeyModifiers::NONE, "↓", NO_CAT)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::PrevField, scopes: FocusSet::RERANK_INPUT,
+    hint: "prev field", description: None,
+    chords: [(KeyCode::Up, KeyModifiers::NONE, "↑", NO_CAT)],
+  });
+  // ─── HF dialog stage chords (display-only). ────────────────
+  // The dialog's per-stage handler captures `o`/`n`/`p` directly; these
+  // rows exist only so the help overlay can list them.
+  v.extend_from_slice(&binds! {
+    action: Action::HfCycleSort, scopes: FocusSet::HF_DIALOG,
+    hint: "sort", description: Some("cycle sort order"),
+    chords: [(KeyCode::Char('o'), KeyModifiers::NONE, "o", CAT_HF_DIALOG)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::HfNextPage, scopes: FocusSet::HF_DIALOG,
+    hint: "next page", description: Some("next page"),
+    chords: [(KeyCode::Char('n'), KeyModifiers::NONE, "n", CAT_HF_DIALOG)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::HfPrevPage, scopes: FocusSet::HF_DIALOG,
+    hint: "prev page", description: Some("prev page"),
+    chords: [(KeyCode::Char('p'), KeyModifiers::NONE, "p", CAT_HF_DIALOG)],
+  });
+  v
+}
+
 
 // ─── Runtime keymap (config overrides) ──────────────────────────
 //
