@@ -49,6 +49,16 @@ pub struct HostMetricsSnapshot {
   /// Number of GPUs the backend reports. 0 on CpuOnly; 1 on Metal
   /// (unified memory); typically 1 on most NVIDIA/AMD systems.
   pub gpu_device_count: u32,
+  /// Portion of GPU memory that physically lives in the system RAM
+  /// pool (AMD GTT on UMA APUs like Strix Halo). The host pane
+  /// subtracts this from the RAM gauge so the same bytes aren't
+  /// double-counted as both system RAM and VRAM. `None` on discrete
+  /// cards and other backends.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub uma_shared_total_bytes: Option<u64>,
+  /// Currently-allocated portion of `uma_shared_total_bytes`.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub uma_shared_used_bytes: Option<u64>,
 }
 
 impl HostMetricsSnapshot {
@@ -197,19 +207,20 @@ async fn probe_gpu() -> GpuInfo {
 fn build_snapshot(sys: &System, info: GpuInfo) -> HostMetricsSnapshot {
   let cpu_pct = host_cpu_pct(sys);
   let cpu_temp_c = host_cpu_temp_c();
-  let (gpu_util_pct, gpu_mem_used_bytes, gpu_mem_total_bytes, gpu_temp_c, gpu_device_count) =
-    aggregate_gpu(&info);
+  let agg = aggregate_gpu(&info);
   HostMetricsSnapshot {
     cpu_pct,
     cpu_temp_c,
     ram_used_bytes: sys.used_memory(),
     ram_total_bytes: sys.total_memory(),
-    gpu_util_pct,
-    gpu_mem_used_bytes,
-    gpu_mem_total_bytes,
-    gpu_temp_c,
+    gpu_util_pct: agg.util,
+    gpu_mem_used_bytes: agg.mem_used,
+    gpu_mem_total_bytes: agg.mem_total,
+    gpu_temp_c: agg.temp,
     gpu_backend: info.label().to_string(),
-    gpu_device_count,
+    gpu_device_count: agg.device_count,
+    uma_shared_total_bytes: agg.uma_shared_total,
+    uma_shared_used_bytes: agg.uma_shared_used,
   }
 }
 
@@ -253,19 +264,34 @@ fn host_cpu_pct(sys: &System) -> f32 {
   sum / cpus.len() as f32
 }
 
+#[derive(Default)]
+struct GpuAggregate {
+  util: Option<f32>,
+  mem_used: Option<u64>,
+  mem_total: Option<u64>,
+  temp: Option<f32>,
+  device_count: u32,
+  uma_shared_total: Option<u64>,
+  uma_shared_used: Option<u64>,
+}
+
 /// Per the plan's multi-GPU strategy: mean util%, summed VRAM, max temp.
-fn aggregate_gpu(info: &GpuInfo) -> (Option<f32>, Option<u64>, Option<u64>, Option<f32>, u32) {
+fn aggregate_gpu(info: &GpuInfo) -> GpuAggregate {
   match info {
-    GpuInfo::CpuOnly => (None, None, None, None, 0),
+    GpuInfo::CpuOnly => GpuAggregate::default(),
     GpuInfo::AppleMetal { total_memory_bytes } => {
       // Apple Silicon unified memory: no per-card "used" attribution
       // available via system_profiler. Surface total only so the UI
       // can render a `RAM (unified)` row.
-      (None, None, Some(*total_memory_bytes), None, 1)
+      GpuAggregate {
+        mem_total: Some(*total_memory_bytes),
+        device_count: 1,
+        ..GpuAggregate::default()
+      }
     }
     GpuInfo::Nvidia { devices } | GpuInfo::Amd { devices } | GpuInfo::Unknown { devices } => {
       if devices.is_empty() {
-        return (None, None, None, None, 0);
+        return GpuAggregate::default();
       }
       let count = devices.len() as u32;
       let total: u64 = devices.iter().map(|d| d.total_memory_bytes).sum();
@@ -291,7 +317,28 @@ fn aggregate_gpu(info: &GpuInfo) -> (Option<f32>, Option<u64>, Option<u64>, Opti
           Some(prev) => Some(prev.max(t)),
         },
       );
-      (util, used_opt, total_opt, temp, count)
+      // Sum UMA-shared (GTT-on-AMD-APU) memory across devices so the
+      // host pane can subtract it from the RAM gauge. `None` when no
+      // device flagged a shared portion (discrete cards / non-UMA).
+      let uma_shared_total: u64 = devices
+        .iter()
+        .filter_map(|d| d.uma_shared_total_bytes)
+        .sum();
+      let uma_shared_used: u64 = devices.iter().filter_map(|d| d.uma_shared_used_bytes).sum();
+      let (uma_shared_total_opt, uma_shared_used_opt) = if uma_shared_total == 0 {
+        (None, None)
+      } else {
+        (Some(uma_shared_total), Some(uma_shared_used))
+      };
+      GpuAggregate {
+        util,
+        mem_used: used_opt,
+        mem_total: total_opt,
+        temp,
+        device_count: count,
+        uma_shared_total: uma_shared_total_opt,
+        uma_shared_used: uma_shared_used_opt,
+      }
     }
   }
 }
@@ -338,7 +385,14 @@ mod tests {
 
   #[test]
   fn aggregate_cpu_only_returns_all_none_and_zero_devices() {
-    let (util, used, total, temp, count) = aggregate_gpu(&GpuInfo::CpuOnly);
+    let agg = aggregate_gpu(&GpuInfo::CpuOnly);
+    let (util, used, total, temp, count) = (
+      agg.util,
+      agg.mem_used,
+      agg.mem_total,
+      agg.temp,
+      agg.device_count,
+    );
     assert_eq!(util, None);
     assert_eq!(used, None);
     assert_eq!(total, None);
@@ -351,7 +405,14 @@ mod tests {
     let info = GpuInfo::AppleMetal {
       total_memory_bytes: 16 * 1024 * 1024 * 1024,
     };
-    let (util, used, total, temp, count) = aggregate_gpu(&info);
+    let agg = aggregate_gpu(&info);
+    let (util, used, total, temp, count) = (
+      agg.util,
+      agg.mem_used,
+      agg.mem_total,
+      agg.temp,
+      agg.device_count,
+    );
     assert_eq!(util, None);
     assert_eq!(used, None);
     assert_eq!(total, Some(16 * 1024 * 1024 * 1024));
@@ -368,9 +429,17 @@ mod tests {
         used_memory_bytes: 4 * 1024 * 1024 * 1024,
         utilization_pct: Some(73.0),
         temperature_c: Some(68.0),
+        ..Default::default()
       }],
     };
-    let (util, used, total, temp, count) = aggregate_gpu(&info);
+    let agg = aggregate_gpu(&info);
+    let (util, used, total, temp, count) = (
+      agg.util,
+      agg.mem_used,
+      agg.mem_total,
+      agg.temp,
+      agg.device_count,
+    );
     assert_eq!(util, Some(73.0));
     assert_eq!(used, Some(4 * 1024 * 1024 * 1024));
     assert_eq!(total, Some(24 * 1024 * 1024 * 1024));
@@ -388,6 +457,7 @@ mod tests {
           used_memory_bytes: 1,
           utilization_pct: Some(20.0),
           temperature_c: Some(50.0),
+          ..Default::default()
         },
         GpuDevice {
           name: "1".into(),
@@ -395,10 +465,18 @@ mod tests {
           used_memory_bytes: 5,
           utilization_pct: Some(80.0),
           temperature_c: Some(72.0),
+          ..Default::default()
         },
       ],
     };
-    let (util, used, total, temp, count) = aggregate_gpu(&info);
+    let agg = aggregate_gpu(&info);
+    let (util, used, total, temp, count) = (
+      agg.util,
+      agg.mem_used,
+      agg.mem_total,
+      agg.temp,
+      agg.device_count,
+    );
     assert_eq!(util, Some(50.0));
     assert_eq!(used, Some(6));
     assert_eq!(total, Some(30));
@@ -419,6 +497,7 @@ mod tests {
           used_memory_bytes: 1,
           utilization_pct: Some(60.0),
           temperature_c: None,
+          ..Default::default()
         },
         GpuDevice {
           name: "1".into(),
@@ -426,10 +505,12 @@ mod tests {
           used_memory_bytes: 2,
           utilization_pct: None,
           temperature_c: Some(55.0),
+          ..Default::default()
         },
       ],
     };
-    let (util, _used, _total, temp, count) = aggregate_gpu(&info);
+    let agg = aggregate_gpu(&info);
+    let (util, temp, count) = (agg.util, agg.temp, agg.device_count);
     assert_eq!(util, Some(60.0));
     assert_eq!(temp, Some(55.0));
     assert_eq!(count, 2);
@@ -438,7 +519,14 @@ mod tests {
   #[test]
   fn aggregate_empty_device_vec_returns_all_none() {
     let info = GpuInfo::Nvidia { devices: vec![] };
-    let (util, used, total, temp, count) = aggregate_gpu(&info);
+    let agg = aggregate_gpu(&info);
+    let (util, used, total, temp, count) = (
+      agg.util,
+      agg.mem_used,
+      agg.mem_total,
+      agg.temp,
+      agg.device_count,
+    );
     assert_eq!(util, None);
     assert_eq!(used, None);
     assert_eq!(total, None);

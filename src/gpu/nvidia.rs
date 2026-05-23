@@ -62,6 +62,7 @@ pub(crate) fn parse(stdout: &str) -> Vec<GpuDevice> {
       used_memory_bytes: used_mib.saturating_mul(1024 * 1024),
       utilization_pct,
       temperature_c,
+      ..Default::default()
     });
   }
   out

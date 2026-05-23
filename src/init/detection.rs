@@ -383,6 +383,7 @@ mod tests {
           used_memory_bytes: 0,
           utilization_pct: None,
           temperature_c: None,
+          ..Default::default()
         },
         GpuDevice {
           name: "RTX 3060".into(),
@@ -390,6 +391,7 @@ mod tests {
           used_memory_bytes: 0,
           utilization_pct: None,
           temperature_c: None,
+          ..Default::default()
         },
       ],
     };

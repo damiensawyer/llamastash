@@ -79,6 +79,7 @@ fn seeded_dashboard_app() -> App {
     gpu_temp_c: Some(68.0),
     gpu_backend: HostMetricsSnapshot::BACKEND_NVIDIA.into(),
     gpu_device_count: 1,
+    ..Default::default()
   };
   app.models = vec![
     fake_model("/m/x/qwen-7b.gguf", "/m/x", "qwen3", 32_768, 4_500_000_000),

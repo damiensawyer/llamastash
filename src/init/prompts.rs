@@ -780,6 +780,7 @@ mod tests {
         used_memory_bytes: 0,
         utilization_pct: None,
         temperature_c: None,
+        ..Default::default()
       }],
     };
     hw.vram_bytes = Some(24 * 1024 * 1024 * 1024);
@@ -818,6 +819,7 @@ mod tests {
       used_memory_bytes: 0,
       utilization_pct: None,
       temperature_c: None,
+      ..Default::default()
     };
     hw.gpu = GpuInfo::Nvidia {
       devices: vec![device.clone(), device],

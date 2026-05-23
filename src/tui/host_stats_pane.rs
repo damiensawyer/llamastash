@@ -96,20 +96,28 @@ fn cpu_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palett
 }
 
 fn ram_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palette) -> Line<'a> {
-  let (pct, value) = if host.ram_total_bytes == 0 {
+  // Subtract the UMA-shared portion (AMD GTT on Strix Halo etc.)
+  // before computing the gauge — those bytes also surface in the VRAM
+  // row, and counting them on both sides made the RAM gauge double-
+  // count the GPU's allocation on kernel 7.0+ APUs.
+  let uma_total = host.uma_shared_total_bytes.unwrap_or(0);
+  let uma_used = host.uma_shared_used_bytes.unwrap_or(0);
+  let ram_total = host.ram_total_bytes.saturating_sub(uma_total);
+  let ram_used = host.ram_used_bytes.saturating_sub(uma_used);
+  let (pct, value) = if ram_total == 0 {
     (0.0_f32, "—/—".to_string())
   } else {
-    let pct = (host.ram_used_bytes as f64 / host.ram_total_bytes as f64) as f32 * 100.0;
+    let pct = (ram_used as f64 / ram_total as f64) as f32 * 100.0;
     (
       pct.clamp(0.0, 100.0),
-      format_bytes_pair(host.ram_used_bytes, host.ram_total_bytes),
+      format_bytes_pair(ram_used, ram_total),
     )
   };
-  let label = if host.gpu_backend == HostMetricsSnapshot::BACKEND_APPLE_METAL {
-    "RAM* "
-  } else {
-    "RAM  "
-  };
+  // Apple Metal uses `RAM*` to flag unified memory. AMD UMA APUs land
+  // here too — same physical pool shared with VRAM — so they pick up
+  // the same star.
+  let unified = host.gpu_backend == HostMetricsSnapshot::BACKEND_APPLE_METAL || uma_total > 0;
+  let label = if unified { "RAM* " } else { "RAM  " };
   let bar = bar(pct, bar_width, gauge_color(pct, palette));
   Line::from(vec![
     Span::styled(label, palette.label_style()),
@@ -423,6 +431,7 @@ mod tests {
       gpu_mem_total_bytes: Some(24 * 1024 * 1024 * 1024),
       gpu_temp_c: Some(68.0),
       gpu_device_count: 1,
+      ..Default::default()
     };
     let rows = render_lines(snap);
     let body = rows.join("\n");
@@ -479,6 +488,63 @@ mod tests {
     assert!(
       cpu_row.contains("312%"),
       "CPU row must keep the unclamped numeric label, got: {cpu_row:?}"
+    );
+  }
+
+  #[test]
+  fn ram_row_subtracts_uma_shared_so_gtt_isnt_double_counted() {
+    // Strix Halo on kernel 7.0+: sysinfo sees the full 128 GiB pool,
+    // but ~61 GiB of it is the GTT cap (system RAM the GPU can claim).
+    // The RAM row must show CPU's real share — sysinfo total minus
+    // GTT total — and label `RAM*` to flag the unified pool.
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let snap = HostMetricsSnapshot {
+      cpu_pct: 5.0,
+      ram_used_bytes: 71 * GIB,
+      ram_total_bytes: 121 * GIB,
+      gpu_backend: "amd".into(),
+      gpu_util_pct: Some(0.0),
+      gpu_mem_used_bytes: Some(43 * GIB),
+      gpu_mem_total_bytes: Some(65 * GIB),
+      gpu_device_count: 1,
+      uma_shared_total_bytes: Some(61 * GIB),
+      uma_shared_used_bytes: Some(43 * GIB),
+      ..Default::default()
+    };
+    let rows = render_lines(snap);
+    let ram_row = rows.iter().find(|r| r.contains("RAM")).unwrap();
+    // CPU-side: 71 - 43 used = 28, 121 - 61 total = 60.
+    assert!(
+      ram_row.contains("28/60G"),
+      "RAM row must subtract UMA-shared (GTT) bytes, got: {ram_row:?}"
+    );
+    assert!(
+      ram_row.contains("RAM*"),
+      "RAM label should flag unified memory with `*`, got: {ram_row:?}"
+    );
+  }
+
+  #[test]
+  fn ram_row_keeps_raw_sysinfo_numbers_for_discrete_gpu() {
+    // Discrete cards don't populate `uma_shared_*` — the RAM row must
+    // pass sysinfo's numbers through untouched.
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let snap = HostMetricsSnapshot {
+      cpu_pct: 10.0,
+      ram_used_bytes: 16 * GIB,
+      ram_total_bytes: 64 * GIB,
+      gpu_backend: "nvidia".into(),
+      gpu_mem_used_bytes: Some(5 * GIB),
+      gpu_mem_total_bytes: Some(24 * GIB),
+      gpu_device_count: 1,
+      ..Default::default()
+    };
+    let rows = render_lines(snap);
+    let ram_row = rows.iter().find(|r| r.contains("RAM")).unwrap();
+    assert!(ram_row.contains("16/64G"), "RAM row got: {ram_row:?}");
+    assert!(
+      !ram_row.contains("RAM*"),
+      "discrete GPUs shouldn't carry the unified-memory star, got: {ram_row:?}"
     );
   }
 

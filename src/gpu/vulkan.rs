@@ -33,10 +33,7 @@ pub fn probe() -> Option<GpuInfo> {
       .into_iter()
       .map(|name| GpuDevice {
         name,
-        total_memory_bytes: 0,
-        used_memory_bytes: 0,
-        utilization_pct: None,
-        temperature_c: None,
+        ..Default::default()
       })
       .collect(),
   })

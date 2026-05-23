@@ -703,6 +703,7 @@ mod tests {
           used_memory_bytes: 0,
           utilization_pct: None,
           temperature_c: None,
+          ..Default::default()
         }],
       },
       vram_bytes: Some((vram_gb * 1024.0 * 1024.0 * 1024.0) as u64),

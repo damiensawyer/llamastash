@@ -87,7 +87,7 @@ pub enum GpuInfo {
 /// today — round-tripping in tests. Downstream consumers needing a
 /// hashable / `Eq`-bound view should compare a projection (e.g. the
 /// `name` + `total_memory_bytes` fields) rather than the whole struct.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct GpuDevice {
   pub name: String,
   pub total_memory_bytes: u64,
@@ -96,6 +96,16 @@ pub struct GpuDevice {
   pub utilization_pct: Option<f32>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub temperature_c: Option<f32>,
+  /// Portion of `total_memory_bytes` that lives in the system RAM
+  /// pool (e.g. AMD GTT on UMA APUs like Strix Halo). When `Some`,
+  /// the host pane subtracts this from the RAM gauge so the same
+  /// bytes aren't counted twice (once as VRAM, once as system RAM).
+  /// `None` on discrete cards and any backend without a UMA mode.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub uma_shared_total_bytes: Option<u64>,
+  /// Currently-allocated portion of `uma_shared_total_bytes`.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub uma_shared_used_bytes: Option<u64>,
 }
 
 impl GpuInfo {
@@ -154,6 +164,7 @@ mod tests {
         used_memory_bytes: 0,
         utilization_pct: None,
         temperature_c: None,
+        ..Default::default()
       }],
     };
     assert!(info.is_gpu());
@@ -178,6 +189,7 @@ mod tests {
       used_memory_bytes: 0,
       utilization_pct: None,
       temperature_c: None,
+      ..Default::default()
     };
     let s = serde_json::to_string(&dev).unwrap();
     assert!(!s.contains("utilization_pct"));
@@ -192,6 +204,7 @@ mod tests {
       used_memory_bytes: 12 * 1024 * 1024 * 1024,
       utilization_pct: Some(84.0),
       temperature_c: Some(68.0),
+      ..Default::default()
     };
     let s = serde_json::to_string(&dev).unwrap();
     assert!(s.contains("\"utilization_pct\":84"));

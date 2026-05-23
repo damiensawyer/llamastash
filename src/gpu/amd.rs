@@ -129,12 +129,21 @@ pub(crate) fn parse(stdout: &str) -> Vec<GpuDevice> {
           gtt_total,
           gtt_used,
         );
+        // Mark the GTT portion as UMA-shared so the host pane can
+        // subtract it from the RAM gauge — those bytes already live
+        // in system RAM and would otherwise be double-counted.
+        let (uma_shared_total_bytes, uma_shared_used_bytes) = match gtt_total {
+          Some(gt) if gt > vram_total_bytes => (Some(gt), Some(gtt_used.unwrap_or(0))),
+          _ => (None, None),
+        };
         out.push(GpuDevice {
           name: gpu_key.clone(),
           total_memory_bytes,
           used_memory_bytes,
           utilization_pct,
           temperature_c,
+          uma_shared_total_bytes,
+          uma_shared_used_bytes,
         });
       }
     }

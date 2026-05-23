@@ -81,6 +81,7 @@ fn nvidia(vram_gb: f64, ram_gb: f64) -> HardwareSnapshot {
         used_memory_bytes: 0,
         utilization_pct: None,
         temperature_c: None,
+        ..Default::default()
       }],
     },
     vram_bytes: Some((vram_gb * 1024.0 * 1024.0 * 1024.0) as u64),
@@ -104,6 +105,7 @@ fn amd(vram_gb: f64, ram_gb: f64) -> HardwareSnapshot {
         used_memory_bytes: 0,
         utilization_pct: None,
         temperature_c: None,
+        ..Default::default()
       }],
     },
     vram_bytes: Some((vram_gb * 1024.0 * 1024.0 * 1024.0) as u64),
