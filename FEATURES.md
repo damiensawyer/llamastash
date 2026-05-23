@@ -113,7 +113,17 @@ Every TUI action is rebindable via a [`keybindings:`](docs/usage.md#custom-keybi
 
 ### Accessible by default
 
-Status indicators are dual-encoded (color + glyph) so the UI stays legible on monochrome terminals and for users with color-vision differences. A "terminal too small" placeholder takes over below 40×10 with the current vs required size so resizing gives immediate feedback. [Toast](docs/usage.md#toasts) confirmations announce yank/copy/theme/no-op actions for 3 seconds, never overlapping modal popups.
+Status indicators are dual-encoded (color + glyph) so the UI stays legible on monochrome terminals and for users with color-vision differences. A "terminal too small" placeholder takes over below 60×20 with the current vs required size so resizing gives immediate feedback. [Toast](docs/usage.md#toasts) confirmations announce yank/copy/theme/no-op actions for 3 seconds, never overlapping modal popups.
+
+### Adaptive layout — works from 60 cells up
+
+Same dashboard, three width bands:
+
+- **Wide (≥ 100 cells)** — both panes side by side (65/35), all six data columns visible, full hint strip.
+- **Compact (60–99 cells)** — right pane hides by default; the list owns the whole body. `Enter` on a model row drills in (focus moves to the right pane, list collapses to ~35%); `Esc` closes the pane and the list expands back. Wheel/arrow navigation still works in either view.
+- **Too small (< 60 cells)** — a single centred "have W×H, need at least 60×20" placeholder takes over until you grow the terminal.
+
+The model list columns and hint chips both carry **priority ranks** rather than a fixed display order. As the pane shrinks, the lowest-rank entries drop first — `Port` and `Mode` before `Size` and `Quant`, `c:curl` before `s:stop`. The model name keeps a comfortable budget reserved up front so columns drop before names get truncated. Source order in the code determines display order; the rank only decides what survives under width pressure, so a future column reorder doesn't accidentally change which one disappears first on a 70-cell terminal.
 
 ## First-class CLI for agents and scripts
 

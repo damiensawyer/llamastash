@@ -102,6 +102,7 @@ Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs
 - [In-TUI HuggingFace browser](FEATURES.md#in-tui-huggingface-browser) — search, sort, paginate, per-file hardware fit, download strip with cancel.
 - [Theming and rebinding](FEATURES.md#theming-and-rebinding) — five themes + custom palette; every action rebindable.
 - [Accessible by default](FEATURES.md#accessible-by-default) — dual-encoded status (color + glyph), readable on mono terminals.
+- [Adaptive layout — works from 60 cells up](FEATURES.md#adaptive-layout--works-from-60-cells-up) — below 100 cells the right pane goes drill-in-only; list columns and hint chips drop by priority rank as the pane shrinks so the model name stays readable.
 
 ### [First-class CLI for agents and scripts](FEATURES.md#first-class-cli-for-agents-and-scripts)
 
