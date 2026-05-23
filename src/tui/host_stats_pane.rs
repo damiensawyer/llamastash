@@ -4,10 +4,10 @@
 //! Layout (32 cols × 5 inner rows by default):
 //!
 //! ```text
-//! CPU  ███████░░░  58%  71°C
-//! RAM  █████░░░░░  11.4/32 G
-//! GPU  ██████████  84%  68°C
-//! VRAM ███████░░░  14.2/24 G
+//! CPU  ███████░░░ 58% 71°C
+//! RAM  █████░░░░░ 11.4/32 G
+//! GPU  ██████████ 84% 68°C
+//! VRAM ███████░░░ 14.2/24 G
 //! backend  NVML · 1 GPU
 //! ```
 //!
@@ -24,7 +24,7 @@ use ratatui::Frame;
 
 use crate::daemon::host_metrics::HostMetricsSnapshot;
 use crate::theme::Palette;
-use crate::tui::fmt::format_bytes;
+use crate::tui::fmt::format_bytes_pair;
 
 const LABEL_WIDTH: usize = 5;
 
@@ -89,7 +89,7 @@ fn cpu_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palett
   // symmetrically with the GPU row, when sysinfo's component
   // sensor surfaced a reading. Same colour tiers as GPU temp.
   if let Some(temp) = host.cpu_temp_c {
-    spans.push(Span::raw("  "));
+    spans.push(Span::raw(" "));
     spans.extend(temp_spans(temp, palette));
   }
   Line::from(spans)
@@ -102,11 +102,7 @@ fn ram_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palett
     let pct = (host.ram_used_bytes as f64 / host.ram_total_bytes as f64) as f32 * 100.0;
     (
       pct.clamp(0.0, 100.0),
-      format!(
-        "{}/{}",
-        format_bytes(host.ram_used_bytes),
-        format_bytes(host.ram_total_bytes)
-      ),
+      format_bytes_pair(host.ram_used_bytes, host.ram_total_bytes),
     )
   };
   let label = if host.gpu_backend == HostMetricsSnapshot::BACKEND_APPLE_METAL {
@@ -141,7 +137,7 @@ fn gpu_util_row<'a>(
     Span::styled(value, palette.text_style()),
   ];
   if let Some(temp) = host.gpu_temp_c {
-    spans.push(Span::raw("  "));
+    spans.push(Span::raw(" "));
     spans.extend(temp_spans(temp, palette));
   }
   Line::from(spans)
@@ -151,10 +147,7 @@ fn vram_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palet
   let (pct, value) = match (host.gpu_mem_used_bytes, host.gpu_mem_total_bytes) {
     (Some(used), Some(total)) if total > 0 => {
       let pct = (used as f64 / total as f64) as f32 * 100.0;
-      (
-        pct.clamp(0.0, 100.0),
-        format!("{}/{}", format_bytes(used), format_bytes(total)),
-      )
+      (pct.clamp(0.0, 100.0), format_bytes_pair(used, total))
     }
     _ => (0.0_f32, "—/—".into()),
   };
@@ -197,11 +190,11 @@ fn pluralize_gpu(n: u32) -> String {
 /// range so the trailing percent / units column always has room.
 fn bar_width_for(inner_width: u16) -> usize {
   let budget = inner_width as usize;
-  // Leave space for label + percent/value/temp. The 13-cell reserve
-  // covers the widest right-of-bar payload ("  100%  ▲ 82°C" — temp
-  // rows carry a 2-cell severity glyph in the warning/critical tiers
-  // so the bar doesn't shift width as temps cross thresholds).
-  let usable = budget.saturating_sub(LABEL_WIDTH + 13);
+  // Leave space for label + percent/value/temp. The 11-cell reserve
+  // covers the widest right-of-bar payload (" 100% ▲82°C" — temp rows
+  // carry a 1-cell severity glyph in the warning/critical tiers so the
+  // bar doesn't shift width as temps cross thresholds).
+  let usable = budget.saturating_sub(LABEL_WIDTH + 11);
   usable.clamp(4, 14)
 }
 
@@ -250,15 +243,15 @@ fn gpu_temp_color(temp: f32, palette: &Palette) -> Color {
 }
 
 /// Severity glyph for a temperature reading. Returns `""` on the
-/// green tier (no glyph), `"△ "` on yellow (warning), `"▲ "` on red
+/// green tier (no glyph), `"△"` on yellow (warning), `"▲"` on red
 /// (critical). Pairs with [`gpu_temp_color`] so themes that can't
 /// carry colour information (Mono) still differentiate `92°C` from
 /// `65°C` purely on glyph shape.
 fn temp_severity_glyph(temp: f32) -> &'static str {
   if temp >= 82.0 {
-    "▲ "
+    "▲"
   } else if temp >= 70.0 {
-    "△ "
+    "△"
   } else {
     ""
   }
@@ -331,10 +324,10 @@ mod tests {
     // No glyph on the green tier (compact), `△` on yellow, `▲` on red.
     assert_eq!(temp_severity_glyph(0.0), "");
     assert_eq!(temp_severity_glyph(69.9), "");
-    assert_eq!(temp_severity_glyph(70.0), "△ ");
-    assert_eq!(temp_severity_glyph(81.9), "△ ");
-    assert_eq!(temp_severity_glyph(82.0), "▲ ");
-    assert_eq!(temp_severity_glyph(105.0), "▲ ");
+    assert_eq!(temp_severity_glyph(70.0), "△");
+    assert_eq!(temp_severity_glyph(81.9), "△");
+    assert_eq!(temp_severity_glyph(82.0), "▲");
+    assert_eq!(temp_severity_glyph(105.0), "▲");
   }
 
   #[test]
@@ -370,7 +363,7 @@ mod tests {
       frame.push('\n');
     }
     assert!(
-      frame.contains("▲ 92°C"),
+      frame.contains("▲92°C"),
       "critical CPU temp should carry the `▲` glyph on Mono: {frame}"
     );
   }
@@ -486,6 +479,36 @@ mod tests {
     assert!(
       cpu_row.contains("312%"),
       "CPU row must keep the unclamped numeric label, got: {cpu_row:?}"
+    );
+  }
+
+  #[test]
+  fn ram_and_vram_rows_render_unit_suffix_only_once() {
+    // Regression: rows used to render `66G/121G` and `2.5G/4.0G` —
+    // the `G` (or `M` / `K` / `B`) suffix appeared on both sides of
+    // the slash. Pair formatter shares one trailing suffix.
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let snap = HostMetricsSnapshot {
+      cpu_pct: 10.0,
+      ram_used_bytes: 66 * GIB,
+      ram_total_bytes: 121 * GIB,
+      gpu_backend: "nvidia".into(),
+      gpu_util_pct: Some(40.0),
+      gpu_mem_used_bytes: Some(2_642_341_888),
+      gpu_mem_total_bytes: Some(4 * GIB),
+      gpu_device_count: 1,
+      ..Default::default()
+    };
+    let rows = render_lines(snap);
+    let ram_row = rows.iter().find(|r| r.contains("RAM")).unwrap();
+    let vram_row = rows.iter().find(|r| r.contains("VRAM")).unwrap();
+    assert!(
+      ram_row.contains("66/121G") && !ram_row.contains("66G/121G"),
+      "RAM row should share one `G` suffix, got: {ram_row:?}"
+    );
+    assert!(
+      vram_row.contains("2.5/4.0G") && !vram_row.contains("2.5G/4.0G"),
+      "VRAM row should share one `G` suffix, got: {vram_row:?}"
     );
   }
 

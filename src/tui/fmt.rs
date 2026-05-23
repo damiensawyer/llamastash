@@ -51,6 +51,34 @@ pub(crate) fn format_tokens(n: u64) -> String {
   }
 }
 
+/// Format a `used/total` byte pair using one shared unit suffix taken
+/// from `total`, so `RAM` / `VRAM` rows render as `2.5/4.0G` rather
+/// than `2.5G/4.0G`. Each value follows the same 1-decimal-under-10
+/// rule as [`format_bytes`].
+pub(crate) fn format_bytes_pair(used: u64, total: u64) -> String {
+  const KIB: u64 = 1024;
+  const MIB: u64 = KIB * 1024;
+  const GIB: u64 = MIB * 1024;
+  let (div, suffix): (u64, &str) = if total >= GIB {
+    (GIB, "G")
+  } else if total >= MIB {
+    (MIB, "M")
+  } else if total >= KIB {
+    (KIB, "K")
+  } else {
+    (1, "B")
+  };
+  let one = |b: u64| -> String {
+    let v = b as f64 / div as f64;
+    if v >= 10.0 {
+      format!("{v:.0}")
+    } else {
+      format!("{v:.1}")
+    }
+  };
+  format!("{}/{}{suffix}", one(used), one(total))
+}
+
 /// Format a byte count for compact display in panel headers and bars.
 /// Rounds to a single decimal place between 1G and 10G (so `4.2G` is
 /// distinguishable from `5.1G`), and drops the decimal at 10G+ to keep
@@ -119,5 +147,39 @@ mod tests {
     assert_eq!(format_bytes(11_000_000_000), "10G");
     assert_eq!(format_bytes(24_000_000_000), "22G");
     assert_eq!(format_bytes(100_000_000_000), "93G");
+  }
+
+  #[test]
+  fn format_bytes_pair_shares_unit_suffix() {
+    // Regression: RAM / VRAM rows used to render `66G/121G` and
+    // `2.5G/4.0G` — unit repeated on both sides. Both values now share
+    // one trailing suffix taken from `total`.
+    const GIB: u64 = 1024 * 1024 * 1024;
+    assert_eq!(format_bytes_pair(66 * GIB, 121 * GIB), "66/121G");
+    assert_eq!(
+      format_bytes_pair(2_642_341_888, 4 * GIB),
+      "2.5/4.0G",
+      "VRAM at <10G should keep one decimal on both sides"
+    );
+  }
+
+  #[test]
+  fn format_bytes_pair_scales_used_to_total_unit() {
+    // `500M/2.0G` would mix units; pair scales `used` down into the
+    // larger unit (`0.2/2.0G`) so the suffix stays consistent.
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    assert_eq!(format_bytes_pair(500 * MIB, 2 * GIB), "0.5/2.0G");
+  }
+
+  #[test]
+  fn format_bytes_pair_at_or_above_ten_drops_decimal() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    assert_eq!(format_bytes_pair(14 * GIB, 32 * GIB), "14/32G");
+  }
+
+  #[test]
+  fn format_bytes_pair_falls_back_to_bytes_for_tiny_totals() {
+    assert_eq!(format_bytes_pair(0, 512), "0.0/512B");
   }
 }
