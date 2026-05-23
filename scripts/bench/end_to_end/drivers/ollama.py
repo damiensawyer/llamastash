@@ -49,9 +49,23 @@ class OllamaDriver(Driver):
 
   def __init__(self) -> None:
     self._bench_tag: Optional[str] = None
-    self._base_url = os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_BASE_URL)
-    if not self._base_url.startswith("http"):
-      self._base_url = f"http://{self._base_url}"
+    self._base_url = self._resolve_base_url(os.environ.get("OLLAMA_HOST"))
+
+  @staticmethod
+  def _resolve_base_url(env_value: Optional[str]) -> str:
+    """Build a usable base URL from $OLLAMA_HOST. The var is allowed
+    to be `host`, `host:port`, or `scheme://host:port`; when the port
+    is missing we default to 11434 so we never produce an invalid
+    `http://localhost` URL (which httpx then treats as port 80)."""
+    if not env_value:
+      return DEFAULT_OLLAMA_BASE_URL
+    raw = env_value if env_value.startswith("http") else f"http://{env_value}"
+    host_part = raw.split("//", 1)[1]
+    if "/" in host_part:
+      host_part = host_part.split("/", 1)[0]
+    if ":" not in host_part:
+      raw = raw.rstrip("/") + ":11434"
+    return raw
 
   def version_string(self) -> Optional[str]:
     return _capture_version("ollama")

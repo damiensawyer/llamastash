@@ -250,14 +250,94 @@ def test_llamacpp_flash_attn_false_is_not_emitted() -> None:
   assert "--flash-attn" not in argv
 
 
+def test_ollama_base_url_defaults_when_env_unset() -> None:
+  assert (
+    OllamaDriver._resolve_base_url(None) == "http://127.0.0.1:11434"
+  )
+
+
+def test_ollama_base_url_appends_port_when_missing() -> None:
+  # The real bug: $OLLAMA_HOST=localhost (no port) → driver built
+  # http://localhost which httpx treats as port 80.
+  assert OllamaDriver._resolve_base_url("localhost") == "http://localhost:11434"
+  assert OllamaDriver._resolve_base_url("example.test") == "http://example.test:11434"
+
+
+def test_ollama_base_url_honors_explicit_port() -> None:
+  assert OllamaDriver._resolve_base_url("localhost:12345") == "http://localhost:12345"
+  assert (
+    OllamaDriver._resolve_base_url("https://r.example:443") == "https://r.example:443"
+  )
+
+
+def test_lmstudio_normalized_gpu_is_ratio_not_layer_count() -> None:
+  d = LmStudioDriver()
+  argv: list[str] = []
+  # n_gpu_layers=999 (harness convention for "all layers") MUST map
+  # to `--gpu 1.00` — passing 999 makes `lms load` reject the call.
+  d._append_knobs(argv, NormalizedKnobs(ctx=4096, n_gpu_layers=999))
+  assert "--gpu" in argv
+  ratio_index = argv.index("--gpu") + 1
+  assert argv[ratio_index] == "1.00"
+
+
+def test_lmstudio_resolve_pinned_env_short_circuits(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+  monkeypatch.setenv("LLAMASTASH_BENCH_LMS_KEY", "org/my-pinned-key")
+  gguf = tmp_path / "x.gguf"
+  gguf.write_bytes(b"y")
+  d = LmStudioDriver()
+  assert d._resolve_model_key(gguf) == "org/my-pinned-key"
+
+
+def test_lmstudio_resolve_size_match_picks_correct_quant(
+  monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+  monkeypatch.delenv("LLAMASTASH_BENCH_LMS_KEY", raising=False)
+  gguf = tmp_path / "model-q4_k_m.gguf"
+  gguf.write_bytes(b"\x00" * 1024)
+  entries = [
+    {"modelKey": "org/m@q4_k_m", "type": "llm", "path": "org/m", "sizeBytes": 1024,
+     "quantization": {"name": "Q4_K_M"}},
+    {"modelKey": "org/m@q8_0", "type": "llm", "path": "org/m", "sizeBytes": 1024,
+     "quantization": {"name": "Q8_0"}},
+  ]
+  monkeypatch.setattr(LmStudioDriver, "_list_lms_models", staticmethod(lambda: entries))
+  d = LmStudioDriver()
+  assert d._resolve_model_key(gguf) == "org/m@q4_k_m"
+
+
+def test_lmstudio_resolve_no_match_raises_with_hint(
+  monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+  monkeypatch.delenv("LLAMASTASH_BENCH_LMS_KEY", raising=False)
+  gguf = tmp_path / "ghost.gguf"
+  gguf.write_bytes(b"x" * 1024)
+  monkeypatch.setattr(LmStudioDriver, "_list_lms_models", staticmethod(lambda: []))
+  d = LmStudioDriver()
+  from scripts.bench.end_to_end.drivers.base import DriverError
+  with pytest.raises(DriverError) as exc:
+    d._resolve_model_key(gguf)
+  assert "LLAMASTASH_BENCH_LMS_KEY" in str(exc.value)
+
+
+def test_lmstudio_normalized_gpu_zero_for_cpu_only() -> None:
+  d = LmStudioDriver()
+  argv: list[str] = []
+  d._append_knobs(argv, NormalizedKnobs(n_gpu_layers=0))
+  assert "--gpu" in argv
+  assert argv[argv.index("--gpu") + 1] == "0.00"
+
+
 def test_llamastash_normalized_knobs_use_long_form() -> None:
   d = LlamaStashDriver()
-  argv: list[str] = ["llamastash", "start", "--model", "/m/x.gguf"]
-  d._append_knobs(argv, NormalizedKnobs(ctx=4096, n_gpu_layers=99, flash_attn=True))
-  # llamastash CLI prefers --ctx over -c.
+  argv: list[str] = ["llamastash", "start"]
+  raw: list[str] = []
+  d._append_knobs(argv, raw, NormalizedKnobs(ctx=4096, n_gpu_layers=99, flash_attn=True))
+  # `--ctx` is a first-class llamastash flag; everything else is
+  # forwarded to llama-server after `--`.
   assert "--ctx" in argv
-  assert "--n-gpu-layers" in argv
-  assert "--flash-attn" in argv
+  assert "--n-gpu-layers" in raw
+  assert "--flash-attn" in raw
 
 
 # ---- find_free_port / env defaults -------------------------------

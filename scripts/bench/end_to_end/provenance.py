@@ -135,9 +135,14 @@ def _detect_gpu_name(backend: str) -> Optional[str]:
     out = _run(["rocm-smi", "--showproductname"])
     if out:
       for line in out.splitlines():
-        if "Card series" in line:
-          return line.split(":", 1)[-1].strip()
-      return out.splitlines()[0].strip()
+        # `rocm-smi --showproductname` prints
+        # `GPU[0]\t\t: Card Series: \t\tAMD Radeon ...`
+        # — match case-insensitively and on `Card Series` first.
+        if "card series" in line.lower():
+          return line.split(":", 2)[-1].strip()
+      for line in out.splitlines():
+        if "card model" in line.lower():
+          return line.split(":", 2)[-1].strip()
   if backend == "metal":
     out = _run(["system_profiler", "SPDisplaysDataType"], timeout_s=10.0)
     if out:

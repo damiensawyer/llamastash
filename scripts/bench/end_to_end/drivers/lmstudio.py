@@ -1,19 +1,26 @@
 """LM Studio driver.
 
-LM Studio's CLI is the ``lms`` binary. We use ``lms load <gguf>``
-to load a model into the running LM Studio server (which must be
-running — either the desktop app or `lms server start`), then drive
-inference through its OpenAI-compatible
-``http://127.0.0.1:1234/v1/chat/completions`` endpoint.
+LM Studio's ``lms`` CLI doesn't accept raw GGUF paths — it loads
+models from its own indexed library, keyed by a `modelKey` string
+(e.g. ``google/gemma-4-e2b``). Pointing ``lms load`` at a GGUF
+path drops into an interactive picker and blocks forever waiting
+for tty input.
 
-In normalized mode the driver passes the knobs the CLI documents
-support for via ``lms load`` flags; the rest are recorded as
-``unfair_knobs`` on the cell. Q1 in the methodology doc tracks the
-actual normalization ceiling — populated after the first end-to-end
-run reveals which flags ``lms`` accepts vs silently ignores.
+This driver bridges the harness's "path-centric" contract to
+LM Studio's "library-centric" model: ``prepare_model()`` enumerates
+``lms ls --json``, matches the requested GGUF to a library entry
+(by file size, with quantisation tie-break), and stores the
+resulting ``modelKey`` as the ``ModelHandle.name``. ``start()``
+then calls ``lms load <modelKey>`` with normalized knobs.
+
+Operators can override the auto-resolution with
+``LLAMASTASH_BENCH_LMS_KEY_<CLASS>`` (where CLASS is small/mid/...),
+but it's only needed when ``lms ls`` ambiguity bites — the
+default-pick is usually right.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
@@ -34,6 +41,10 @@ from .base import (
 )
 
 DEFAULT_LMSTUDIO_BASE_URL = "http://127.0.0.1:1234"
+# Size tolerance when matching a GGUF on disk to an `lms ls --json`
+# entry: 5% margin to absorb LM Studio's aggregation of multi-file
+# bundles (e.g. mmproj sidecar pushes the reported size up slightly).
+SIZE_TOLERANCE_PCT = 5.0
 
 
 class LmStudioDriver(Driver):
@@ -44,7 +55,7 @@ class LmStudioDriver(Driver):
   )
 
   def __init__(self) -> None:
-    self._loaded_handle: Optional[str] = None
+    self._loaded_key: Optional[str] = None
     self._base_url = os.environ.get("LMSTUDIO_BASE_URL", DEFAULT_LMSTUDIO_BASE_URL)
 
   def version_string(self) -> Optional[str]:
@@ -54,7 +65,8 @@ class LmStudioDriver(Driver):
     if not gguf_path.exists():
       raise FileNotFoundError(f"GGUF not found: {gguf_path}")
     require_on_path("lms", self.INSTALL_HINT)
-    return ModelHandle(name=str(gguf_path), source_path=gguf_path)
+    model_key = self._resolve_model_key(gguf_path)
+    return ModelHandle(name=model_key, source_path=gguf_path)
 
   def start(
     self,
@@ -65,7 +77,7 @@ class LmStudioDriver(Driver):
     require_on_path("lms", self.INSTALL_HINT)
     self._ensure_server_running()
 
-    argv: list[str] = ["lms", "load", str(handle.source_path)]
+    argv: list[str] = ["lms", "load", handle.name, "-y"]
     if mode == Mode.NORMALIZED and knobs is not None:
       self._append_knobs(argv, knobs)
 
@@ -73,15 +85,19 @@ class LmStudioDriver(Driver):
       argv,
       capture_output=True,
       text=True,
-      timeout=ready_timeout_from_env(),
+      # `lms load` is the expensive step on a cold model — first
+      # touch of a multi-GB GGUF can outrun the 180s readiness
+      # default. Triple the budget so slow disk reads don't get
+      # surfaced as a driver-error.
+      timeout=max(ready_timeout_from_env() * 3, 600.0),
       check=False,
     )
     if load.returncode != 0:
       raise DriverError(
-        f"lms load {handle.source_path} failed: "
+        f"lms load {handle.name} failed: "
         f"{load.stderr.strip() or load.stdout.strip()}"
       )
-    self._loaded_handle = handle.name
+    self._loaded_key = handle.name
 
     try:
       wait_for_http_200(f"{self._base_url}/v1/models", ready_timeout_from_env())
@@ -93,23 +109,22 @@ class LmStudioDriver(Driver):
     return self._base_url
 
   def stop(self) -> None:
-    if not self._loaded_handle:
+    if not self._loaded_key:
       return
-    # `lms unload` accepts the same identifier `load` printed; on
-    # failure we still clear the handle so we don't loop forever.
+    # `lms unload <modelKey>` releases the loaded slot.
     subprocess.run(
-      ["lms", "unload", self._loaded_handle],
+      ["lms", "unload", self._loaded_key],
       capture_output=True,
       text=True,
       timeout=60,
       check=False,
     )
-    self._loaded_handle = None
+    self._loaded_key = None
 
   def normalized_knobs_supported(self) -> set[str]:
-    # Conservative declaration — Unit 8's first run discovers what
-    # `lms load` actually honors vs silently ignores. The methodology
-    # doc updates after.
+    # `lms load` exposes `--context-length` and `--gpu` only.
+    # batch-size, ubatch-size, flash-attn, kv-cache-type are not
+    # accessible through the CLI and land on the cell's unfair_knobs.
     return {"ctx", "n_gpu_layers"}
 
   def recorded_argv(self) -> list[str]:
@@ -120,10 +135,9 @@ class LmStudioDriver(Driver):
   # ---- internals ----
 
   def _ensure_server_running(self) -> None:
-    """Best-effort: if the server isn't reachable, try `lms server
-    start --no-browser --quiet` once. The user can also start the
-    desktop app or run `lms server start` themselves; we don't
-    insist on a particular mode."""
+    """Best-effort: if the server isn't reachable, run `lms server
+    start`. The user can also start the desktop app themselves; we
+    don't insist on a particular mode."""
     try:
       import urllib.request
 
@@ -141,11 +155,96 @@ class LmStudioDriver(Driver):
     )
     time.sleep(1.0)
 
+  def _resolve_model_key(self, gguf_path: Path) -> str:
+    """Map a GGUF path to LM Studio's `modelKey`. Operators can pin
+    the mapping via `LLAMASTASH_BENCH_LMS_KEY` (or a per-size-class
+    override) to skip the auto-resolution heuristic."""
+    pinned = os.environ.get("LLAMASTASH_BENCH_LMS_KEY")
+    if pinned:
+      return pinned
+
+    entries = self._list_lms_models()
+    target_size = gguf_path.stat().st_size
+    target_basename = gguf_path.name.lower()
+    target_stem = gguf_path.stem.lower()
+
+    # 1) Exact basename match in the library entry's path (rare but
+    # most reliable — LM Studio stores some models by GGUF basename).
+    for e in entries:
+      lib_path = (e.get("path") or "").lower()
+      if lib_path.endswith(target_basename) or target_stem in lib_path:
+        return e["modelKey"]
+
+    # 2) Size match within tolerance, narrowing by quantisation tag
+    # baked into the GGUF filename (Q4_K_M, Q8_0, etc) when present.
+    tolerance = target_size * SIZE_TOLERANCE_PCT / 100.0
+    candidates = [
+      e for e in entries
+      if abs((e.get("sizeBytes") or 0) - target_size) <= tolerance
+      and e.get("type") == "llm"
+    ]
+    if not candidates:
+      raise DriverError(
+        f"no LM Studio library entry matches {gguf_path.name} "
+        f"({target_size:,} bytes). Either add the GGUF to LM Studio's "
+        f"library and rerun, or pin the mapping with "
+        f"LLAMASTASH_BENCH_LMS_KEY=<modelKey>."
+      )
+    quant = self._infer_quant(target_stem)
+    if quant and len(candidates) > 1:
+      narrowed = [
+        e for e in candidates
+        if (e.get("quantization") or {}).get("name", "").lower() == quant
+      ]
+      if narrowed:
+        candidates = narrowed
+    if len(candidates) > 1:
+      keys = ", ".join(e["modelKey"] for e in candidates)
+      raise DriverError(
+        f"ambiguous LM Studio match for {gguf_path.name}: {keys}. "
+        f"Pin with LLAMASTASH_BENCH_LMS_KEY=<modelKey>."
+      )
+    return candidates[0]["modelKey"]
+
+  @staticmethod
+  def _infer_quant(stem: str) -> Optional[str]:
+    """Best-effort: pull a quantisation tag out of a filename like
+    `something-q4_k_m.gguf` → `q4_k_m`."""
+    parts = stem.lower().rsplit("-", 1)
+    if len(parts) == 2 and parts[1].startswith("q"):
+      return parts[1]
+    return None
+
+  @staticmethod
+  def _list_lms_models() -> list[dict]:
+    out = subprocess.run(
+      ["lms", "ls", "--json"],
+      capture_output=True,
+      text=True,
+      timeout=30,
+      check=False,
+    )
+    if out.returncode != 0:
+      raise DriverError(
+        f"lms ls --json failed: {out.stderr.strip() or out.stdout.strip()}"
+      )
+    try:
+      data = json.loads(out.stdout)
+    except json.JSONDecodeError as exc:
+      raise DriverError(f"lms ls --json: invalid JSON: {exc}") from exc
+    if not isinstance(data, list):
+      raise DriverError(f"lms ls --json: expected list, got {type(data).__name__}")
+    return data
+
   def _append_knobs(self, argv: list[str], knobs: NormalizedKnobs) -> None:
     if knobs.ctx is not None:
       argv += ["--context-length", str(knobs.ctx)]
     if knobs.n_gpu_layers is not None:
-      argv += ["--gpu", str(knobs.n_gpu_layers)]
+      # `lms load --gpu` expects an offload *ratio* in [0.0, 1.0],
+      # not an absolute layer count. Map the harness's "999 = all
+      # layers" convention to 1.0 and clamp anything ≥1 to 1.0.
+      ratio = 1.0 if knobs.n_gpu_layers >= 1 else 0.0
+      argv += ["--gpu", f"{ratio:.2f}"]
 
 
 __all__ = ["LmStudioDriver"]
