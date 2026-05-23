@@ -35,11 +35,14 @@ The `rag_prefill` workload overrides `ctx` to `8192` regardless of mode so the 8
 
 ## Per-tool fairness notes
 
-The methodology page is updated post-Unit-8 with the actual list of knobs each tool refuses to expose. Until the first end-to-end run lands, the placeholders below describe the *intent*, not yet the *observed*.
+These notes describe what the first hardware runs (2026-05-23, AMD ROCm gfx1151) actually observed; revise as more backends come online.
 
-- **`llamastash` / raw `llama-server`** — full control. Normalized mode for LlamaStash uses `LLAMASTASH_BENCH_DISABLE_DEFAULTS=1` so the resolver collapses to "user knobs only," producing argv byte-identical to the raw `llama-server` invocation. The Suite A overhead check asserts this byte-equality (after stripping `--port`).
-- **Ollama** — driven through `/v1/chat/completions`. Each test GGUF is imported once via `ollama create <bench-name> -f <Modelfile>`; the harness verifies the content-addressed blob's SHA matches the source. The Ollama driver runs `ollama rm <bench-name>` in `stop()` to bound the imported-blob store growth. *Q2 — Modelfile `PARAMETER` vs OpenAI shim parameter precedence — is resolved post-first-run.*
-- **LM Studio** — driven through `lms load` + `lms server start` + `/v1/chat/completions`. Normalized mode passes `--context-length`, `--gpu`, and any other knob `lms` exposes; un-exposable knobs land in `unfair_knobs`. *Q1 — the exact `lms` normalization ceiling — is resolved post-first-run.* The MLX, vLLM, mlc-llm, and exllamav2 engines LM Studio can also drive are explicit non-goals (R147); normalized mode forces the llama.cpp path.
+- **`llamastash` / raw `llama-server`** — full control. Normalized mode for LlamaStash uses `LLAMASTASH_BENCH_DISABLE_DEFAULTS=1` so the resolver collapses to "user knobs only," producing argv byte-identical to the raw `llama-server` invocation. The Suite A overhead check asserts this byte-equality (after stripping `--port`). `llamastash start` takes the model positionally and forwards every flag the user passes after `--` directly to llama-server; first-class flags (`--ctx`) translate to llama-server's equivalents.
+- **Ollama** — driven through `/v1/chat/completions` on the host's `$OLLAMA_HOST` (default `127.0.0.1:11434`; when the env var lacks an explicit port the driver appends `:11434` to keep httpx from defaulting to port 80). Each test GGUF is imported once via `ollama create <bench-name> -f <Modelfile>`; the harness verifies the content-addressed blob's SHA matches the source. `ollama rm <bench-name>` runs in `stop()` to bound the imported-blob store growth (skip with `LLAMASTASH_BENCH_KEEP_IMPORTS=1`).
+- **LM Studio** — driven through `lms load <modelKey>` + `/v1/chat/completions`. `lms load` does **not** accept raw GGUF paths — it loads from LM Studio's indexed library by `modelKey` (e.g. `google/gemma-4-e2b`). The bench driver bridges by enumerating `lms ls --json` and matching the requested GGUF to a library entry by file size with a quantisation tie-break; operators can pin the mapping with `LLAMASTASH_BENCH_LMS_KEY=<modelKey>` when auto-resolution is ambiguous. The same GGUF bytes must be staged into LM Studio's library before LM Studio cells produce comparable numbers — otherwise the published comparison falls back to "LM Studio loaded its closest local variant" and that fact is noted on the row.
+- **Q1 answer — LM Studio's normalized-mode ceiling.** `lms load` exposes `--context-length` and `--gpu` only. `flash_attn`, `kv_cache_type`, `batch_size`, `ubatch_size` are inaccessible through the CLI and always land in `unfair_knobs`. `--gpu` is an offload **ratio** in `[0.0, 1.0]`, not a layer count: the harness's `n_gpu_layers=999` convention maps to `--gpu 1.00`.
+- **Q2 answer — Ollama Modelfile vs OpenAI shim parameter precedence.** The OpenAI shim honors `temperature`, `max_tokens`, `seed`, and `stream`; everything else falls back to the Modelfile defaults (which the bench's import step omits). `ctx` on the shim is silently capped at the Modelfile's `PARAMETER num_ctx` if one is set, so the bench's normalized `ctx` lands on `unfair_knobs` for Ollama cells in mode normalized.
+- **Q6 answer — TTFT cold launch.** Recorded as **two** fields: `ttft_ms_first_request` (cold, including any lazy-load) and `ttft_ms_post_load` (post-warmup; engine-comparable). The renderer's headline TTFT chart uses `ttft_ms_post_load`. Ollama lazy-loads on first request; LM Studio loads at `lms load` time so cold and post-load are identical there.
 
 ## Variance gate (R140)
 
@@ -128,8 +131,8 @@ Carrying forward from the brainstorm (R145–R150):
 
 ## Open questions tracked here
 
-- **Q1** — LM Studio normalization ceiling. Resolved post-first-Suite-B-run.
-- **Q2** — Ollama Modelfile vs OpenAI API parameter precedence. Resolved post-first-Suite-B-run.
-- **Q3** — Run both `large_dense` and `large_moe`, or pick one per host? Decided after the first NVIDIA + Apple Metal runs.
+- **Q1** — LM Studio normalization ceiling. **Resolved** above (`--context-length`, `--gpu` only; `--gpu` is a 0..1 ratio).
+- **Q2** — Ollama Modelfile vs OpenAI API parameter precedence. **Resolved** above (shim honors `temperature`, `max_tokens`, `seed`, `stream`; `ctx` capped by Modelfile when set).
+- **Q3** — Run both `large_dense` and `large_moe`, or pick one per host? Still open; the 2026-05-23 run covered only `small` on AMD ROCm. Reopen after NVIDIA + Apple Metal data lands.
 - **Q4** — Per-tool `llama.cpp` commit recording. Best-effort capture in `scripts/bench/end_to_end/provenance.py`; `None` when not extractable.
-- **Q6** — TTFT "cold launch" definition. Recorded as **both** `ttft_ms_first_request` (with lazy-load) and `ttft_ms_post_load` (engine-comparable). The renderer chooses which to chart per workload.
+- **Q6** — TTFT "cold launch" definition. **Resolved** above (two fields: `ttft_ms_first_request`, `ttft_ms_post_load`).

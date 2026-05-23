@@ -206,9 +206,14 @@ def render_results_page(
   date: str,
   charts_dir: Path,
   primary_backend: Optional[str] = None,
+  preamble: Optional[str] = None,
 ) -> str:
   """Build the full Markdown body. Charts are rendered into
-  `charts_dir` and referenced via relative `<img>` markdown."""
+  `charts_dir` and referenced via relative `<img>` markdown.
+
+  An optional `preamble` (markdown) is inserted right after the H1
+  + auto-source line — used to land a hand-curated scope note that
+  survives subsequent renders."""
   if not runs:
     return f"# Bench results — {date}\n\n_no source data found in runs/_\n"
 
@@ -223,6 +228,10 @@ def render_results_page(
     f"_Source: {len(runs)} run file(s) from host(s) {', '.join(hosts)} "
     f"on backend(s) {', '.join(backends)}._",
     "",
+  ]
+  if preamble:
+    out_lines.append(preamble.rstrip() + "\n")
+  out_lines += [
     "See [methodology.md](methodology.md) for the matched-pair settings "
     "policy, the variance-gate rules, and the conflict-of-interest "
     "disclaimer. Charts are deterministic SVG — re-render from the "
@@ -333,10 +342,16 @@ def main(argv: Optional[list[str]] = None) -> int:
 
   args.out_dir.mkdir(parents=True, exist_ok=True)
   charts_dir.mkdir(parents=True, exist_ok=True)
-  body = render_results_page(runs, args.date, charts_dir, args.primary_backend)
+  preamble_path = args.out_dir / f"results-{args.date}.preamble.md"
+  preamble = preamble_path.read_text() if preamble_path.exists() else None
+  body = render_results_page(
+    runs, args.date, charts_dir, args.primary_backend, preamble=preamble,
+  )
   results_file.write_text(body)
   update_index(args.index, args.date, results_file)
   print(f"==> wrote {results_file}", file=sys.stderr)
+  if preamble is not None:
+    print(f"    included preamble from {preamble_path}", file=sys.stderr)
   return 0
 
 
