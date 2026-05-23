@@ -126,7 +126,9 @@ impl GpuInfo {
 
 /// Run the full detection chain. Best-effort — every probe failure
 /// just falls through to the next backend, then to `CpuOnly`.
-/// Suitable for daemon startup; not called per-launch.
+/// Suitable for daemon startup and periodic hotplug-detection
+/// passes; the per-tick host-metrics refresh uses [`refresh_active`]
+/// to avoid spawning every vendor tool every second.
 pub fn probe() -> GpuInfo {
   if let Some(info) = nvidia::probe() {
     return info;
@@ -143,6 +145,28 @@ pub fn probe() -> GpuInfo {
   // don't know how much VRAM they have. Returns CpuOnly when even
   // Vulkan can't find a device.
   vulkan::probe().unwrap_or(GpuInfo::CpuOnly)
+}
+
+/// Refresh the already-detected backend by calling only its vendor
+/// probe. Returns `None` when the previous probe was for a backend
+/// without live metrics (CpuOnly, AppleMetal — unified memory total
+/// is a static system property, Unknown — Vulkan summary has no
+/// live values) or when the vendor tool returned nothing this tick.
+///
+/// This is the per-tick fast path used by the host-metrics sampler.
+/// Before this existed the sampler ran the full chain (`nvidia-smi`
+/// → `rocm-smi` → `system_profiler` → `vulkaninfo`) every 1 Hz tick,
+/// which translates to ~86,400 subprocess spawns per day on an idle
+/// daemon. After: one spawn per second targeting only the active
+/// vendor; CPU-only / Vulkan / Metal hosts skip per-tick spawns
+/// entirely (the periodic full re-probe in the sampler still catches
+/// hotplug / late driver loads).
+pub fn refresh_active(prev: &GpuInfo) -> Option<GpuInfo> {
+  match prev {
+    GpuInfo::Nvidia { .. } => nvidia::probe(),
+    GpuInfo::Amd { .. } => amd::probe(),
+    GpuInfo::CpuOnly | GpuInfo::AppleMetal { .. } | GpuInfo::Unknown { .. } => None,
+  }
 }
 
 #[cfg(test)]

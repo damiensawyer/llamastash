@@ -132,7 +132,7 @@ async fn full_rescan(catalog: &ModelCatalog, opts: &DiscoveryOptions) {
     .scan_roots
     .iter()
     .filter(|r| r.source == ModelSource::Ollama)
-    .map(|r| ollama::enumerate(r.path.clone()))
+    .map(|r| ollama::enumerate(r.path.clone(), opts.scan.metadata_cache.clone()))
     .collect();
 
   let mut new_models: Vec<DiscoveredModel> = Vec::new();

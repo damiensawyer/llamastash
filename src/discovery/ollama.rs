@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
+use crate::discovery::metadata_cache::{self, CachedParse, MetadataCache};
 use crate::discovery::{DiscoveredModel, ModelSource};
 use crate::gguf::{read_path, summarise_metadata, HeaderReadOptions};
 
@@ -52,7 +53,14 @@ struct ManifestLayer {
 /// Errors per-manifest (malformed JSON, missing blob, unreadable
 /// file) are logged and skipped; the remaining manifests still
 /// surface.
-pub fn enumerate(root: PathBuf) -> mpsc::Receiver<DiscoveredModel> {
+///
+/// `cache` is the same `MetadataCache` the regular scanner uses —
+/// when supplied, blobs whose `(canonical path, mtime, size)` match
+/// the cached probe skip the GGUF header parse entirely. This is
+/// load-bearing for the 5-minute periodic rescan: Ollama blobs are
+/// content-addressed and never change once written, so every rescan
+/// would otherwise re-read and re-parse the entire library.
+pub fn enumerate(root: PathBuf, cache: Option<MetadataCache>) -> mpsc::Receiver<DiscoveredModel> {
   let (tx, rx) = mpsc::channel(64);
   tokio::spawn(async move {
     let manifests_dir = root.join("manifests");
@@ -105,40 +113,68 @@ pub fn enumerate(root: PathBuf) -> mpsc::Receiver<DiscoveredModel> {
         None => continue,
       };
 
+      // Probe (mtime, size) and consult the cache first. Ollama blobs
+      // are content-addressed (filename is the sha256), so a hit
+      // means the on-disk bytes are unchanged and the header parse
+      // result is still valid.
+      let probe_path = blob_path.clone();
+      let (mtime, size) = tokio::task::spawn_blocking(move || metadata_cache::probe(&probe_path))
+        .await
+        .unwrap_or((None, 0));
+      if let Some(c) = cache.as_ref() {
+        if let Some(hit) = c.get(&blob_path, mtime, size).await {
+          let model = DiscoveredModel {
+            path: blob_path.clone(),
+            parent: blob_path
+              .parent()
+              .map(Path::to_path_buf)
+              .unwrap_or_default(),
+            source: ModelSource::Ollama,
+            metadata: hit.metadata,
+            parse_error: hit.parse_error,
+            split_siblings: Vec::new(),
+            display_label: Some(resolved_name_tag.clone()),
+          };
+          if tx.send(model).await.is_err() {
+            return;
+          }
+          continue;
+        }
+      }
+
       let blob_path_for_parse = blob_path.clone();
       let header_result = tokio::task::spawn_blocking(move || {
         read_path(&blob_path_for_parse, HeaderReadOptions::default())
       })
       .await;
-      let model = match header_result {
-        Ok(Ok(read)) => DiscoveredModel {
-          path: blob_path.clone(),
-          parent: blob_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default(),
-          source: ModelSource::Ollama,
+      let cached = match header_result {
+        Ok(Ok(read)) => CachedParse {
           metadata: Some(summarise_metadata(&read.header)),
           parse_error: None,
-          split_siblings: Vec::new(),
-          display_label: Some(resolved_name_tag.clone()),
         },
-        Ok(Err(e)) => DiscoveredModel {
-          path: blob_path.clone(),
-          parent: blob_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default(),
-          source: ModelSource::Ollama,
+        Ok(Err(e)) => CachedParse {
           metadata: None,
           parse_error: Some(format!("{resolved_name_tag}: {e}")),
-          split_siblings: Vec::new(),
-          display_label: Some(resolved_name_tag.clone()),
         },
         Err(join_err) => {
           log::warn!("ollama parser task panicked: {join_err}");
           continue;
         }
+      };
+      if let Some(c) = cache.as_ref() {
+        c.put(blob_path.clone(), mtime, size, cached.clone()).await;
+      }
+      let model = DiscoveredModel {
+        path: blob_path.clone(),
+        parent: blob_path
+          .parent()
+          .map(Path::to_path_buf)
+          .unwrap_or_default(),
+        source: ModelSource::Ollama,
+        metadata: cached.metadata,
+        parse_error: cached.parse_error,
+        split_siblings: Vec::new(),
+        display_label: Some(resolved_name_tag.clone()),
       };
       if tx.send(model).await.is_err() {
         return;
@@ -280,12 +316,61 @@ mod tests {
     )
     .unwrap();
 
-    let mut rx = enumerate(root.clone());
+    let mut rx = enumerate(root.clone(), None);
     let m = rx.recv().await.expect("one model");
     assert!(rx.recv().await.is_none(), "exactly one manifest");
     assert_eq!(m.source, ModelSource::Ollama);
     assert_eq!(m.path, blob_path);
     assert!(m.metadata.is_some(), "blob is a valid GGUF");
+    fs::remove_dir_all(&root).ok();
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn cache_hit_skips_re_parse_on_second_enumeration() {
+    // Regression guard for the daemon's 5-minute periodic rescan:
+    // Ollama blobs are content-addressed so they never change once
+    // written, but pre-cache wiring re-read and re-parsed every blob
+    // on every cycle. With a `MetadataCache` threaded in, the second
+    // enumeration must hit the cache and surface the same metadata
+    // without re-parsing.
+    let root = temp_root("cache-hit");
+    let manifests_dir = root.join("manifests/registry.ollama.ai/library/cached");
+    let blobs_dir = root.join("blobs");
+    fs::create_dir_all(&manifests_dir).unwrap();
+    fs::create_dir_all(&blobs_dir).unwrap();
+    let blob_bytes = build_minimal_gguf("llama");
+    let digest_hex = "cacheab1e";
+    let blob_path = blobs_dir.join(format!("sha256-{digest_hex}"));
+    fs::write(&blob_path, &blob_bytes).unwrap();
+    let manifest = serde_json::json!({
+      "schemaVersion": 2,
+      "layers": [
+        {"mediaType": MODEL_MEDIA_TYPE, "digest": format!("sha256:{digest_hex}"), "size": blob_bytes.len()},
+      ]
+    });
+    fs::write(
+      manifests_dir.join("7b"),
+      serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let cache = MetadataCache::new(8);
+    // First enumeration populates the cache.
+    let mut rx = enumerate(root.clone(), Some(cache.clone()));
+    let first = rx.recv().await.expect("first enumeration yields model");
+    assert!(rx.recv().await.is_none());
+    assert!(first.metadata.is_some());
+    assert_eq!(cache.len().await, 1, "first enumeration populates cache");
+
+    // Second enumeration hits the cache. The arch field must survive
+    // a cache-hit round-trip so the catalog row stays stable.
+    let mut rx2 = enumerate(root.clone(), Some(cache.clone()));
+    let second = rx2.recv().await.expect("second enumeration yields model");
+    assert!(rx2.recv().await.is_none());
+    let first_arch = first.metadata.as_ref().and_then(|m| m.arch.clone());
+    let second_arch = second.metadata.as_ref().and_then(|m| m.arch.clone());
+    assert_eq!(second_arch, first_arch, "cache hit must preserve metadata");
+    assert_eq!(cache.len().await, 1, "cache size unchanged on hit");
     fs::remove_dir_all(&root).ok();
   }
 
@@ -304,7 +389,7 @@ mod tests {
       serde_json::to_vec(&manifest).unwrap(),
     )
     .unwrap();
-    let mut rx = enumerate(root.clone());
+    let mut rx = enumerate(root.clone(), None);
     assert!(
       rx.recv().await.is_none(),
       "no model layer → no row surfaced"
@@ -314,7 +399,7 @@ mod tests {
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn enumerate_missing_root_emits_nothing() {
-    let mut rx = enumerate(PathBuf::from("/nonexistent/ollama/root"));
+    let mut rx = enumerate(PathBuf::from("/nonexistent/ollama/root"), None);
     assert!(rx.recv().await.is_none());
   }
 }

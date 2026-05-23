@@ -131,7 +131,8 @@ pub async fn sample_priming(prime_delay: Duration) -> HostMetricsSnapshot {
   tokio::time::sleep(prime_delay).await;
   sys.refresh_cpu_specifics(CpuRefreshKind::nothing().with_cpu_usage());
   sys.refresh_memory();
-  build_snapshot(&sys, probe_gpu().await)
+  let components = Components::new_with_refreshed_list();
+  build_snapshot(&sys, &components, probe_gpu_full().await)
 }
 
 /// Spawn the long-running sampler. Returns an `Arc<RwLock<…>>` whose
@@ -168,6 +169,20 @@ pub fn spawn(shutdown: ShutdownToken, interval: Duration) -> SamplerHandles {
     let mut sys = System::new_with_specifics(host_refresh_kind());
     // Prime sysinfo's CPU delta on first refresh.
     sys.refresh_cpu_specifics(CpuRefreshKind::nothing().with_cpu_usage());
+    // Hoist `Components` out of the per-tick path. The previous shape
+    // allocated a fresh `Components::new_with_refreshed_list()` every
+    // second *and* then called `components.refresh(true)` — the
+    // constructor already calls `refresh(true)` internally, so the
+    // second call was a redundant double-refresh. Keeping one
+    // long-lived instance and refreshing in place each tick avoids
+    // the allocation churn and the duplicate /sys/class/hwmon walk.
+    let mut components = Components::new_with_refreshed_list();
+    // Cache the detected GPU backend so we only spawn the matching
+    // vendor tool each tick instead of running the full
+    // nvidia→amd→metal→vulkan chain every second. Hotplug / late
+    // driver loads are caught by `FULL_REPROBE_TICKS` below.
+    let mut info = probe_gpu_full().await;
+    let mut ticks_since_full_reprobe: u32 = 0;
     loop {
       tokio::select! {
         _ = shutdown.wait_until_triggered() => return,
@@ -175,18 +190,39 @@ pub fn spawn(shutdown: ShutdownToken, interval: Duration) -> SamplerHandles {
       }
       sys.refresh_cpu_specifics(CpuRefreshKind::nothing().with_cpu_usage());
       sys.refresh_memory();
-      let info = probe_gpu().await;
-      let next = build_snapshot(&sys, info.clone());
+      // `refresh(true)` updates values and prunes sensors that
+      // vanished since the last tick (hot-removed cards / drivers).
+      components.refresh(true);
+      ticks_since_full_reprobe += 1;
+      if ticks_since_full_reprobe >= FULL_REPROBE_TICKS {
+        // Periodic full re-probe: catches hotplug (new GPU plugged
+        // in), late driver load, and transitions from CpuOnly →
+        // detected once the vendor tool becomes available.
+        info = probe_gpu_full().await;
+        ticks_since_full_reprobe = 0;
+      } else if let Some(refreshed) = refresh_active_gpu(info.clone()).await {
+        // Fast path: only the active vendor's tool is spawned. No-op
+        // for backends without live metrics (CpuOnly, AppleMetal,
+        // Unknown/Vulkan).
+        info = refreshed;
+      }
+      let next = build_snapshot(&sys, &components, info.clone());
       *snapshot_for_task.write().await = next;
       // Mirror the live GpuInfo so `status.gpu` follows hotplug /
       // late driver loads. Without this, `ctx.gpu` would stay
       // pinned to the startup snapshot forever even after the
       // host pane has detected the new device.
-      *gpu_for_task.write().await = info;
+      *gpu_for_task.write().await = info.clone();
     }
   });
   SamplerHandles { snapshot, gpu }
 }
+
+/// How often to re-run the full vendor chain to catch hotplug /
+/// late driver loads. At the daemon's 1 Hz sampling cadence this is
+/// once a minute, which keeps a freshly-plugged-in GPU surfacing in
+/// the host pane within ~60 s while avoiding 86,400 spawns/day.
+const FULL_REPROBE_TICKS: u32 = 60;
 
 fn host_refresh_kind() -> RefreshKind {
   RefreshKind::nothing()
@@ -194,19 +230,30 @@ fn host_refresh_kind() -> RefreshKind {
     .with_memory(MemoryRefreshKind::everything())
 }
 
-/// GPU probe runs on the blocking pool — the existing `gpu::probe()`
-/// shells out to `nvidia-smi` / `rocm-smi` / `system_profiler` and
-/// would otherwise stall a tokio worker for the duration of the
-/// child process.
-async fn probe_gpu() -> GpuInfo {
+/// Full vendor-chain probe on the blocking pool. Used at sampler
+/// startup and on the periodic hotplug pass; the per-tick fast path
+/// is [`refresh_active_gpu`].
+async fn probe_gpu_full() -> GpuInfo {
   tokio::task::spawn_blocking(gpu::probe)
     .await
     .unwrap_or(GpuInfo::CpuOnly)
 }
 
-fn build_snapshot(sys: &System, info: GpuInfo) -> HostMetricsSnapshot {
+/// Per-tick GPU refresh on the blocking pool. Spawns only the
+/// vendor tool matching the previously-detected backend (or none,
+/// for CpuOnly / AppleMetal / Unknown). Returns `None` when the
+/// active backend has no live metrics — the caller keeps the prior
+/// snapshot rather than overwriting with a fresh probe result.
+async fn refresh_active_gpu(prev: GpuInfo) -> Option<GpuInfo> {
+  tokio::task::spawn_blocking(move || gpu::refresh_active(&prev))
+    .await
+    .ok()
+    .flatten()
+}
+
+fn build_snapshot(sys: &System, components: &Components, info: GpuInfo) -> HostMetricsSnapshot {
   let cpu_pct = host_cpu_pct(sys);
-  let cpu_temp_c = host_cpu_temp_c();
+  let cpu_temp_c = host_cpu_temp_c(components);
   let agg = aggregate_gpu(&info);
   HostMetricsSnapshot {
     cpu_pct,
@@ -229,9 +276,11 @@ fn build_snapshot(sys: &System, info: GpuInfo) -> HostMetricsSnapshot {
 /// `k10temp`, `Tctl`, `Tdie`, `CPU Package`, …); rather than match
 /// the platform, take the max reading across any component whose
 /// label hints at CPU. `None` when no matching sensor exists.
-fn host_cpu_temp_c() -> Option<f32> {
-  let mut components = Components::new_with_refreshed_list();
-  components.refresh(true);
+///
+/// The caller hands in a refreshed `Components` — the sampler keeps
+/// one long-lived instance and refreshes it in place each tick, so
+/// no per-call allocation or /sys/class/hwmon re-walk happens here.
+fn host_cpu_temp_c(components: &Components) -> Option<f32> {
   let mut max: Option<f32> = None;
   for c in components.iter() {
     let label_lc = c.label().to_ascii_lowercase();
