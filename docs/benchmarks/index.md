@@ -4,9 +4,13 @@ Cross-tool and overhead measurements for LlamaStash, organized chronologically. 
 
 Read [methodology.md](methodology.md) before any individual page; it explains the matched-pair settings policy, the variance gate, the fairness self-check, and the cross-backend determinism caveat. Without that context, individual numbers mislead.
 
-## Results
+## Curated reports
 
-- [2026-05-24](results-2026-05-24.md) — ROCm vs Vulkan engine A/B across **three tools** (LlamaStash, raw `llama-server`, LM Studio) on AMD Strix Halo (gfx1151). For our local upstream llama.cpp builds (b9282), **Vulkan ~17–20% faster than HIP** — consistent with [llama.cpp Issue #13565 (open)](https://github.com/ggml-org/llama.cpp/issues/13565) which tracks poor HIP perf on gfx1151. Our HIP build is missing `GGML_HIP_ROCWMMA_FATTN=ON` (an upstream-documented gfx1151 optimisation) so the HIP number is a **lower bound** — re-run with the proper flag pending. For LM Studio's bundled v2.16.0 backends, ROCm ≈ Vulkan within noise — *cause unverified*. LlamaStash + raw `llama-server` stay within ~1% on either engine.
+- [**R1 AMD-APU final report**](r1-amd-apu-final-report.md) — full 4-model × 4-tool × 2-mode × 4-workload sweep on AMD Strix Halo (gfx1151), with headline tables, per-workload tables, six findings, and methodology caveats. **Start here** for the AMD-APU story.
+
+## Results (auto-rendered)
+
+- [2026-05-24](results-2026-05-24.md) — full-day raw data: small extra-workloads, mid (31 B dense Q4), large_dense (27 B dense Q8, both mixed-power + clean-70 W), large_moe (35 B-A3B Q8), plus the morning's engine A/B (HIP vs Vulkan) and rocWMMA A/B. ~10 source JSONs joined into one table. For the curated, hand-written summary see the [R1 final report](r1-amd-apu-final-report.md) above.
 - [2026-05-23](results-2026-05-23.md) — first hardware run. Scope: `small` GGUF (gemma-4-E2B-Q4_K_M, byte-identical across all four tools), AMD ROCm gfx1151 (Strix Halo / Radeon 8060S), both `defaults` + `normalized` modes, `chat_turn` + `agent_decode` workloads, **all four tools** (LlamaStash, raw `llama-server`, Ollama, LM Studio). Each tool uses its own bundled inference engine — same model bytes, different engines.
 
 ## Raw data

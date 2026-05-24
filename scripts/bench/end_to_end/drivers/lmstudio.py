@@ -157,11 +157,32 @@ class LmStudioDriver(Driver):
 
   def _resolve_model_key(self, gguf_path: Path) -> str:
     """Map a GGUF path to LM Studio's `modelKey`. Operators can pin
-    the mapping via `LLAMASTASH_BENCH_LMS_KEY` (or a per-size-class
-    override) to skip the auto-resolution heuristic."""
+    the mapping via:
+
+    - `LLAMASTASH_BENCH_LMS_KEY` — applies to every cell. Use when
+      running a single-model bench.
+    - `LLAMASTASH_BENCH_LMS_KEY_{SMALL,MID,LARGE_DENSE,LARGE_MOE}` —
+      per-size-class. Matches the `LLAMASTASH_BENCH_MODELS_<CLASS>`
+      convention. The driver picks the per-class key whose
+      corresponding `LLAMASTASH_BENCH_MODELS_<CLASS>` env var points
+      at the same `gguf_path` we're resolving.
+
+    If neither is set, fall back to the auto-resolution heuristic
+    (basename match → size match → quant tag tie-break)."""
     pinned = os.environ.get("LLAMASTASH_BENCH_LMS_KEY")
     if pinned:
       return pinned
+
+    target_resolved = gguf_path.resolve()
+    for cls in ("SMALL", "MID", "LARGE_DENSE", "LARGE_MOE"):
+      class_key = os.environ.get(f"LLAMASTASH_BENCH_LMS_KEY_{cls}")
+      class_model_path = os.environ.get(f"LLAMASTASH_BENCH_MODELS_{cls}")
+      if class_key and class_model_path:
+        try:
+          if Path(class_model_path).expanduser().resolve() == target_resolved:
+            return class_key
+        except OSError:
+          continue
 
     entries = self._list_lms_models()
     target_size = gguf_path.stat().st_size

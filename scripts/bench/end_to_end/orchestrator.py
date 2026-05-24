@@ -53,7 +53,10 @@ DEFAULT_WORKLOADS = ["chat_turn", "rag_prefill", "agent_decode", "parallel_4"]
 DEFAULT_REPS = 5  # 1 warmup + 4 measured
 
 # Baseline normalized knobs, matched-pair across tools (R130).
-# `rag_prefill` overrides `ctx` to 8192 so the 8k corpus fits.
+# `rag_prefill` overrides `ctx` so the 8157-token corpus + system
+# message + question + decode tokens all fit comfortably above the
+# 8k mark; an exact 8192 setting overflows by a few hundred tokens
+# and triggers a 400 from llama-server on the workload's prompt.
 BASE_NORMALIZED_KNOBS = NormalizedKnobs(
   ctx=4096,
   n_gpu_layers=999,
@@ -62,7 +65,7 @@ BASE_NORMALIZED_KNOBS = NormalizedKnobs(
   batch_size=512,
   ubatch_size=512,
 )
-RAG_PREFILL_CTX = 8192
+RAG_PREFILL_CTX = 10240
 
 
 def _git_sha() -> Optional[str]:
@@ -169,9 +172,14 @@ def _planned_matrix(args: argparse.Namespace) -> list[dict]:
 
 
 def _output_path(out_dir: Path, host_id: str, started_at: dt.datetime, git_sha: Optional[str]) -> Path:
+  """Per-host-id, per-run JSON path. Includes the start-time HHMMSS
+  so two invocations on the same date + commit (e.g. one bench per
+  model size in separate `--models` calls) don't silently overwrite
+  each other."""
   date = started_at.strftime("%Y-%m-%d")
+  hms = started_at.strftime("%H%M%S")
   sha = (git_sha or "nosha")[:12]
-  return out_dir / host_id / f"{date}-{sha}.json"
+  return out_dir / host_id / f"{date}-{hms}-{sha}.json"
 
 
 def _knobs_for_workload(workload: str) -> NormalizedKnobs:
