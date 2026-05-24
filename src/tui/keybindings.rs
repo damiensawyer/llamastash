@@ -712,12 +712,16 @@ fn build_default_bindings() -> Vec<Binding> {
   });
   // Plain `r` toggles `<think>` collapse on the Chat tab; the handler
   // gates by `right_tab == RightTab::Chat` so the binding stays inert
-  // on Embed/Rerank/Logs/Settings. Scoped to `RIGHT_PANE` (browsing
-  // mode) so the chord doesn't collide with literal `r` typed into
-  // the chat prompt — the user escapes to the right pane (Esc) and
-  // toggles, then re-enters edit mode.
+  // on Embed/Rerank/Logs/Settings. Scope covers both `RIGHT_PANE`
+  // (browsing focus) and `CHAT_INPUT` (input focus in resting state) —
+  // `InputField::handle_key_resting` lets unmodified non-`e`/`Esc`
+  // chars fall through to the action layer, so `r` fires the toggle
+  // whenever the prompt isn't actively editing. While the field IS
+  // editing, `handle_key_editing` captures `r` as a typed char before
+  // the action layer ever sees it, so this doesn't shadow typing.
   v.extend_from_slice(&binds! {
-    action: Action::ToggleThinkCollapse, scopes: FocusSet::RIGHT_PANE,
+    action: Action::ToggleThinkCollapse,
+    scopes: FocusSet::RIGHT_PANE.union(FocusSet::CHAT_INPUT),
     hint: "toggle reasoning", description: Some("toggle <think> blocks"),
     chords: [(KeyCode::Char('r'), KeyModifiers::NONE, "r", CAT_INPUT_TABS)],
   });
@@ -1440,12 +1444,20 @@ mod tests {
   }
 
   #[test]
-  fn right_pane_r_toggles_think_collapse() {
+  fn r_toggles_think_collapse_in_right_pane_and_chat_input() {
     assert_eq!(
       action_for(Focus::RightPane, KeyCode::Char('r'), KeyModifiers::NONE),
       Some(Action::ToggleThinkCollapse),
     );
-    // No longer bound under ChatInput so it doesn't shadow typing.
+    // Also bound under ChatInput so the resting-mode pass-through
+    // from `InputField` reaches the action layer. While editing,
+    // `r` is consumed by `handle_key_editing` as a typed character
+    // before the action layer ever runs — no conflict.
+    assert_eq!(
+      action_for(Focus::ChatInput, KeyCode::Char('r'), KeyModifiers::NONE),
+      Some(Action::ToggleThinkCollapse),
+    );
+    // The old `Ctrl+R` chord is gone.
     assert_eq!(
       action_for(Focus::ChatInput, KeyCode::Char('r'), KeyModifiers::CONTROL),
       None,

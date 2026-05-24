@@ -20,7 +20,6 @@ use ratatui::Frame;
 use crate::theme::Palette;
 use crate::tui::app::App;
 use crate::tui::keybindings::Focus;
-use crate::tui::oai_client::collapse_think_blocks;
 use crate::tui::tabs::input_pane::{self, InputPaneOpts, PromptField};
 
 /// Working state for the chat tab. Owned by [`crate::tui::app::App`]
@@ -90,21 +89,13 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   let state = &app.chat;
   let active = app.focus == Focus::ChatInput;
 
-  let body_text = if state.collapse_thinks {
-    collapse_think_blocks(&state.response)
-  } else {
-    state.response.clone()
-  };
-  let body: Vec<Line<'_>> = if body_text.is_empty() {
+  let body: Vec<Line<'_>> = if state.response.is_empty() {
     vec![Line::from(Span::styled(
       "Send a prompt with Enter. Responses stream here.",
       palette.muted_style(),
     ))]
   } else {
-    body_text
-      .lines()
-      .map(|l| Line::from(Span::styled(l.to_string(), palette.text_style())))
-      .collect()
+    render_response_lines(&state.response, state.collapse_thinks, palette)
   };
 
   // The status row carries only live-state messages (streaming /
@@ -145,6 +136,89 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   );
 }
 
+/// Walk `text` and emit ratatui [`Line`]s with `<think>...</think>`
+/// content styled muted so the reasoning trace reads as secondary
+/// text. A blank line is inserted after each `</think>` so the
+/// answer that follows always starts on a fresh row — without it,
+/// streamed models that emit the close marker immediately followed
+/// by content render as one run-on block.
+///
+/// When `collapse` is `true`, each terminated `<think>` block is
+/// replaced by a single `⏵ reasoning (N tokens)` badge (also muted).
+/// Unterminated blocks (still streaming) pass through as raw text in
+/// muted style so the user sees the live trace instead of stuck-at
+/// "(0 tokens)".
+fn render_response_lines(text: &str, collapse: bool, palette: &Palette) -> Vec<Line<'static>> {
+  let normal = palette.text_style();
+  let muted = palette.muted_style();
+  let mut lines: Vec<Line<'static>> = Vec::new();
+  let mut current: Vec<Span<'static>> = Vec::new();
+  let mut rest = text;
+  let mut in_think = false;
+  loop {
+    let needle = if in_think { "</think>" } else { "<think>" };
+    match rest.find(needle) {
+      Some(idx) => {
+        let segment = &rest[..idx];
+        if in_think && collapse {
+          let toks = segment.split_whitespace().count();
+          current.push(Span::styled(format!("⏵ reasoning ({toks} tokens)"), muted));
+        } else {
+          let style = if in_think { muted } else { normal };
+          push_segment(&mut current, &mut lines, segment, style);
+        }
+        rest = &rest[idx + needle.len()..];
+        if in_think {
+          // Just closed a `<think>` block. Flush the trailing span
+          // for the reasoning trace, then emit an empty line as the
+          // visual separator before the answer.
+          if !current.is_empty() {
+            lines.push(Line::from(std::mem::take(&mut current)));
+          }
+          lines.push(Line::default());
+        }
+        in_think = !in_think;
+      }
+      None => {
+        // No more tags. The remaining text is either tail content
+        // (in_think = false) or an unterminated reasoning trace
+        // (in_think = true, still streaming).
+        let style = if in_think { muted } else { normal };
+        push_segment(&mut current, &mut lines, rest, style);
+        break;
+      }
+    }
+  }
+  if !current.is_empty() {
+    lines.push(Line::from(current));
+  }
+  lines
+}
+
+/// Push `text` into the in-progress line buffer, splitting on `\n` so
+/// each terminal line lands as its own [`Line`]. Empty leading or
+/// trailing fragments are skipped so a segment that starts or ends
+/// with a newline doesn't emit a redundant blank span.
+fn push_segment(
+  current: &mut Vec<Span<'static>>,
+  lines: &mut Vec<Line<'static>>,
+  text: &str,
+  style: Style,
+) {
+  let mut iter = text.split('\n');
+  if let Some(first) = iter.next() {
+    if !first.is_empty() {
+      current.push(Span::styled(first.to_string(), style));
+    }
+  }
+  for chunk in iter {
+    lines.push(Line::from(std::mem::take(current)));
+    if !chunk.is_empty() {
+      current.push(Span::styled(chunk.to_string(), style));
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -177,5 +251,80 @@ mod tests {
       ..Default::default()
     };
     assert!(!s.collapse_thinks);
+  }
+
+  /// Helper that drops styling and converts the line layout to a
+  /// `Vec<String>` so the assertion focuses on structure (line breaks
+  /// + blank-line separator) without coupling to ratatui's `Style`.
+  fn render_to_strings(text: &str, collapse: bool) -> Vec<String> {
+    let palette = crate::theme::palette_for(crate::theme::ThemeName::Macchiato);
+    render_response_lines(text, collapse, palette)
+      .into_iter()
+      .map(|l| {
+        l.spans
+          .iter()
+          .map(|s| s.content.as_ref())
+          .collect::<String>()
+      })
+      .collect()
+  }
+
+  #[test]
+  fn expanded_think_block_emits_blank_line_separator_before_answer() {
+    let lines = render_to_strings("<think>step one\nstep two</think>final answer", false);
+    assert_eq!(
+      lines,
+      vec![
+        "step one".to_string(),
+        "step two".to_string(),
+        // Blank line — the visual gap between the reasoning trace
+        // and the answer the user actually cares about.
+        String::new(),
+        "final answer".to_string(),
+      ]
+    );
+  }
+
+  #[test]
+  fn expanded_think_content_uses_muted_style_and_answer_uses_text_style() {
+    let palette = crate::theme::palette_for(crate::theme::ThemeName::Macchiato);
+    let lines = render_response_lines("<think>reason</think>answer", false, palette);
+    // 3 lines: reasoning, blank separator, answer.
+    assert_eq!(lines.len(), 3);
+    // First line span styled muted.
+    let first = lines[0].spans.first().expect("reason span");
+    assert_eq!(first.content, "reason");
+    assert_eq!(first.style, palette.muted_style());
+    // Third line styled with the normal text style.
+    let third = lines[2].spans.first().expect("answer span");
+    assert_eq!(third.content, "answer");
+    assert_eq!(third.style, palette.text_style());
+  }
+
+  #[test]
+  fn collapsed_think_block_renders_muted_reasoning_badge() {
+    let palette = crate::theme::palette_for(crate::theme::ThemeName::Macchiato);
+    let lines = render_response_lines("<think>one two three</think>answer", true, palette);
+    assert_eq!(lines.len(), 3);
+    let badge = lines[0].spans.first().expect("badge span");
+    assert_eq!(badge.content, "⏵ reasoning (3 tokens)");
+    assert_eq!(badge.style, palette.muted_style());
+    assert!(lines[1].spans.is_empty(), "blank separator line");
+    assert_eq!(lines[2].spans.first().expect("answer").content, "answer");
+  }
+
+  #[test]
+  fn unterminated_think_block_passes_through_as_muted_stream() {
+    // Mid-stream — `</think>` hasn't arrived yet. The trace should
+    // still render (muted) so the user sees live reasoning instead
+    // of an empty pane.
+    let lines = render_to_strings("<think>still thinking", false);
+    assert_eq!(lines, vec!["still thinking".to_string()]);
+  }
+
+  #[test]
+  fn response_without_think_blocks_renders_each_line_in_text_style() {
+    let lines = render_to_strings("hello\nworld", false);
+    assert_eq!(lines, vec!["hello".to_string(), "world".to_string()]);
   }
 }

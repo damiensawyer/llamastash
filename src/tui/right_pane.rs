@@ -150,12 +150,19 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<crate::tui::hint_picker::Ranke
     // chord (rank 10) plus the action-layer chips (Send / Embed /
     // Rerank / ToggleThink) at higher ranks.
     (Focus::ChatInput, _) => {
-      push_input_field_chips(
-        &mut chips,
-        app.chat.prompt.is_editing(),
-        app.chat.prompt.is_empty(),
-      );
+      let editing = app.chat.prompt.is_editing();
+      push_input_field_chips(&mut chips, editing, app.chat.prompt.is_empty());
       push(&mut chips, 30, app.hint(Focus::ChatInput, Action::SendChat));
+      // `r:think` only fires when the field is resting (editing mode
+      // captures the char). Hiding the chip during edit keeps the
+      // hint truthful instead of teaching a key that won't fire.
+      if !editing {
+        push(
+          &mut chips,
+          40,
+          app.hint_with(Focus::ChatInput, Action::ToggleThinkCollapse, "think"),
+        );
+      }
     }
     (Focus::EmbedInput, _) => {
       push_input_field_chips(
@@ -730,15 +737,22 @@ mod tests {
     assert!(chip_texts(&app_with_focus(Focus::RightPane, RightTab::Settings)).is_empty());
     // Edit-mode focuses surface InputField-aware modal chips. In a
     // fresh app the field is *not* editing yet, so the chip strip
-    // shows `e:edit` (no `Esc:clear` because the buffer is empty).
+    // shows `e:edit` plus the resting-state hotkeys (`Enter:send`,
+    // `r:think`). `r:think` survives because the resting field
+    // passes the char through to the action layer.
     let enter_send = format!("{ENTER_LABEL}:send");
     assert_eq!(
       chip_texts(&app_with_focus(Focus::ChatInput, RightTab::Chat)),
-      vec!["e:edit".to_string(), enter_send.clone()]
+      vec![
+        "e:edit".to_string(),
+        enter_send.clone(),
+        "r:think".to_string(),
+      ]
     );
     // Same field after the user enters edit mode — chip switches to
-    // `Esc:stop edit` so the user sees how to exit. (Sibling chips
-    // unchanged.)
+    // `Esc:stop edit` and `r:think` drops out because the editing
+    // field captures `r` as a typed character before the action
+    // layer ever runs.
     let mut chat_app = app_with_focus(Focus::ChatInput, RightTab::Chat);
     chat_app.chat.prompt.enter_edit();
     assert_eq!(
@@ -748,12 +762,18 @@ mod tests {
     // After exiting edit but with a non-empty buffer (a `Esc` press
     // landed the field in its resting + non-empty state), the chip
     // strip surfaces both `e:edit` and `Esc:clear` so the user sees
-    // the next step of the walk-back.
+    // the next step of the walk-back. `r:think` returns because
+    // resting mode passes the char through.
     chat_app.chat.prompt.set_text("hi");
     chat_app.chat.prompt.exit_edit();
     assert_eq!(
       chip_texts(&chat_app),
-      vec!["e:edit".to_string(), "Esc:clear".to_string(), enter_send,]
+      vec![
+        "e:edit".to_string(),
+        "Esc:clear".to_string(),
+        enter_send,
+        "r:think".to_string(),
+      ]
     );
     // Embed mirrors the same shape (one fewer trailing chip).
     assert_eq!(

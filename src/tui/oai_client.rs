@@ -270,9 +270,10 @@ struct ChatDelta {
   /// is set to a value other than `none` (default for DeepSeek-R1 /
   /// Qwen3 / GPT-OSS chat templates that surface a separate
   /// `<think>` channel). The wrapper task synthesises `<think>` /
-  /// `</think>` markers around these chunks so the existing
-  /// [`crate::tui::oai_client::collapse_think_blocks`] toggle keeps
-  /// working without per-message metadata plumbing.
+  /// `</think>` markers around these chunks so the chat tab's
+  /// renderer (which styles think content muted and inserts a
+  /// blank-line separator before the answer) handles both the
+  /// inline-tag and separate-field shapes through one code path.
   #[serde(default)]
   reasoning_content: Option<String>,
 }
@@ -356,64 +357,4 @@ pub async fn rerank(
     .collect();
   out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
   Ok(out)
-}
-
-/// Collapse `<think>...</think>` blocks in `text`, replacing each
-/// matched block with `⏵ reasoning (N tokens)`. Approximates token
-/// count via whitespace splitting — good enough for a TUI badge,
-/// not a billing claim.
-pub fn collapse_think_blocks(text: &str) -> String {
-  let mut out = String::with_capacity(text.len());
-  let mut rest = text;
-  while let Some(open_idx) = rest.find("<think>") {
-    out.push_str(&rest[..open_idx]);
-    let after_open = &rest[open_idx + "<think>".len()..];
-    match after_open.find("</think>") {
-      Some(close_idx) => {
-        let block = &after_open[..close_idx];
-        let toks = block.split_whitespace().count();
-        out.push_str(&format!("⏵ reasoning ({toks} tokens)"));
-        rest = &after_open[close_idx + "</think>".len()..];
-      }
-      None => {
-        // Unterminated — fall back to pass-through so we don't
-        // swallow content while the stream is in flight.
-        out.push_str("<think>");
-        out.push_str(after_open);
-        return out;
-      }
-    }
-  }
-  out.push_str(rest);
-  out
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn collapse_think_blocks_replaces_complete_block() {
-    let s = "hello <think>let me reason about this</think> world";
-    let out = collapse_think_blocks(s);
-    assert_eq!(out, "hello ⏵ reasoning (5 tokens) world");
-  }
-
-  #[test]
-  fn collapse_think_blocks_leaves_open_block_alone() {
-    let s = "hello <think>in progress";
-    assert_eq!(collapse_think_blocks(s), s);
-  }
-
-  #[test]
-  fn collapse_think_blocks_handles_multiple_blocks() {
-    let s = "<think>one two</think>X<think>three</think>Y";
-    let out = collapse_think_blocks(s);
-    assert_eq!(out, "⏵ reasoning (2 tokens)X⏵ reasoning (1 tokens)Y");
-  }
-
-  #[test]
-  fn collapse_think_blocks_passthrough_when_no_block() {
-    assert_eq!(collapse_think_blocks("plain text"), "plain text");
-  }
 }
