@@ -329,8 +329,8 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // PortInUse / Unbound); Unit 5's IPC `status` handler reads it
   // via the clone attached to `ctx` above (§8).
   if opts.proxy.enabled {
-    let state = proxy::ProxyState::from_context(&ctx);
-    let addr = proxy::server::loopback_addr(opts.proxy.port);
+    let state = proxy::ProxyState::from_context(&ctx, opts.proxy.ollama_compat);
+    let addr = proxy::server::loopback_addr(opts.proxy.effective_port());
     let token_for_proxy = token.clone();
     let status_for_proxy = std::sync::Arc::clone(&proxy_status_cell);
     let serve_opts = proxy::server::ServeOptions {
@@ -498,10 +498,20 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
     .arg("--socket-path")
     .arg(&opts.socket_path)
     // Propagate the effective proxy port so a `daemon start --detach
-    // --proxy-port N` doesn't drop the override on re-exec. Idempotent
+    // --proxy-port N` doesn't drop the override on re-exec. We pass
+    // the *resolved* port (`effective_port`) so the child binds the
+    // same address even when the parent inferred it from
+    // `ollama_compat` rather than a literal `port:` value. Idempotent
     // when the child re-reads the same config file (same value).
     .arg("--proxy-port")
-    .arg(opts.proxy.port.to_string())
+    .arg(opts.proxy.effective_port().to_string());
+  // Carry the Ollama-compat mode bool through so the child also
+  // serves the `"Ollama is running"` identity on `GET /` — the env
+  // var alone isn't reliable across a detached re-exec.
+  if opts.proxy.ollama_compat {
+    cmd.arg("--ollama-compat");
+  }
+  cmd
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::null());

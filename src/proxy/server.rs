@@ -85,11 +85,13 @@ pub fn new_status_cell() -> StatusCell {
 /// [`serve_with_options`] instead.
 pub const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How many ports above the configured `proxy.port` the listener will
-/// probe for a free slot before giving up. With the default value the
-/// listener walks `port..=port+5` (six attempts), matching Ollama's
-/// well-known port window so a running Ollama on `11434` doesn't kick
-/// llamastash's proxy entirely offline — it lands on `11435` instead.
+/// How many ports above the configured base port the listener will
+/// probe for a free slot before giving up. Six attempts total
+/// (`port..=port+5`) — the default mode starts at `11435` and lands
+/// within `11435..=11440`; Ollama-compat mode starts at `11434` and
+/// lands within `11434..=11439`. The window is intentionally narrow
+/// (rather than e.g. ephemeral-range-wide) so a long-running daemon
+/// stays on a predictable port the user can pin into agent configs.
 pub const DEFAULT_PORT_SCAN_MAX_OFFSET: u16 = 5;
 
 /// Tunable knobs for the listener. Kept as a struct so future
@@ -349,7 +351,7 @@ mod tests {
   async fn spawn_proxy_on_ephemeral_port() -> (SocketAddr, ShutdownToken, StatusCell, JoinHandle<()>)
   {
     let ctx = MethodContext::new(ShutdownToken::new());
-    let state = ProxyState::from_context(&ctx);
+    let state = ProxyState::from_context(&ctx, false);
     let token = ctx.shutdown.clone();
     let status = new_status_cell();
     let status_for_task = Arc::clone(&status);
@@ -522,7 +524,7 @@ mod tests {
     // an adjacent free port and turn the assertion green for the
     // wrong reason.
     let ctx = MethodContext::new(ShutdownToken::new());
-    let state = ProxyState::from_context(&ctx);
+    let state = ProxyState::from_context(&ctx, false);
     let token = ctx.shutdown.clone();
     let status = new_status_cell();
     serve_with_options(
@@ -556,7 +558,7 @@ mod tests {
       .expect("camp bind");
     let camp_addr = camp.local_addr().expect("camp addr");
     let ctx = MethodContext::new(ShutdownToken::new());
-    let state = ProxyState::from_context(&ctx);
+    let state = ProxyState::from_context(&ctx, false);
     let token = ctx.shutdown.clone();
     let status = new_status_cell();
     // Run the listener under a shutdown so the test can clean up; the

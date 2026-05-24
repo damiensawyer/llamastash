@@ -1,7 +1,10 @@
 //! CLI handlers for the `daemon` subcommand.
 //!
-//! `start [--detach]` — launch the daemon. Foreground holds the
-//! terminal; `--detach` returns once the socket is bound.
+//! `start [--detach]` — launch the daemon. Default is foreground: the
+//! daemon holds the terminal until shut down. A one-line notice is
+//! printed first so the user sees *why* the prompt isn't coming back
+//! (the historical complaint was that bare `daemon start` looked stuck).
+//! `--detach` returns once the socket is bound.
 //! `stop` — connect to the daemon and call `shutdown`.
 //! `status` — connect to the daemon and report PID + uptime; emits "not
 //! running" if the socket is missing or the connection fails.
@@ -13,7 +16,9 @@ use anyhow::{Context, Result};
 use crate::cli::cli_args::{Cli, DaemonAction};
 use crate::config::Config;
 use crate::daemon::discovery_task::DiscoveryOptions;
-use crate::daemon::{run_foreground, start_detached, DaemonOptions, StartOutcome};
+use crate::daemon::{
+  existing_daemon_pid, run_foreground, start_detached, DaemonOptions, StartOutcome,
+};
 use crate::discovery::known_caches::{default_set, RootResolution};
 use crate::ipc::{Client, ClientError};
 use crate::launch::binary::{locate as locate_binary, LocateInputs};
@@ -29,7 +34,19 @@ pub async fn handle(action: DaemonAction, cli: &Cli, config: &Config) -> Result<
       state_dir,
       socket_path,
       proxy_port,
-    } => handle_start(detach, state_dir, socket_path, proxy_port, cli, config).await,
+      ollama_compat,
+    } => {
+      handle_start(
+        detach,
+        state_dir,
+        socket_path,
+        proxy_port,
+        ollama_compat,
+        cli,
+        config,
+      )
+      .await
+    }
     DaemonAction::Stop => handle_stop().await,
     DaemonAction::Status { json } => handle_status(json).await,
   }
@@ -40,10 +57,18 @@ async fn handle_start(
   state_dir: Option<PathBuf>,
   socket_path: Option<PathBuf>,
   proxy_port: Option<u16>,
+  ollama_compat: bool,
   cli: &Cli,
   config: &Config,
 ) -> Result<()> {
-  let opts = build_options(state_dir, socket_path, proxy_port, cli, config)?;
+  let opts = build_options(
+    state_dir,
+    socket_path,
+    proxy_port,
+    ollama_compat,
+    cli,
+    config,
+  )?;
   if detach {
     // `start_detached` blocks until the child reports socket bound.
     match start_detached(opts)? {
@@ -60,6 +85,22 @@ async fn handle_start(
       }
     }
   } else {
+    // Foreground holds the terminal until SIGINT / `daemon stop`.
+    // Print a one-line notice up front so the user understands the
+    // prompt isn't coming back — otherwise the silent hand-off makes
+    // a fresh `daemon start` look stuck. `--detach` is mentioned so
+    // anyone who actually wanted the background flavour has the next
+    // step in their face. Suppressed when an existing daemon already
+    // owns the lockfile (we'd flash the notice then immediately fall
+    // through to "already running", which would be confusing).
+    if existing_daemon_pid(&opts.state_dir).is_none() {
+      println!(
+        "{}",
+        crate::cli::colors::dim(
+          "daemon: running in foreground — Ctrl+C to stop, or rerun with --detach",
+        )
+      );
+    }
     match run_foreground(opts).await? {
       StartOutcome::RanToCompletion => Ok(()),
       StartOutcome::AlreadyRunning(pid) => {
@@ -119,6 +160,7 @@ pub(crate) fn build_options(
   state_dir: Option<PathBuf>,
   socket_path: Option<PathBuf>,
   proxy_port: Option<u16>,
+  ollama_compat_cli: bool,
   cli: &Cli,
   config: &Config,
 ) -> Result<DaemonOptions> {
@@ -149,15 +191,38 @@ pub(crate) fn build_options(
   opts.port_range = config.port_range;
   opts.probe_timeout_secs = Some(config.probe_timeout_secs);
   opts.arch_defaults = config.arch_defaults.clone();
-  // Proxy: config layer first, then CLI override. Without this thread-
-  // through the daemon silently ignored `proxy:` from the config file
-  // and ran with `ProxyConfig::default()` regardless.
+  // Proxy: config layer first, then CLI / env overrides. Without this
+  // thread-through the daemon silently ignored `proxy:` from the config
+  // file and ran with `ProxyConfig::default()` regardless.
   opts.proxy = config.proxy.clone();
   if let Some(p) = proxy_port {
-    opts.proxy.port = p;
+    opts.proxy.port = Some(p);
   }
+  // Ollama-compat: OR of (config field, `--ollama-compat` CLI flag,
+  // `LLAMASTASH_OLLAMA_COMPAT` env var). Any one of the three enables
+  // the mode — clearing it requires unsetting all three. The env var
+  // accepts the usual truthy strings; anything else (incl. unset) is
+  // treated as false.
+  let env_compat = env_flag_truthy("LLAMASTASH_OLLAMA_COMPAT");
+  opts.proxy.ollama_compat = opts.proxy.ollama_compat || ollama_compat_cli || env_compat;
   opts.propagated_cli_args = propagated_cli_args(cli);
   Ok(opts)
+}
+
+/// True when the named env var is set to a recognised truthy string.
+/// Accepts the usual flavours (`1`, `true`, `yes`, `on`) regardless of
+/// case; empty / unset / anything else is false. Trimmed before
+/// matching so a stray newline (common in `.env` files) doesn't bite.
+fn env_flag_truthy(name: &str) -> bool {
+  std::env::var(name)
+    .ok()
+    .map(|v| {
+      matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+      )
+    })
+    .unwrap_or(false)
 }
 
 /// Collect the global CLI flags that the re-exec'd detached daemon
@@ -508,24 +573,28 @@ mod tests {
     // Regression: before this wiring landed, config.proxy.port was
     // parsed and validated but `build_options` never copied it onto
     // DaemonOptions.proxy. The daemon silently ran with
-    // ProxyConfig::default() (port 11434) no matter what the user put
-    // in config.yaml.
+    // ProxyConfig::default() no matter what the user put in
+    // config.yaml.
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config {
       proxy: crate::config::loader::ProxyConfig {
         enabled: true,
-        port: 22222,
+        port: Some(22222),
+        ollama_compat: false,
         header_read_timeout_secs: 45,
       },
       ..Config::default()
     };
-    let opts = build_options(None, None, None, &cli, &config).expect("build_options");
+    let opts = build_options(None, None, None, false, &cli, &config).expect("build_options");
     assert_eq!(
-      opts.proxy.port, 22222,
+      opts.proxy.port,
+      Some(22222),
       "config proxy.port must reach daemon"
     );
+    assert_eq!(opts.proxy.effective_port(), 22222);
     assert_eq!(opts.proxy.header_read_timeout_secs, 45);
     assert!(opts.proxy.enabled);
+    assert!(!opts.proxy.ollama_compat);
   }
 
   #[test]
@@ -534,14 +603,16 @@ mod tests {
     let config = Config {
       proxy: crate::config::loader::ProxyConfig {
         enabled: true,
-        port: 22222,
+        port: Some(22222),
+        ollama_compat: false,
         header_read_timeout_secs: 30,
       },
       ..Config::default()
     };
     // The CLI override (Some(8080)) beats config.proxy.port.
-    let opts = build_options(None, None, Some(8080), &cli, &config).expect("build_options");
-    assert_eq!(opts.proxy.port, 8080, "CLI flag overrides config");
+    let opts = build_options(None, None, Some(8080), false, &cli, &config).expect("build_options");
+    assert_eq!(opts.proxy.port, Some(8080), "CLI flag overrides config");
+    assert_eq!(opts.proxy.effective_port(), 8080);
     // Other proxy fields still come from config (not reset).
     assert!(opts.proxy.enabled);
     assert_eq!(opts.proxy.header_read_timeout_secs, 30);
@@ -550,10 +621,51 @@ mod tests {
   #[test]
   fn build_options_no_cli_override_falls_back_to_config_then_default() {
     // Defaults all the way down: no CLI override, no proxy block in
-    // config → daemon uses ProxyConfig::default().
+    // config → daemon uses ProxyConfig::default(), which resolves to
+    // 11435 (default mode) when nothing pins `port` explicitly.
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
-    let opts = build_options(None, None, None, &cli, &config).expect("build_options");
-    assert_eq!(opts.proxy.port, 11434);
+    let opts = build_options(None, None, None, false, &cli, &config).expect("build_options");
+    assert_eq!(opts.proxy.port, None);
+    assert_eq!(opts.proxy.effective_port(), 11435);
+    assert!(!opts.proxy.ollama_compat);
+  }
+
+  #[test]
+  fn build_options_ollama_compat_cli_flag_flips_mode_and_default_port() {
+    let cli = parse_cli(&["daemon", "start"]);
+    let config = Config::default();
+    let opts = build_options(None, None, None, true, &cli, &config).expect("build_options");
+    assert!(opts.proxy.ollama_compat);
+    // Port stays None at the schema level — the CLI flag drives the
+    // mode bool, and `effective_port()` derives the runtime port.
+    assert_eq!(opts.proxy.port, None);
+    assert_eq!(opts.proxy.effective_port(), 11434);
+  }
+
+  #[test]
+  fn build_options_ollama_compat_or_combines_config_cli_env() {
+    // Config-only: config says compat=true, CLI flag off → enabled.
+    let cli = parse_cli(&["daemon", "start"]);
+    let config_compat = Config {
+      proxy: crate::config::loader::ProxyConfig {
+        ollama_compat: true,
+        ..crate::config::loader::ProxyConfig::default()
+      },
+      ..Config::default()
+    };
+    let opts_config =
+      build_options(None, None, None, false, &cli, &config_compat).expect("build_options");
+    assert!(opts_config.proxy.ollama_compat);
+
+    // CLI-only: config has compat=false, CLI flag on → enabled.
+    let config_off = Config::default();
+    let opts_cli = build_options(None, None, None, true, &cli, &config_off).expect("build_options");
+    assert!(opts_cli.proxy.ollama_compat);
+
+    // Both off (neither config nor CLI) → disabled.
+    let opts_neither =
+      build_options(None, None, None, false, &cli, &config_off).expect("build_options");
+    assert!(!opts_neither.proxy.ollama_compat);
   }
 }

@@ -124,7 +124,7 @@ async fn daemon_starts_with_proxy_enabled_and_health_returns_ok() {
   let port = pick_free_port();
   opts.proxy = ProxyConfig {
     enabled: true,
-    port,
+    port: Some(port),
     ..ProxyConfig::default()
   };
   let socket_path = opts.socket_path.clone();
@@ -168,7 +168,7 @@ async fn daemon_starts_without_proxy_when_disabled() {
   let port = pick_free_port();
   opts.proxy = ProxyConfig {
     enabled: false,
-    port,
+    port: Some(port),
     ..ProxyConfig::default()
   };
   let socket_path = opts.socket_path.clone();
@@ -204,7 +204,7 @@ async fn daemon_keeps_running_when_proxy_port_already_in_use() {
   let mut opts = DaemonOptions::rooted_at(dir.clone());
   opts.proxy = ProxyConfig {
     enabled: true,
-    port,
+    port: Some(port),
     ..ProxyConfig::default()
   };
   let socket_path = opts.socket_path.clone();
@@ -232,7 +232,7 @@ async fn http11_keep_alive_serves_two_health_requests_on_one_connection() {
   let port = pick_free_port();
   opts.proxy = ProxyConfig {
     enabled: true,
-    port,
+    port: Some(port),
     ..ProxyConfig::default()
   };
   let socket_path = opts.socket_path.clone();

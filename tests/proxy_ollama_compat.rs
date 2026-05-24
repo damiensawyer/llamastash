@@ -198,12 +198,30 @@ fn make_parse_error_model(path: &str) -> DiscoveredModel {
 }
 
 async fn proxy_state_with_models(models: Vec<DiscoveredModel>) -> Arc<ProxyState> {
+  proxy_state_with_models_compat(models, false).await
+}
+
+async fn proxy_state_with_models_compat(
+  models: Vec<DiscoveredModel>,
+  ollama_compat: bool,
+) -> Arc<ProxyState> {
   let catalog = ModelCatalog::new();
   for m in models {
     catalog.upsert(m).await;
   }
   let ctx = MethodContext::with_catalog(ShutdownToken::new(), catalog);
-  ProxyState::from_context(&ctx)
+  ProxyState::from_context(&ctx, ollama_compat)
+}
+
+#[allow(dead_code)]
+async fn http_head(addr: SocketAddr, path: &str) -> (u16, usize) {
+  let mut sock = TcpStream::connect(addr).await.expect("connect");
+  let req = format!("HEAD {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+  sock.write_all(req.as_bytes()).await.expect("write");
+  let mut buf = Vec::new();
+  sock.read_to_end(&mut buf).await.expect("read");
+  let (status, body) = parse_response(&buf);
+  (status, body.len())
 }
 
 // --- /api/version --------------------------------------------------------
@@ -585,7 +603,7 @@ async fn proxy_state_with_models_and_registry(
     catalog.upsert(m).await;
   }
   let ctx = MethodContext::with_catalog(ShutdownToken::new(), catalog).with_supervisors(registry);
-  ProxyState::from_context(&ctx)
+  ProxyState::from_context(&ctx, false)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -690,4 +708,61 @@ async fn digest_is_stable_across_tags_and_ps_for_same_model() {
   let _ = live.stop(Duration::from_secs(3)).await;
   shutdown_listener(shutdown, handle).await;
   std::fs::remove_dir_all(&dir).ok();
+}
+
+// --- GET / and HEAD / ----------------------------------------------------
+//
+// The server-identity handshake the official `ollama` CLI (and other
+// Ollama-Go clients) issue before any `/api/*` call. Pre-fix this
+// returned 404 and the CLI bailed with "something went wrong"; the
+// regression target is now `200 OK` + the mode-appropriate body.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_get_default_mode_identifies_as_llamastash() {
+  let state = proxy_state_with_models_compat(Vec::new(), false).await;
+  let (addr, shutdown, handle) = spawn_listener_with_state(state).await;
+
+  let (status, body) = http_get(addr, "/").await;
+  assert_eq!(status, 200);
+  // Trailing newline matches real Ollama's `"Ollama is running\n"`
+  // wire form — agents that strcmp the body bytes see the same shape.
+  assert_eq!(
+    body, b"LlamaStash is running\n",
+    "body should be the default-mode identity string"
+  );
+
+  shutdown_listener(shutdown, handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_get_ollama_compat_mode_identifies_as_ollama() {
+  let state = proxy_state_with_models_compat(Vec::new(), true).await;
+  let (addr, shutdown, handle) = spawn_listener_with_state(state).await;
+
+  let (status, body) = http_get(addr, "/").await;
+  assert_eq!(status, 200);
+  // Byte-exact match for `ollama` CLI compatibility — the Go client
+  // version detection sometimes strcmp's the literal string.
+  assert_eq!(body, b"Ollama is running\n");
+
+  shutdown_listener(shutdown, handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_head_returns_200_with_no_body_in_either_mode() {
+  // Real Ollama responds to HEAD / with 200 and an empty body (hyper
+  // strips the body for HEAD automatically). The CLI's handshake
+  // probe checks the status only — failing this is the bug that
+  // motivated the whole root-route addition.
+  for compat in [false, true] {
+    let state = proxy_state_with_models_compat(Vec::new(), compat).await;
+    let (addr, shutdown, handle) = spawn_listener_with_state(state).await;
+    let (status, body_len) = http_head(addr, "/").await;
+    assert_eq!(status, 200, "HEAD / must succeed in {compat:?} mode");
+    assert_eq!(
+      body_len, 0,
+      "HEAD response must carry no body in {compat:?} mode"
+    );
+    shutdown_listener(shutdown, handle).await;
+  }
 }

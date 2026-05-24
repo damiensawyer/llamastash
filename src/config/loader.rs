@@ -80,9 +80,19 @@ pub struct Config {
 /// OpenAI-compat proxy router configuration.
 ///
 /// `enabled: true` (the default) starts a hyper listener on
-/// `127.0.0.1:<port>` inside the daemon process. `port` is the only
-/// other knob in v1 — host is fixed at loopback, no auth, no TLS, no
-/// fallback tuning. See the plan's Scope Boundaries for why.
+/// `127.0.0.1:<port>` inside the daemon process. Two operating modes:
+///
+/// - **Default** (`ollama_compat: false`): identifies as `LlamaStash is
+///   running` on `GET /` and prefers port `11435` so an existing
+///   Ollama install on `11434` keeps working. Co-existence by design.
+/// - **Ollama-compat** (`ollama_compat: true`): identifies as `Ollama
+///   is running`, prefers port `11434`, and serves as a drop-in for
+///   Ollama-shape clients (the `ollama` CLI, Ollama-Go libraries,
+///   etc.) that probe `HEAD /` before any `/api/*` call.
+///
+/// Both modes scan up to port `11440` for a free slot; both speak the
+/// same OpenAI compat + Ollama-discovery surfaces. Host is fixed at
+/// loopback, no auth, no TLS, no fallback tuning.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct ProxyConfig {
@@ -91,17 +101,28 @@ pub struct ProxyConfig {
   /// `"disabled"`. Default `true`.
   #[serde(default = "ProxyConfig::default_enabled")]
   pub enabled: bool,
-  /// Base TCP port for the loopback listener on `127.0.0.1`. Default
-  /// `11434` — matches Ollama's well-known port so OpenAI-client
-  /// wrappers that hard-code that target see llamastash without
-  /// reconfiguration. If the base port is taken (e.g. an actual
-  /// Ollama install is already running), the listener walks up to
-  /// the next five ports (`port..=port+5`) and binds the first free
-  /// slot — see `proxy.status.listen` for the chosen address. If all
-  /// six are taken, the daemon stays up and surfaces
-  /// `proxy.status: "port_in_use"`.
-  #[serde(default = "ProxyConfig::default_port")]
-  pub port: u16,
+  /// Base TCP port for the loopback listener on `127.0.0.1`.
+  /// `None` (the YAML default) is resolved by [`Self::effective_port`]
+  /// from `ollama_compat`: `11434` when true, `11435` otherwise.
+  /// `Some(N)` pins the base port regardless of mode. The listener
+  /// then walks `base..=base+5` looking for a free slot (six
+  /// attempts) — see [`crate::proxy::server::DEFAULT_PORT_SCAN_MAX_OFFSET`]
+  /// and the `--proxy-port` CLI override.
+  #[serde(default)]
+  pub port: Option<u16>,
+  /// Enable Ollama drop-in mode. Default `false`.
+  ///
+  /// When `true`: `GET /` returns `"Ollama is running"` (Ollama-CLI
+  /// handshake), and `effective_port()` defaults to `11434`. When
+  /// `false`: `GET /` returns `"LlamaStash is running"` and the
+  /// default port is `11435` so the listener coexists with a running
+  /// Ollama without colliding.
+  ///
+  /// CLI override: `--ollama-compat`. Env override:
+  /// `LLAMASTASH_OLLAMA_COMPAT=1`. The three sources are OR-ed; any
+  /// one of them enables the mode for that daemon process.
+  #[serde(default)]
+  pub ollama_compat: bool,
   /// How long hyper waits for a client to finish sending request
   /// headers, in seconds. Default `30`. Bounds partial-request clients
   /// (crashed agents leaving sockets half-open, slow-loris-style
@@ -117,8 +138,12 @@ impl ProxyConfig {
     true
   }
 
-  fn default_port() -> u16 {
-    11434
+  /// Port the listener tries first. Falls through to the
+  /// `ollama_compat`-derived default when `port` is unset.
+  pub fn effective_port(&self) -> u16 {
+    self
+      .port
+      .unwrap_or(if self.ollama_compat { 11434 } else { 11435 })
   }
 
   fn default_header_read_timeout_secs() -> u64 {
@@ -130,7 +155,8 @@ impl Default for ProxyConfig {
   fn default() -> Self {
     Self {
       enabled: Self::default_enabled(),
-      port: Self::default_port(),
+      port: None,
+      ollama_compat: false,
       header_read_timeout_secs: Self::default_header_read_timeout_secs(),
     }
   }
@@ -719,7 +745,24 @@ arch_defaults:
   fn proxy_config_defaults_match_plan() {
     let cfg = Config::default();
     assert!(cfg.proxy.enabled);
-    assert_eq!(cfg.proxy.port, 11434);
+    assert!(!cfg.proxy.ollama_compat);
+    assert_eq!(cfg.proxy.port, None);
+    // Resolved port follows the mode: 11435 in default mode, 11434
+    // when ollama-compat is enabled.
+    assert_eq!(cfg.proxy.effective_port(), 11435);
+    let compat = ProxyConfig {
+      ollama_compat: true,
+      ..ProxyConfig::default()
+    };
+    assert_eq!(compat.effective_port(), 11434);
+    // An explicit `port:` override wins over the mode default in
+    // either mode.
+    let pinned = ProxyConfig {
+      port: Some(20000),
+      ollama_compat: true,
+      ..ProxyConfig::default()
+    };
+    assert_eq!(pinned.effective_port(), 20000);
   }
 
   #[test]
@@ -741,7 +784,8 @@ proxy:
 
     assert!(loaded.warning.is_none(), "valid config should not warn");
     assert!(!loaded.config.proxy.enabled);
-    assert_eq!(loaded.config.proxy.port, 13579);
+    assert_eq!(loaded.config.proxy.port, Some(13579));
+    assert_eq!(loaded.config.proxy.effective_port(), 13579);
     fs::remove_dir_all(dir).expect("temp test dir should be removed");
   }
 
@@ -754,9 +798,29 @@ proxy:
     let loaded = load_config_from_path(&path);
 
     assert!(loaded.warning.is_none());
-    // `enabled` keeps its default when only `port` is supplied.
+    // `enabled` and `ollama_compat` keep their defaults when only
+    // `port` is supplied.
     assert!(loaded.config.proxy.enabled);
-    assert_eq!(loaded.config.proxy.port, 22222);
+    assert!(!loaded.config.proxy.ollama_compat);
+    assert_eq!(loaded.config.proxy.port, Some(22222));
+    fs::remove_dir_all(dir).expect("temp test dir should be removed");
+  }
+
+  #[test]
+  fn proxy_config_ollama_compat_flips_default_port() {
+    let dir = temp_test_dir("proxy-ollama-compat");
+    let path = dir.join("config.yaml");
+    fs::write(&path, "proxy:\n  ollama_compat: true\n").expect("write failed");
+
+    let loaded = load_config_from_path(&path);
+
+    assert!(loaded.warning.is_none());
+    assert!(loaded.config.proxy.enabled);
+    assert!(loaded.config.proxy.ollama_compat);
+    // `port: None` resolves to 11434 in compat mode (`Ollama is
+    // running` handshake target), not 11435 (the default-mode value).
+    assert_eq!(loaded.config.proxy.port, None);
+    assert_eq!(loaded.config.proxy.effective_port(), 11434);
     fs::remove_dir_all(dir).expect("temp test dir should be removed");
   }
 

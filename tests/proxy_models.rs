@@ -177,7 +177,7 @@ async fn proxy_state_with_models(models: Vec<DiscoveredModel>) -> Arc<ProxyState
     catalog.upsert(m).await;
   }
   let ctx = MethodContext::with_catalog(ShutdownToken::new(), catalog);
-  ProxyState::from_context(&ctx)
+  ProxyState::from_context(&ctx, false)
 }
 
 // --- direct-listener tests ----------------------------------------------
@@ -431,7 +431,7 @@ async fn end_to_end_proxy_models_matches_discovery_catalog() {
     },
     proxy: ProxyConfig {
       enabled: true,
-      port,
+      port: Some(port),
       ..ProxyConfig::default()
     },
     ..DaemonOptions::rooted_at(state_dir.clone())

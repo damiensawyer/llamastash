@@ -179,12 +179,21 @@ pub enum DaemonAction {
     #[arg(long, value_name = "PATH", hide = true)]
     socket_path: Option<PathBuf>,
     /// TCP port the OpenAI-compat proxy listener binds on
-    /// `127.0.0.1`. Overrides `proxy.port` from the config file.
-    /// Default `11434` (matches Ollama's well-known port). Use `0`
-    /// to bind an ephemeral port (the actual port is reported via
-    /// `llamastash status`).
+    /// `127.0.0.1`. Overrides `proxy.port` from the config file and
+    /// the `--ollama-compat`-derived default. Default port is `11435`
+    /// (`11434` with `--ollama-compat`); the listener scans up to
+    /// `11440` for a free slot. Use `0` to bind an ephemeral port —
+    /// the actual address is reported via `llamastash status`.
     #[arg(long, value_name = "PORT")]
     proxy_port: Option<u16>,
+    /// Enable Ollama drop-in mode for this daemon process. `GET /`
+    /// returns `"Ollama is running"` so the official `ollama` CLI
+    /// (and other Ollama-Go-based clients) recognise the proxy; the
+    /// default port shifts to `11434`. OR-ed with `proxy.ollama_compat`
+    /// in `config.yaml` and the `LLAMASTASH_OLLAMA_COMPAT` env var
+    /// (any of the three turns it on).
+    #[arg(long)]
+    ollama_compat: bool,
   },
   /// Stop the running daemon. Running models keep running.
   Stop,
@@ -1172,11 +1181,13 @@ mod tests {
         state_dir,
         socket_path,
         proxy_port,
+        ollama_compat,
       })) => {
         assert!(detach);
         assert!(state_dir.is_none());
         assert!(socket_path.is_none());
         assert!(proxy_port.is_none());
+        assert!(!ollama_compat);
       }
       other => panic!("expected daemon start --detach, got {other:?}"),
     }
@@ -1195,6 +1206,7 @@ mod tests {
         state_dir,
         socket_path,
         proxy_port,
+        ollama_compat,
       })) => {
         assert!(!detach);
         assert_eq!(state_dir, Some(PathBuf::from("/tmp/llamastash-test-state")));
@@ -1203,6 +1215,7 @@ mod tests {
           Some(PathBuf::from("/tmp/llamastash-test-state/daemon.sock"))
         );
         assert!(proxy_port.is_none());
+        assert!(!ollama_compat);
       }
       other => panic!("expected daemon start with paths, got {other:?}"),
     }
@@ -1214,11 +1227,13 @@ mod tests {
         state_dir,
         socket_path,
         proxy_port,
+        ollama_compat,
       })) => {
         assert!(!detach);
         assert!(state_dir.is_none());
         assert!(socket_path.is_none());
         assert_eq!(proxy_port, Some(8080));
+        assert!(!ollama_compat);
       }
       other => panic!("expected daemon start --proxy-port 8080, got {other:?}"),
     }
@@ -1231,6 +1246,21 @@ mod tests {
         assert_eq!(proxy_port, Some(0));
       }
       other => panic!("expected daemon start --proxy-port 0, got {other:?}"),
+    }
+
+    // --ollama-compat alone flips the bool; the daemon's
+    // `build_options` resolves the effective port from it.
+    let cli_compat = parse(&["daemon", "start", "--ollama-compat"]);
+    match cli_compat.command {
+      Some(Command::Daemon(DaemonAction::Start {
+        ollama_compat,
+        proxy_port,
+        ..
+      })) => {
+        assert!(ollama_compat);
+        assert!(proxy_port.is_none());
+      }
+      other => panic!("expected daemon start --ollama-compat, got {other:?}"),
     }
 
     let cli_stop = parse(&["daemon", "stop"]);

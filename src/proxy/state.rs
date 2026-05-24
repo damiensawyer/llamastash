@@ -50,18 +50,27 @@ pub struct ProxyState {
   /// persisted state / launch env through it so there is no
   /// duplicate-state risk.
   pub(crate) ctx: MethodContext,
+  /// `true` when the daemon is running in Ollama drop-in mode (see
+  /// [`crate::config::loader::ProxyConfig::ollama_compat`]). Drives
+  /// the `GET /` identity body (`"Ollama is running"` vs the default
+  /// `"LlamaStash is running"`); no other surface branches on it. Set
+  /// once at daemon startup; never mutated thereafter.
+  pub(crate) ollama_compat: bool,
 }
 
 impl ProxyState {
   /// Project the relevant handles out of an existing [`MethodContext`].
   /// The proxy task receives this handle from `run_foreground` after
-  /// the rest of the daemon context has been assembled.
-  pub fn from_context(ctx: &MethodContext) -> Arc<Self> {
+  /// the rest of the daemon context has been assembled. `ollama_compat`
+  /// reflects the resolved mode bool from
+  /// `ProxyConfig::ollama_compat` (after the CLI / env OR-chain).
+  pub fn from_context(ctx: &MethodContext, ollama_compat: bool) -> Arc<Self> {
     Arc::new(Self {
       http_client: Arc::new(build_http_client()),
       coalesce: Coalesce::new(),
       mru: MruTracker::new(),
       ctx: ctx.clone(),
+      ollama_compat,
     })
   }
 }

@@ -63,6 +63,13 @@ pub async fn route(state: Arc<ProxyState>, req: Request<Incoming>) -> ProxyRespo
   // Ollama compat (`/api/...`, Tier 1) is the discovery surface so
   // Ollama-shape clients recognise the proxy.
   match (&method, path.as_str()) {
+    // Server-identity handshake. The official `ollama` CLI (and other
+    // Ollama-Go-based clients) issue `HEAD /` before any `/api/*`
+    // call; without a 200 on this path they bail with a generic
+    // "something went wrong" error. The body is mode-dependent so a
+    // user who opts into Ollama drop-in mode gets the byte-exact
+    // `"Ollama is running"` string Go-clients sometimes match against.
+    (&Method::GET | &Method::HEAD, "/") => root_identity(state),
     (&Method::GET, "/health") => health(state).await,
     (&Method::GET, "/v1/models") => list_models(state).await,
     (&Method::POST, "/v1/chat/completions") => forward_request(state, req).await,
@@ -76,6 +83,36 @@ pub async fn route(state: Arc<ProxyState>, req: Request<Incoming>) -> ProxyRespo
     (&Method::POST, "/api/show") => ollama_show(state, req).await,
     _ => not_found(),
   }
+}
+
+/// `GET / | HEAD /` — server-identity probe. Returns `200 OK` with a
+/// `text/plain` body matching real Ollama's `"<server> is running"`
+/// pattern so Ollama-Go clients (the official `ollama` CLI, Cline's
+/// Ollama provider, IDE plugins built on the Go SDK) recognise the
+/// proxy and proceed to `/api/tags`. Hyper drops the body for `HEAD`
+/// automatically (the `Content-Length` header still reflects the
+/// would-be body length, matching real Ollama).
+fn root_identity(state: Arc<ProxyState>) -> ProxyResponse {
+  // Trailing newline matches `curl http://127.0.0.1:11434/` against
+  // a real Ollama install — small detail, but agents that strcmp the
+  // body see the same bytes.
+  let body = if state.ollama_compat {
+    "Ollama is running\n"
+  } else {
+    "LlamaStash is running\n"
+  };
+  Ok(text_response(StatusCode::OK, body))
+}
+
+/// 200-OK `text/plain` response. Carved out so the root-identity
+/// handler doesn't reach for `json_response` (wrong content-type) and
+/// future plain-text surfaces have an obvious helper to share.
+fn text_response(status: StatusCode, body: &'static str) -> Response<BoxBody<Bytes, BodyError>> {
+  Response::builder()
+    .status(status)
+    .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+    .body(full_body(Bytes::from_static(body.as_bytes())))
+    .expect("static text response must build")
 }
 
 /// Unit 3 pipeline: buffer the body under the 2 MiB cap, extract
