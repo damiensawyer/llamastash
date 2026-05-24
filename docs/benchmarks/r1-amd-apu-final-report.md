@@ -15,10 +15,10 @@
 
 **Tools:**
 
-- **LlamaStash** (this repo) — `LLAMASTASH_LLAMA_SERVER` pointed at the b9282 HIP build.
-- **raw `llama-server`** — same b9282 HIP binary, invoked directly.
+- **LlamaStash** (this repo) — `LLAMASTASH_LLAMA_SERVER` pointed at the b9282 HIP build for the main numbers; a Vulkan-built b9282 binary was used for the engine A/B on `small` (full matrix) and `large_dense` (full matrix).
+- **raw `llama-server`** — same b9282 HIP / Vulkan binaries, invoked directly.
 - **Ollama 0.24.0** — own bundled engine. Each test GGUF imported on demand via Modelfile (SHA-256 verified against source).
-- **LM Studio v3.45** desktop with bundled `llama.cpp-linux-x86_64-vulkan-avx2-2.16.0` runtime (Vulkan was forced for the mid/large cells because the ROCm v2.16.0 runtime crashed; small-model LMS data from 2026-05-23 is on the ROCm runtime, and engine-A/B yesterday showed LMS-ROCm ≈ LMS-Vulkan within noise on this hardware so the values mix without skewing the picture).
+- **LM Studio** desktop with bundled `llama.cpp-linux-x86_64-vulkan-avx2-2.16.0` runtime. We *attempted* the bundled `amd-rocm-avx2 v2.16.0` runtime for mid / large_dense / large_moe both during the main run and again after a full system reboot. Both attempts failed identically (`Error loading model. Exit code: null`, inference child process crashes within ~5 s of any load). Treated as a known LMS / gfx1151 bundle incompatibility; LMS-Vulkan stays as the reference for mid / large_dense / large_moe. Small-model LMS data is from yesterday's clean LMS-ROCm session, and the engine-A/B on small showed LMS-ROCm ≈ LMS-Vulkan within ~1% on this hardware.
 
 **Modes:** `defaults` and `normalized` (matched-pair `ctx`/`n_gpu_layers=999`/`flash_attn=on`/`kv_cache_type=f16`/`batch_size=512`/`ubatch_size=512`; `rag_prefill` overrides `ctx=10240` so the 8157-token corpus + system + question + decode all fit).
 
@@ -72,14 +72,18 @@ Average across `defaults` + `normalized` modes (within ~1% on this hardware for 
 
 ### large_dense — `Qwen3.6-27B-Q8_0` (27 GB)
 
-Both an original mixed-power (70 W → 90 W mid-run) and a clean-70 W re-run; values match within ~1%, published numbers are from the clean re-run.
+Full 2×2 engine A/B for LlamaStash + raw `llama-server` (HIP and Vulkan, same b9282 commit, two compile targets). Earlier mixed-power (70 W → 90 W mid-run) was confirmed benign by a clean 70 W re-run within ~1%; published HIP numbers are from the clean re-run.
 
-| Tool | chat_turn | agent_decode | rag_prefill | parallel_4 (aggregate) |
-|---|---|---|---|---|
-| LlamaStash | 7.4 / 417 | 7.4 / 418 | 7.3 / 191 | 24.8 / 1 161 |
-| raw `llama-server` | 7.4 / 414 | 7.5 / 413 | 7.3 / 190 | 24.9 / 1 172 |
-| LM Studio | **7.9 / 1 274** | **7.5 / 1 466** | **TTFT only: 84 ms** (decode null — see caveat) | **22.6 / 2 886** |
-| Ollama | 2.6 / 1 745 | 2.7 / 2 081 | 0.6 / **177 609** | 10.9 / 43 175 |
+| Tool | Engine | chat_turn | agent_decode | rag_prefill | parallel_4 (aggregate) |
+|---|---|---|---|---|---|
+| LlamaStash | **HIP** | 7.4 / **417** | 7.4 / **418** | 7.3 / 191 | 24.8 / **1 161** |
+| LlamaStash | **Vulkan** | 7.4 / 743 | 7.4 / 786 | 7.3 / 204 | 25.2 / 2 226 |
+| raw `llama-server` | HIP | 7.4 / 414 | 7.5 / 413 | 7.3 / 190 | 24.9 / 1 172 |
+| raw `llama-server` | Vulkan | 7.5 / 720 | 7.5 / 770 | 7.3 / 198 | 25.2 / 2 189 |
+| LM Studio | Vulkan | **7.9 / 1 274** | **7.5 / 1 466** | **TTFT only: 84 ms** (decode null — see caveat) | **22.6 / 2 886** |
+| Ollama | bundled | 2.6 / 1 745 | 2.7 / 2 081 | 0.6 / **177 609** | 10.9 / 43 175 |
+
+Engine takeaway for this model: **decode is engine-independent within 1%** (memory-bandwidth bound), but **HIP is ~75–90% faster on TTFT** for short-prompt workloads and **2× faster on parallel_4 TTFT**. Vulkan only matches HIP TTFT on `rag_prefill` where post-cache TTFT is dominated by the cache lookup. See Finding #2 for full discussion.
 
 ### large_moe — `Qwen3.6-35B-A3B-Q8_0` (34 GB on disk, 3 B active per token)
 
@@ -98,20 +102,27 @@ Both an original mixed-power (70 W → 90 W mid-run) and a clean-70 W re-run; va
 
 On every model × workload × mode tested, **LlamaStash decode tok/s tracks raw `llama-server` within ≤2%** (mostly within ≤1%, well inside run-to-run variance). TTFT is similarly identical. The wrapper architecture (spawning the unmodified upstream binary) holds across the full R1 size range.
 
-### 2. LM Studio's Vulkan runtime is competitive with — and sometimes beats — raw `llama-server` (HIP) for chat decode
+### 2. Engine choice (HIP vs Vulkan) is workload- and model-size-dependent — not a simple "Vulkan wins"
 
-The big surprise: LMS-on-Vulkan **outperforms our HIP build** on every model except `large_moe`.
+The small-model engine A/B (run earlier today) showed our local **Vulkan build of b9282 ~17–20% faster than HIP** on `chat_turn` / `agent_decode`. That single data point was misleading. Re-running the same A/B properly on `large_dense` (Qwen3.6-27B-Q8) — same b9282 commit, two compile targets, run on a clean GPU after a power-state reset — paints a very different picture:
 
-| Model | LMS-Vulkan decode | raw llama-server HIP decode | LMS delta |
+| Workload | LlamaStash HIP | LlamaStash Vulkan | Δ |
 |---|---:|---:|---:|
-| small | 91.1 | 84.9 | **+7%** |
-| mid | 11.6 | 9.9 | **+17%** |
-| large_dense | 7.9 | 7.4 | **+7%** |
-| large_moe | 37.0 | 42.7 | **−13%** |
+| chat_turn | 7.3 tok/s @ **421 ms** | 7.4 tok/s @ **743 ms** | decode ≈, TTFT **+76%** |
+| agent_decode | 7.4 @ 414 | 7.4 @ 786 | decode ≈, TTFT +90% |
+| rag_prefill | 7.3 @ 192 | 7.3 @ 204 | both ≈ |
+| parallel_4 | 24.6 @ 1 174 | 25.2 @ 2 226 | decode ≈, TTFT +90% |
 
-This is consistent with our 2026-05-24 engine-A/B page: upstream llama.cpp's **Vulkan path has had more RDNA-3.5 optimisation than the HIP path** for `gfx1151` ([llama.cpp Issue #13565](https://github.com/ggml-org/llama.cpp/issues/13565)). For LlamaStash users on Strix Halo, swapping the HIP `llama-server` for a Vulkan-built one would pick up most of that gap (we showed +20% on a pure b9282 Vulkan vs b9282 HIP A/B earlier today). LM Studio's reversal on `large_moe` is real but unexplained.
+So for **large dense Q8 on this hardware:**
 
-LMS pays a consistent **~1–1.5 s TTFT tax** vs direct `llama-server`, due to the OpenAI shim + LMS's reasoning-mode parser overhead.
+- **Decode throughput is essentially identical** between HIP and Vulkan (within 1%).
+- **TTFT is dramatically worse on Vulkan** for short-prompt workloads (chat_turn, agent_decode, parallel_4 each see ~75–90% higher TTFT). The fixed setup cost on Vulkan looks higher per-request, possibly from pipeline-state / descriptor-set initialisation. On `rag_prefill` (which post-cache hit reduces TTFT to a near-no-op), the engines tie.
+
+**Why the small model showed Vulkan winning and the large dense Q8 didn't:** on small, decode tok/s is ~80, so even modest per-token wins translate to large delta absolutes. On large_dense Q8, decode is memory-bandwidth-bound at ~7 tok/s (we're saturating the unified-memory bandwidth ceiling, not GPU compute), so engine differences in compute kernels don't move the needle. The Vulkan TTFT regression *does* show up because that's purely setup-cost dominated. The [llama.cpp Issue #13565](https://github.com/ggml-org/llama.cpp/issues/13565) cited earlier is a real upstream issue but the empirical answer is much more nuanced than "Vulkan beats HIP."
+
+**LM Studio's bundled `amd-rocm-avx2 v2.16.0` runtime is broken on gfx1151** — it crashes the inference child process within ~5 seconds of any `lms load`, both via the CLI and via the OpenAI shim's auto-load. The failure persists across `lms server stop/start`, a full LM Studio desktop-app restart, **and a full system reboot**. Conclusion: it's a real LMS/ROCm bundle bug for this hardware, not a transient stuck state. LMS users on Strix Halo should use the Vulkan runtime. The LMS mid/large_dense/large_moe numbers in this report are all from LMS's `vulkan-avx2 v2.16.0` runtime; the small-model LMS-ROCm vs LMS-Vulkan A/B from earlier today showed ≤1% delta between the two on that hardware, so LMS-Vulkan is a reasonable proxy for what LMS-ROCm would produce *if* the bundled ROCm runtime weren't crashing.
+
+LMS pays a consistent **~1–1.5 s TTFT tax** vs direct `llama-server` regardless of engine, due to the OpenAI shim + LMS's reasoning-mode parser overhead.
 
 ### 3. Ollama is materially slower than the other three tools on every model
 
@@ -176,9 +187,9 @@ Per-stream throughput drops 15–40% under 4-way concurrency, with aggregate hit
 
 ### LM Studio engine note
 
-- **`small` LMS data is from the ROCm runtime** (2026-05-23 run, before the runtime stuck-state developed).
-- **`mid` / `large_dense` / `large_moe` LMS data is from the Vulkan runtime** (today, after ROCm got stuck mid-session and didn't recover from `lms server stop/start` or a full desktop-app restart — looks like a kernel-level AMD ROCm runtime issue that needs a system reboot to clear).
-- The 2026-05-24 engine A/B page showed LMS-ROCm ≈ LMS-Vulkan within noise on small, so the mid/large numbers shouldn't be far off what ROCm would have produced.
+- **`small` LMS data is from the ROCm runtime** (2026-05-23 run + 2026-05-24 engine A/B), with a matched Vulkan A/B row showing the two engines land within ~1% of each other on small.
+- **`mid` / `large_dense` / `large_moe` LMS data is from the Vulkan runtime.** Two separate LMS-ROCm attempts (mid-session and again post-reboot) failed identically: `Error loading model. Exit code: null`, with the bundled inference child process exiting within ~5 s of any load — same outcome via the `lms load` CLI and the OpenAI shim's auto-load. The failure pattern (consistent, repeatable, survives system reboot) points at the bundled `amd-rocm-avx2 v2.16.0` runtime being incompatible with `gfx1151` on the current LM Studio desktop build — not a transient stuck state we mistook for one. LMS users on Strix Halo should select the Vulkan runtime; that's what these published numbers use.
+- Engine A/B on `large_dense` (separate run, full 2×2 with LlamaStash + raw `llama-server`) confirms decode is engine-independent at this size (within 1% across HIP and Vulkan) while TTFT is workload-shape sensitive. The LMS-Vulkan numbers should track LMS-ROCm if it worked.
 
 ### LM Studio CLI vs shim discovery
 
