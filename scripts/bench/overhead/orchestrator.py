@@ -295,7 +295,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     f"tier={tier.value}",
   ]
   if not argv_match:
-    notes_parts.append("argv-comparison-skipped: see methodology.md")
+    # We attempted the comparison and recorded a diff; it just wasn't
+    # meaningful (LlamaStash CLI argv vs llama-server effective argv).
+    # Replace this note once the daemon exposes the effective argv via
+    # IPC and the orchestrator can compare apples to apples.
+    notes_parts.append("argv-comparison-unavailable: see methodology.md")
   notes = "; ".join(notes_parts)
 
   model_spec = ModelSpec(

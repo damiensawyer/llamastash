@@ -1,9 +1,11 @@
 """Aggregation + rendering pipeline (Unit 5).
 
-Reads all ``docs/benchmarks/runs/**/*.json`` (Suite B) plus the
-per-host overhead JSONs, validates them against schema v1, applies
-the variance gate, writes a dated Markdown results page, and
-prepends a link to ``docs/benchmarks/index.md``.
+Reads all ``docs/benchmarks/runs/**/*.json`` (Suite B), validates
+them against schema v1, applies the variance gate, writes a dated
+Markdown results page, and prepends a link to
+``docs/benchmarks/index.md``. Suite A overhead JSONs live under
+``docs/benchmarks/overhead/`` and are surfaced by their own
+orchestrator output, not this renderer.
 
 The variance gate (R140):
 - stddev / mean × 100 ≤ 10%  → published, no annotation
@@ -268,7 +270,11 @@ def render_results_page(
   for (model, workload), rows in sorted(grouped.items()):
     out_lines.append(f"## {model} — {workload}")
     out_lines.append("")
-    headline_rows = [(c, h) for (c, h) in rows if classify_cell(c) != CellStatus.DROPPED]
+    # Headline charts are CLEAN-only per the variance-gate contract
+    # (FLAGGED cells stay in the detail table with `±%` annotation but
+    # are excluded from headline bars so noisy results don't anchor the
+    # eye). DROPPED cells go to the footer "re-run needed" note.
+    headline_rows = [(c, h) for (c, h) in rows if classify_cell(c) == CellStatus.CLEAN]
     headline_cells = [c for (c, _h) in headline_rows]
     chart_dir = charts_dir
     decode_chart = chart_dir / f"{model}-{workload}-decode.svg"

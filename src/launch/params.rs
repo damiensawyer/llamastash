@@ -819,6 +819,7 @@ mod tests {
 
   #[test]
   fn resolve_layered_first_some_wins_per_field() {
+    let _lock = crate::cli::test_lock::serialize();
     let upper = TypedKnobs {
       threads: Some(8),
       ..TypedKnobs::default()
@@ -861,6 +862,7 @@ mod tests {
 
   #[test]
   fn resolve_layered_walks_full_precedence_chain() {
+    let _lock = crate::cli::test_lock::serialize();
     // R106: preset > last_used > yaml-arch > built-in. Same field
     // contributed by every layer — the highest precedence wins.
     let preset = TypedKnobs {
@@ -891,6 +893,7 @@ mod tests {
 
   #[test]
   fn resolve_layered_yaml_and_builtin_both_report_arch_default() {
+    let _lock = crate::cli::test_lock::serialize();
     // Yaml and the compiled-in arch table share the `ArchDefault`
     // chip — only their per-field precedence differs.
     let yaml = TypedKnobs {
@@ -1034,8 +1037,11 @@ mod tests {
   #[test]
   fn bench_disable_defaults_env_var_is_strict_one() {
     // Mirrors the LLAMASTASH_ASSUME_NON_TTY contract: only "1" is on.
-    // Test via the env var directly with set/restore. Marked sequential
-    // by virtue of being the only test that touches this env var.
+    // Test via the env var directly with set/restore. Holds the shared
+    // `cli::test_lock` so the sibling `resolve_layered_*` tests (which
+    // also grab the lock) can't observe our temporary "1" and collapse
+    // to user-only layers mid-assertion.
+    let _lock = crate::cli::test_lock::serialize();
     let saved = std::env::var_os("LLAMASTASH_BENCH_DISABLE_DEFAULTS");
     let restore = || match &saved {
       Some(v) => std::env::set_var("LLAMASTASH_BENCH_DISABLE_DEFAULTS", v),
