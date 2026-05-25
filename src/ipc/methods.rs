@@ -953,28 +953,30 @@ impl From<LaunchModeWire> for LaunchMode {
 /// the `capabilities` handler so clients can feature-detect. The
 /// names here mirror the wire spec in `docs/architecture.md`; a new
 /// method must be added in both places.
+const PUBLIC_METHODS: &[&str] = &[
+  "ping",
+  "version",
+  "capabilities",
+  "shutdown",
+  "list_models",
+  "status",
+  "start_model",
+  "stop_model",
+  "stop_all",
+  "stop_external",
+  "logs_tail",
+  "presets_list",
+  "presets_save",
+  "presets_delete",
+  "presets_show",
+  "favorite_add",
+  "favorite_remove",
+  "favorite_list",
+  "last_params_list",
+];
+
 fn supported_methods() -> Vec<&'static str> {
-  let mut v = vec![
-    "ping",
-    "version",
-    "capabilities",
-    "shutdown",
-    "list_models",
-    "status",
-    "start_model",
-    "stop_model",
-    "stop_all",
-    "stop_external",
-    "logs_tail",
-    "presets_list",
-    "presets_save",
-    "presets_delete",
-    "presets_show",
-    "favorite_add",
-    "favorite_remove",
-    "favorite_list",
-    "last_params_list",
-  ];
+  let mut v = PUBLIC_METHODS.to_vec();
   v.sort();
   v
 }
@@ -1634,6 +1636,21 @@ mod tests {
     assert!(body["pid"].is_number());
     assert!(body["uptime_seconds"].is_number());
     assert_eq!(body["connections"], json!(0));
+  }
+
+  #[tokio::test]
+  async fn capabilities_reports_sorted_public_method_surface() {
+    let resp = dispatch_request(&ctx(), Request::new(1, "capabilities", None)).await;
+    let body = resp.result.expect("capabilities returns result");
+    let methods = body["methods"].as_array().expect("methods array");
+    let methods: Vec<&str> = methods
+      .iter()
+      .map(|v| v.as_str().expect("method names are strings"))
+      .collect();
+
+    let mut expected = PUBLIC_METHODS.to_vec();
+    expected.sort();
+    assert_eq!(methods, expected);
   }
 
   #[tokio::test]
