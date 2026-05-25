@@ -119,6 +119,29 @@ def group_cells_by_model_workload(
 # ---- Markdown rendering -----------------------------------------
 
 
+ENGINE_SUFFIX_LABELS: tuple[tuple[str, str], ...] = (
+  ("hip-rocwmma-on", "HIP+rocWMMA"),
+  ("hip-rocwmma-off", "HIP/ROCm"),
+  ("lms-vulkan", "Vulkan"),
+  ("vulkan", "Vulkan"),
+  ("rocm", "HIP/ROCm"),
+  ("clean70w", "HIP/ROCm"),
+)
+
+
+def _engine_variants(hosts: list[str]) -> list[str]:
+  variants: list[str] = []
+  for host in hosts:
+    label = "HIP/ROCm"
+    for suffix, candidate in ENGINE_SUFFIX_LABELS:
+      if host.endswith(suffix):
+        label = candidate
+        break
+    if label not in variants:
+      variants.append(label)
+  return variants
+
+
 def _format_metric(mean: Optional[float], stddev_pct: Optional[float], unit: str) -> str:
   if mean is None:
     return "—"
@@ -246,13 +269,15 @@ def render_results_page(
   all_cells: list[Cell] = [c for run in runs for c in run.report.cells]
   hosts = sorted({r.report.host.host_id for r in runs})
   backends = sorted({r.report.host.gpu_backend for r in runs})
+  engine_variants = _engine_variants(hosts)
   primary_backend = primary_backend or backends[0]
 
   out_lines: list[str] = [
     f"# Bench results — {date}",
     "",
     f"_Source: {len(runs)} run file(s) from host(s) {', '.join(hosts)} "
-    f"on backend(s) {', '.join(backends)}._",
+    f"on GPU backend(s) {', '.join(backends)}; engine variants in this page: "
+    f"{', '.join(engine_variants)}._",
     "",
   ]
   if preamble:

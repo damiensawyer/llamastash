@@ -2,7 +2,7 @@
 
 **Hardware:** AMD Ryzen AI Max+ 395 ("Strix Halo") APU with Radeon 8060S iGPU (RDNA 3.5, `gfx1151`), 121 GiB unified RAM (4 GiB pinned VRAM partition + ≈96 GiB GTT), TDP 70 W steady (one mid-run blip to 90 W on the Qwen3.6-27B-Q8 dense run was confirmed benign by a clean 70 W re-run within ~1% of the mixed-power numbers).
 
-**Date:** 2026-05-24. Same hardware, same day, same llama.cpp commit (b9282) for the LlamaStash + raw `llama-server` cells (HIP build, `GGML_HIP_ROCWMMA_FATTN=OFF` per the earlier empirical finding documented in `~/dotfiles/LLM-BENCH.md`).
+**Date:** 2026-05-24. Same hardware, same day, same local llama.cpp build recorded in the benchmark JSON provenance as `version: 9245 (b39a7bf1b)` for the LlamaStash + raw `llama-server` cells (HIP build, `GGML_HIP_ROCWMMA_FATTN=OFF` per the earlier empirical finding documented in `~/dotfiles/LLM-BENCH.md`).
 
 **Models (per R1 release checklist for this hardware class — all four covered):**
 
@@ -15,8 +15,8 @@
 
 **Tools:**
 
-- **LlamaStash** (this repo) — `LLAMASTASH_LLAMA_SERVER` pointed at the b9282 HIP build for the main numbers; a Vulkan-built b9282 binary was used for the engine A/B on `small` (full matrix) and `large_dense` (full matrix).
-- **raw `llama-server`** — same b9282 HIP / Vulkan binaries, invoked directly.
+- **LlamaStash** (this repo) — `LLAMASTASH_LLAMA_SERVER` pointed at the local HIP build recorded as `version: 9245 (b39a7bf1b)` for the main numbers; a Vulkan build of the same version was used for the engine A/B on `small` (full matrix) and `large_dense` (full matrix).
+- **raw `llama-server`** — same local 9245 HIP / Vulkan binaries, invoked directly.
 - **Ollama 0.24.0** — own bundled engine. Each test GGUF imported on demand via Modelfile (SHA-256 verified against source).
 - **LM Studio** desktop with bundled `llama.cpp-linux-x86_64-vulkan-avx2-2.16.0` runtime. We *attempted* the bundled `amd-rocm-avx2 v2.16.0` runtime for mid / large_dense / large_moe both during the main run and again after a full system reboot. Both attempts failed identically (`Error loading model. Exit code: null`, inference child process crashes within ~5 s of any load). Treated as a known LMS / gfx1151 bundle incompatibility; LMS-Vulkan stays as the reference for mid / large_dense / large_moe. Small-model LMS data is from yesterday's clean LMS-ROCm session, and the engine-A/B on small showed LMS-ROCm ≈ LMS-Vulkan within ~1% on this hardware.
 
@@ -35,7 +35,7 @@ Average across `defaults` + `normalized` modes (within ~1% on this hardware for 
 | Tool / model | small (E2B Q4) | mid (31B Q4) | large_dense (27B Q8) | large_moe (35B-A3B Q8) |
 |---|---:|---:|---:|---:|
 | **LlamaStash** | **86.9 tok/s** | 9.8 tok/s | **7.4 tok/s** | **42.6 tok/s** |
-| raw `llama-server` (b9282 HIP) | 84.9 tok/s | 9.9 tok/s | 7.4 tok/s | 42.7 tok/s |
+| raw `llama-server` (local build) | 86.0 tok/s | 9.9 tok/s | 7.4 tok/s | 42.7 tok/s |
 | LM Studio (v2.16.0; small=ROCm, mid/large=Vulkan) | **91.1 tok/s** | **11.6 tok/s** | **7.9 tok/s** | 37.0 tok/s |
 | Ollama 0.24.0 | 50.4 tok/s | 4.8 tok/s | 2.6 tok/s | 12.1 tok/s |
 
@@ -44,7 +44,7 @@ Average across `defaults` + `normalized` modes (within ~1% on this hardware for 
 | Tool / model | small | mid | large_dense | large_moe |
 |---|---:|---:|---:|---:|
 | **LlamaStash** | **51** | **467** | **417** | **181** |
-| raw `llama-server` | 52 | 468 | 414 | 186 |
+| raw `llama-server` | 51 | 468 | 414 | 186 |
 | LM Studio | 187 | 1 477 | 1 274 | 683 |
 | Ollama | 223 | 1 092 | 1 745 | 476 |
 
@@ -54,10 +54,12 @@ Average across `defaults` + `normalized` modes (within ~1% on this hardware for 
 
 ### small — `gemma-4-E2B-Q4_K_M` (3.4 GB)
 
+Raw `llama-server` small-model summary cells use the standard HIP + Vulkan rows only. The separate rocWMMA on/off side experiment is reported later and is not folded into these headline averages.
+
 | Tool | chat_turn | agent_decode | rag_prefill | parallel_4 (aggregate) |
 |---|---|---|---|---|
 | LlamaStash | 86.9 / 51 | 85.8 / 56 | 74.8 / 55 | 208.7 / 187 |
-| raw `llama-server` | 84.9 / 52 | 84.4 / 57 | 73.4 / 57 | 207.3 / 184 |
+| raw `llama-server` | 86.0 / 51 | 85.7 / 56 | 73.4 / 57 | 207.3 / 184 |
 | LM Studio | 91.1 / 187 | 80.5 / 200 | — (load failure) | — (load failure) |
 | Ollama | 50.4 / 223 | 47.1 / 224 | 43.2 / **17 390** | 212.9 / 2 372 |
 
@@ -72,7 +74,7 @@ Average across `defaults` + `normalized` modes (within ~1% on this hardware for 
 
 ### large_dense — `Qwen3.6-27B-Q8_0` (27 GB)
 
-Full 2×2 engine A/B for LlamaStash + raw `llama-server` (HIP and Vulkan, same b9282 commit, two compile targets). Earlier mixed-power (70 W → 90 W mid-run) was confirmed benign by a clean 70 W re-run within ~1%; published HIP numbers are from the clean re-run.
+Full 2×2 engine A/B for LlamaStash + raw `llama-server` (HIP and Vulkan, same local 9245 build, two compile targets). Earlier mixed-power (70 W → 90 W mid-run) was confirmed benign by a clean 70 W re-run within ~1%; published HIP numbers are from the clean re-run.
 
 | Tool | Engine | chat_turn | agent_decode | rag_prefill | parallel_4 (aggregate) |
 |---|---|---|---|---|---|
@@ -104,7 +106,7 @@ On every model × workload × mode tested, **LlamaStash decode tok/s tracks raw 
 
 ### 2. Engine choice (HIP vs Vulkan) is workload- and model-size-dependent — not a simple "Vulkan wins"
 
-The small-model engine A/B (run earlier today) showed our local **Vulkan build of b9282 ~17–20% faster than HIP** on `chat_turn` / `agent_decode`. That single data point was misleading. Re-running the same A/B properly on `large_dense` (Qwen3.6-27B-Q8) — same b9282 commit, two compile targets, run on a clean GPU after a power-state reset — paints a very different picture:
+The small-model engine A/B (run earlier today) showed our local **Vulkan build of 9245 ~17–20% faster than HIP** on `chat_turn` / `agent_decode`. That single data point was misleading. Re-running the same A/B properly on `large_dense` (Qwen3.6-27B-Q8) — same local 9245 build, two compile targets, run on a clean GPU after a power-state reset — paints a very different picture:
 
 | Workload | LlamaStash HIP | LlamaStash Vulkan | Δ |
 |---|---:|---:|---:|
@@ -130,7 +132,7 @@ Even with `LLAMASTASH_BENCH_KEEP_IMPORTS=1`:
 
 | Model | Ollama / raw llama-server chat decode | Ollama TTFT vs raw |
 |---|---:|---:|
-| small | 50.4 / 84.9 (−41%) | 4.3× slower |
+| small | 50.4 / 86.0 (−41%) | 4.3× slower |
 | mid | 4.8 / 9.9 (−52%) | 2.3× slower |
 | large_dense | 2.6 / 7.4 (−65%) | 4.2× slower |
 | large_moe | 12.1 / 42.7 (−72%) | 2.6× slower |
