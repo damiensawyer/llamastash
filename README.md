@@ -2,7 +2,7 @@
 
 ![Logo](./assets/logo-h.jpg)
 
-A fast, keyboard-driven TUI **and** CLI with init wizard for launching local LLMs via [llama.cpp](https://github.com/ggml-org/llama.cpp) with zero overhead. See [benchmarks](todo).
+A fast, keyboard-driven TUI **and** CLI with init wizard for launching local LLMs via [llama.cpp](https://github.com/ggml-org/llama.cpp) with zero overhead. See [benchmarks](docs/benchmarks.md).
 
 ## Why
 
@@ -129,14 +129,18 @@ Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs
 
 ## Benchmarks
 
-LlamaStash spawns the unmodified upstream `llama-server`. That means two distinct questions matter, and both are tracked under [`docs/benchmarks/`](docs/benchmarks/):
+LlamaStash spawns the unmodified upstream `llama-server`. Two suites track what that means in practice — **Suite A** asserts the wrapper adds no measurable overhead vs raw `llama-server`, **Suite B** compares LlamaStash-as-shipped against Ollama + LM Studio on the same hardware through their OpenAI-compatible endpoints. Full write-up + per-workload tables: [`docs/benchmarks.md`](docs/benchmarks.md).
 
-- **Suite A — overhead vs raw `llama-server`.** Same model + same effective argv, run twice (raw and through LlamaStash). The architectural claim is "near-zero overhead"; Suite A's two-tier threshold makes that a regression check, not a marketing line.
-- **Suite B — cross-tool end-to-end.** LlamaStash, raw `llama-server`, Ollama, and LM Studio on the same model + same hardware, driven through their OpenAI-compatible HTTP endpoints. Both *defaults* and *normalized* modes (same effective knobs to the extent each tool exposes them).
+### AMD APU - Linux (Ryzen AI Max+ 395 / Radeon 8060S, `gfx1151`, llama.cpp `b9282`)
 
-Methodology, fairness notes, variance-gate rules, and the reproducibility contract live in [`docs/benchmarks/methodology.md`](docs/benchmarks/methodology.md). Published results pages are linked from [`docs/benchmarks/index.md`](docs/benchmarks/index.md). Re-run on your hardware with `make bench-end-to-end` (Suite B) or `make bench-overhead` (Suite A) — both are maintainer-run; there's no CI driving them.
+| Tool | small (E2B Q4) | mid (31B Q4) | large_dense (27B Q8) | large_moe (35B-A3B Q8) | Engine notes |
+|---|---:|---:|---:|---:|---|
+| **LlamaStash** | **86.9 / 51** | 9.8 / 467 | **7.4 / 417** | **42.6 / 181** | b9282 HIP/ROCm |
+| raw `llama-server` | 84.9 / 52 | 9.9 / 468 | 7.4 / 414 | 42.7 / 186 | b9282 HIP/ROCm |
+| LM Studio 2.16.0 | **91.1** / 187 | **11.6** / 1 477 | **7.9** / 1 274 | 37.0 / 683 | small=ROCm, mid/large=Vulkan |
+| Ollama 0.24.0 | 50.4 / 223 | 4.8 / 1 092 | 2.6 / 1 745 | 12.1 / 476 | bundled |
 
-> _The first published results page lands once the harness completes its dry run on the maintainer's primary backend. Until then, the methodology doc and the per-host JSON layout are the public surface._
+Each cell is **decode tok/s / TTFT ms** on the `chat_turn` workload (50-token prompt → 64 tokens decode), averaged across `defaults` + `normalized` modes. LlamaStash matches raw `llama-server` within ≤1% on every cell. Curated report with seven findings: [`r1-amd-apu-final-report.md`](docs/benchmarks/r1-amd-apu-final-report.md). Re-run on your hardware: `make bench-end-to-end` (Suite B) or `make bench-overhead` (Suite A).
 
 ## Configuration
 
