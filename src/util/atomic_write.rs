@@ -16,6 +16,7 @@
 //! the rename target dir has a permissive umask whose mode bits a
 //! future `rename` implementation might pick up.
 
+use std::fs::File;
 use std::io;
 use std::path::Path;
 
@@ -59,6 +60,12 @@ pub fn write_secure(
   tmp
     .persist(final_path)
     .map_err(|e| io::Error::other(e.error))?;
+  #[cfg(unix)]
+  {
+    // The file contents are durable after the tempfile fsync above, but the
+    // rename is not crash-safe until the parent directory is fsynced too.
+    File::open(dir)?.sync_all()?;
+  }
   Ok(body.len() as u64)
 }
 

@@ -600,7 +600,7 @@ async fn pump_stream<R>(
         // emit them verbatim. One owned clone here is the cost; the
         // alternative (sharing through Arc<str>) costs more allocs
         // overall under steady-state write rate.
-        inner.ring.lock().await.push(scratch.clone());
+        inner.ring.lock().await.push_copy(&scratch);
         if !disk_writes_disabled {
           let mut file = log_file.lock().await;
           if let Err(e) = file.write_line(scratch.as_bytes()).await {
@@ -743,11 +743,19 @@ impl RingBuffer {
     }
   }
 
-  fn push(&mut self, line: String) {
-    if self.inner.len() == self.capacity {
-      self.inner.pop_front();
+  fn push_copy(&mut self, line: &str) {
+    if self.capacity == 0 {
+      return;
     }
-    self.inner.push_back(line);
+    if self.inner.len() == self.capacity {
+      if let Some(mut reused) = self.inner.pop_front() {
+        reused.clear();
+        reused.push_str(line);
+        self.inner.push_back(reused);
+        return;
+      }
+    }
+    self.inner.push_back(line.to_owned());
   }
 
   fn tail(&self, max: usize) -> Vec<String> {
@@ -795,10 +803,10 @@ mod tests {
   #[test]
   fn ring_buffer_drops_oldest_when_full() {
     let mut r = RingBuffer::with_capacity(3);
-    r.push("a".into());
-    r.push("b".into());
-    r.push("c".into());
-    r.push("d".into());
+    r.push_copy("a");
+    r.push_copy("b");
+    r.push_copy("c");
+    r.push_copy("d");
     assert_eq!(r.tail(10), vec!["b", "c", "d"]);
   }
 
@@ -806,7 +814,7 @@ mod tests {
   fn ring_buffer_tail_respects_max() {
     let mut r = RingBuffer::with_capacity(5);
     for i in 0..5 {
-      r.push(format!("{i}"));
+      r.push_copy(&format!("{i}"));
     }
     let t = r.tail(2);
     assert_eq!(t, vec!["3", "4"]);
@@ -815,9 +823,16 @@ mod tests {
   #[test]
   fn ring_buffer_tail_clamps_when_max_exceeds_len() {
     let mut r = RingBuffer::with_capacity(5);
-    r.push("only".into());
+    r.push_copy("only");
     let t = r.tail(100);
     assert_eq!(t, vec!["only"]);
+  }
+
+  #[test]
+  fn ring_buffer_zero_capacity_stays_empty() {
+    let mut r = RingBuffer::with_capacity(0);
+    r.push_copy("ignored");
+    assert!(r.tail(10).is_empty());
   }
 
   #[test]

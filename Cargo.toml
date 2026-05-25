@@ -118,9 +118,6 @@ which = "8"
 # Hand-rolled error enums migrated to `thiserror` derives during the
 # Tier-D audit pass (audit §3 #4).
 thiserror = "2"
-# `fd-lock` replaces the hand-rolled PID lockfile (audit §2.1 #1).
-# Same crate Cargo uses for its own lockfile.
-fd-lock = "4"
 # `tempfile` replaces the hand-rolled atomic state-write path
 # (audit §2.1 #2). Already transitive via dev-deps; pulled to
 # the top level so production code can call `persist` directly.

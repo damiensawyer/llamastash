@@ -60,34 +60,36 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 - [x] ~~Daemon does not restart on ctrl+r~~ — `handle_restart_daemon` was waiting for the old daemon's socket to become unconnectable, but the daemon releases its lockfile _after_ the listener drops (accept-loop exit → drain → `stop_all_managed` → remove socket → drop lockfile). The replacement child's `acquire` raced into that window, hit a contended `flock`, exited with `AlreadyRunning`, and `start_detached` reported a failure with no new daemon coming up — the TUI then stuck on "daemon connecting…" until the user retried. Fix: poll `existing_daemon_pid` (now `pub(crate)`) for `None` instead of socket connectivity, and bump the deadline from 3s → 8s to cover the worst-case `stop_all_managed` grace.
 - [x] ~~Remap ctrl+r: think to something else~~ r should work when editing is not active (hint should show as well)
 - [x] ~~Proxy port should use next available in 1143x range, not hardcoded to 11434. It should start with 11434 and keep trying next if unavailable, up to 11439.~~ — `ServeOptions::port_scan_max_offset` (default `5`) drives a sequential `bind_with_scan` over `port..=port+5`; the listener binds the first free slot and reports the actual address via `proxy.listen`. `AddrInUse` advances; any other bind error is fatal (no point pretending the next port will fare better than `EACCES`). All six taken → `proxy.status: "port_in_use"` (same surface as v0). Strict single-port behaviour is preserved for callers (and the regression test) that pass `port_scan_max_offset: 0`.
-- [ ] DRY/YAGNI audit. Move to libs etc.
+- [x] DRY/YAGNI audit. Move to libs etc.
   - Q: Do a full audit of the codebase for the below. Do not use agents, do a sanity check for the below. Cut the noise and report only what actually will matter
-  - 1.  Major security or perfromance issues.
-  - 2.  Too much code duplication. cut the noise just look for anyting that is dumb and can be easily fixed.
-  - 3. Something that can easily be from a library. We should cutdown LoC if its easily replaceable.
-  - any other major issue based on your own intuition and experience.
+    - 1.  Major security or perfromance issues.
+    - 2.  Too much code duplication. cut the noise just look for anyting that is dumb and can be easily fixed.
+    - 3. Something that can easily be from a library. We should cutdown LoC if its easily replaceable.
+    - any other major issue based on your own intuition and experience.
+  - [docs/reviews/review-2026-05-24.md](docs/reviews/review-2026-05-24.md)
 
 ### Release checklist
 
-- [ ] **In progress**: Benchmark against ollama, LMStudio and other popular options.
-  - [ ] AMD APU : Linux
-    - [ ] Qwen3.6-27B-Q8_0
-    - [ ] gemma-4-31B-it-Q4_K_M
-    - [ ] gemma-4-E2B-it-Q4_K_M
-    - [ ] Qwen3.6-35B-A3B-Q8_0
+- [ ] **IP**: Benchmark against Ollama, LMStudio and other popular options.
+  - [x] AMD APU : Linux
+    - [x] Qwen3.6-27B-Q8_0
+    - [x] gemma-4-31B-it-Q4_K_M
+    - [x] gemma-4-E2B-it-Q4_K_M
+    - [x] Qwen3.6-35B-A3B-Q8_0
   - [ ] AMD GPU : Linux
-    - [ ] gemma-4-E2B-it-Q4_K_M
+    - [ ] gemma-4-E2B-it-Q4_K_M defaults
   - [ ] Nvidia : Linux
-    - [ ] gemma-4-E2B-it-Q4_K_M
+    - [ ] gemma-4-E2B-it-Q4_K_M defaults
   - [ ] Apple Silicon : macOS
-    - [ ] gemma-4-E2B-it-Q4_K_M
-- [ ] Test Proxy with OpenCode.
+    - [ ] gemma-4-E2B-it-Q4_K_M defaults
+- [ ] **IP**: Test Proxy with OpenCode.
+  - [ ] Proxy quick benchmark
 - [ ] Manual UAT smoke run
   - [ ] AMD APU : Linux
   - [ ] AMD GPU : Linux
   - [ ] Nvidia : Linux
   - [ ] Apple Silicon : macOS
-- [ ] **In progress**: Update Readme, repo, org and website properly
+- [ ] **IP**: Update Readme, repo, org and website properly
 - [ ] Audit (binary size, dependencies, test coverage, security, etc.).
 - [ ] Check and sync all docs, validate all repo docs
 - [ ] Release setup validation (website/CI/CD etc).
@@ -99,6 +101,7 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 
 ### Follow-up
 
+- [ ] Offer to update OpenCode and other supported tools during `init`
 - [ ] Add a line in help page about the `*` in the `RAM*` in Host panel.
 - [ ] check and make sure HTTP and CLI surfaces are consistent and reuses code and flow where it makes sense.
 - [ ] `show` command shows model info. gguf parses values, full path, size, etc, arch defauklts, last run vals, and any other useful stuff
