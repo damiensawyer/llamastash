@@ -14,7 +14,10 @@ use serde::Serialize;
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 
 fn thread_count(proc: &sysinfo::Process) -> u32 {
-  proc.tasks().map(|tasks| (tasks.len() as u32).max(1)).unwrap_or(1)
+  proc
+    .tasks()
+    .map(|tasks| (tasks.len() as u32).max(1))
+    .unwrap_or(1)
 }
 
 /// One reading. Returned by [`sample`] and via the supervisor's

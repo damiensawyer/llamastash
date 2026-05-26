@@ -100,7 +100,7 @@ Two release tracks:
   - [x] website
 - [ ] Publish to clawhub
 - [ ] Release setup validation (CI/CD etc).
-- [ ] Setup llamastash.dev domain
+- [x] Setup llamastash.dev domain
 - [ ] **R1 launch promotion** — telling the world about v0.0.1.
   - [ ] **Need brainstorm/plan**: Release blog.
   - [ ] **Need brainstorm/research/plan**: Social promotion — research an approach for max reach.
