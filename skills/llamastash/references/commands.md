@@ -11,7 +11,7 @@ Agent-facing command reference. Prefer the JSON forms documented here.
 brew install llamastash/llamastash/llamastash
 
 # Linux
-curl -fsSL https://llamastash.cli.rs/install.sh | sh
+curl -fsSL https://llamastash.dev/install.sh | sh
 
 # Portable fallback
 cargo install llamastash --locked

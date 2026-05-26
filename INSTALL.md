@@ -14,7 +14,7 @@ LlamaStash is a single binary. Pick whichever distribution channel you prefer; a
 ### Option 1 — One-shot install script (macOS + Linux)
 
 ```bash
-curl -fsSL https://llamastash.cli.rs/install.sh | sh
+curl -fsSL https://llamastash.dev/install.sh | sh
 ```
 
 The script detects your platform, downloads the matching pre-built tarball from the latest GitHub Release, verifies its SHA-256, and drops `llamastash` into `~/.local/bin` (or `/usr/local/bin` if writable). The marketing-site URL is a content-verified mirror of the script published with each release. For the most paranoid path, run the equivalent directly from GitHub:
@@ -100,7 +100,7 @@ Prefer the channel the user's environment already provides:
 brew install llamastash/llamastash/llamastash
 
 # Linux / generic
-curl -fsSL https://llamastash.cli.rs/install.sh | sh
+curl -fsSL https://llamastash.dev/install.sh | sh
 
 # Portable fallback
 cargo install llamastash --locked

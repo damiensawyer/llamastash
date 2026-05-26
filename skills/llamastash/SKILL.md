@@ -42,7 +42,7 @@ If `llamastash` is missing or not configured yet, bring it up in this order:
    brew install llamastash/llamastash/llamastash
 
    # Linux
-   curl -fsSL https://llamastash.cli.rs/install.sh | sh
+   curl -fsSL https://llamastash.dev/install.sh | sh
 
    # Portable fallback
    cargo install llamastash --locked

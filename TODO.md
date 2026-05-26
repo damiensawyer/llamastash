@@ -100,7 +100,7 @@ Two release tracks:
   - [ ] website
 - [ ] Publish to clawhub
 - [ ] Release setup validation (CI/CD etc).
-- [ ] Add llamastash to cli.rs https://github.com/zackify/cli.rs/pull/1/changes — Unit 7 cutover step, post-org-bootstrap.
+- [ ] Setup llamastash.dev domain
 - [ ] **R1 launch promotion** — telling the world about v0.0.1.
   - [ ] **Need brainstorm/plan**: Release blog.
   - [ ] **Need brainstorm/research/plan**: Social promotion — research an approach for max reach.

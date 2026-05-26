@@ -5,11 +5,11 @@ topic: release-setup
 
 # llamastash 0.2.0 Release Setup — Requirements
 
-> Companion to [`docs/brainstorms/llamatui-requirements.md`](./llamatui-requirements.md) (v1 R1–R47) and [`docs/brainstorms/2026-05-18-init-wizard-requirements.md`](./2026-05-18-init-wizard-requirements.md) (v2 R48–R80). This document covers the release-engineering and distribution surface needed to ship the first public binaries: org migration, distribution channels, install script, and the marketing site at `llamastash.cli.rs`. IDs continue from the v2 doc.
+> Companion to [`docs/brainstorms/llamatui-requirements.md`](./llamatui-requirements.md) (v1 R1–R47) and [`docs/brainstorms/2026-05-18-init-wizard-requirements.md`](./2026-05-18-init-wizard-requirements.md) (v2 R48–R80). This document covers the release-engineering and distribution surface needed to ship the first public binaries: org migration, distribution channels, install script, and the marketing site at `llamastash.dev`. IDs continue from the v2 doc.
 
 ## Problem Frame
 
-llamastash v1 and v2 are feature-complete enough that the README already advertises distribution channels that do not exist yet: *"`cargo install llamastash`, a Homebrew tap, and pre-built release binaries land alongside the first tagged release."* The current state is the opposite — the only path to a working binary is `git clone && cargo install --path .`. The `Cargo.toml`'s `repository` / `homepage` / `documentation` URLs all point at `github.com/llamastash/llamastash`, which is **not** the org the project will live under (`llamastash` per the existing kdash-rs convention). There is a `.github/workflows/release.yml` that builds tarballs on tag and uploads them to GH Releases — but nothing pushes to crates.io, no Homebrew tap exists, there is no install script, no website, and no CNAME for `llamastash.cli.rs`.
+llamastash v1 and v2 are feature-complete enough that the README already advertises distribution channels that do not exist yet: *"`cargo install llamastash`, a Homebrew tap, and pre-built release binaries land alongside the first tagged release."* The current state is the opposite — the only path to a working binary is `git clone && cargo install --path .`. The `Cargo.toml`'s `repository` / `homepage` / `documentation` URLs all point at `github.com/llamastash/llamastash`, which is **not** the org the project will live under (`llamastash` per the existing kdash-rs convention). There is a `.github/workflows/release.yml` that builds tarballs on tag and uploads them to GH Releases — but nothing pushes to crates.io, no Homebrew tap exists, there is no install script, no website, and no CNAME for `llamastash.dev`.
 
 The goal of 0.2.0 is to close the gap between what the README promises and what actually works. A user landing on the marketing site or the README should pick *exactly one* of three commands and have a working binary on `$PATH` in under thirty seconds — no manual unzip, no quarantine workaround, no `cargo install --git` fallback.
 
@@ -18,7 +18,7 @@ This document is **release-engineering only**. The functional surface of 0.2.0 (
 The release surface mirrors the **engineering** structure of [kdash-rs](https://github.com/kdash-rs) (org layout, brew tap naming, install-script shape, release flow) but **not** its website aesthetic. The site is its own visual brand: opencode.ai's section structure rendered in Catppuccin Macchiato — the same palette the TUI uses by default — so site and tool feel like one product.
 
 Audience:
-- **Primary:** a developer landing on `llamastash.cli.rs` from Hacker News / a colleague's share, who wants a binary on disk in one command.
+- **Primary:** a developer landing on `llamastash.dev` from Hacker News / a colleague's share, who wants a binary on disk in one command.
 - **Secondary:** an existing user upgrading from a `cargo install --path .` build to the published 0.2.0 tag.
 - **Tertiary:** maintainers (currently one) — the release workflow must be hands-off after `git tag v0.2.0 && git push --tags`. Manual steps drift.
 
@@ -29,8 +29,8 @@ Audience:
 - **R81.** The main source repo lives at `github.com/llamastash/llamastash`. The local working tree (verified at doc-write time) has **no `origin` remote configured** and `github.com/llamastash/llamastash` does **not** exist on GitHub — the `Cargo.toml` URL pointing there was aspirational, not a reference to an existing repo. Setup is therefore a first-push, not a transfer: create `llamastash/llamastash` (empty), `git remote add origin git@github.com:llamastash/llamastash.git`, push `main`. `Cargo.toml` keys `repository`, `homepage`, `documentation` and every `README.md` / `AGENTS.md` / `CONTRIBUTING.md` reference update to the new URL in the **same commit** that adds the remote — so the first thing the new repo sees is consistent metadata, not the wrong-org URL. No dangling `llamastash/llamastash` URLs anywhere in the initial commit history visible after push.
 - **R82.** Supporting repos under `llamastash`:
   - `llamastash/homebrew-llamastash` — Homebrew tap. Contains `Formula/llamastash.rb` and a `bump.yml` workflow that listens for `repository_dispatch` events from the main repo.
-  - `llamastash/llamastash.github.io` — GitHub Pages org default repo. Source for the marketing site; deployed to `llamastash.cli.rs` via CNAME.
-  - `llamastash/.github` (optional, recommended) — org profile repo with a `profile/README.md` rendered on the org page. Short description, link to llamastash.cli.rs, link to llamastash repo.
+  - `llamastash/llamastash.github.io` — GitHub Pages org default repo. Source for the marketing site; deployed to `llamastash.dev` via CNAME.
+  - `llamastash/.github` (optional, recommended) — org profile repo with a `profile/README.md` rendered on the org page. Short description, link to llamastash.dev, link to llamastash repo.
   - **Not** separate repos for the install script (kept in main repo, see R91), or for AUR / Nix / Snap / Docker packaging (deferred to 0.2.x point releases, see R100–R103).
 
 **Release Artifact Pipeline (extends existing `release.yml`)**
@@ -69,8 +69,8 @@ Audience:
 
 **Install Script**
 
-- **R91.** Single shell script at `scripts/install.sh` in the main repo. Source of truth. **The script that users pipe into `sh` is the highest-trust surface in the release, so the served copy is pinned to the per-tag immutable GitHub Release asset — not freely editable by the site repo.** On every release the script is uploaded as a GitHub Release asset alongside the tarballs (`install.sh` and `install.sh.sha256`, per R83). The website's `https://llamastash.cli.rs/install.sh` is served from `public/install.sh` in the site repo, but that file is **never hand-edited and never produced from `scripts/install.sh` directly** — it is regenerated by the site repo's `bump.yml` (R85 site dispatch handler) by fetching the GH Release asset and verifying its SHA-256 against the uploaded `install.sh.sha256` before commit. The verification step is the trust boundary: an attacker would need to compromise both the GH Release upload (gated by org-admin release permissions) AND the site repo's `bump.yml` workflow file to inject content. The committed `public/install.sh` carries an HTML-style provenance comment header (e.g. `# Source: github.com/llamastash/llamastash@v0.2.0/scripts/install.sh, SHA-256 verified at bump time`) so a grep over the site repo's history shows which release each copy came from. Users invoke either:
-  - `curl -fsSL https://llamastash.cli.rs/install.sh | sh` (preferred, short — content is the verified copy of the latest release's `install.sh`).
+- **R91.** Single shell script at `scripts/install.sh` in the main repo. Source of truth. **The script that users pipe into `sh` is the highest-trust surface in the release, so the served copy is pinned to the per-tag immutable GitHub Release asset — not freely editable by the site repo.** On every release the script is uploaded as a GitHub Release asset alongside the tarballs (`install.sh` and `install.sh.sha256`, per R83). The website's `https://llamastash.dev/install.sh` is served from `public/install.sh` in the site repo, but that file is **never hand-edited and never produced from `scripts/install.sh` directly** — it is regenerated by the site repo's `bump.yml` (R85 site dispatch handler) by fetching the GH Release asset and verifying its SHA-256 against the uploaded `install.sh.sha256` before commit. The verification step is the trust boundary: an attacker would need to compromise both the GH Release upload (gated by org-admin release permissions) AND the site repo's `bump.yml` workflow file to inject content. The committed `public/install.sh` carries an HTML-style provenance comment header (e.g. `# Source: github.com/llamastash/llamastash@v0.2.0/scripts/install.sh, SHA-256 verified at bump time`) so a grep over the site repo's history shows which release each copy came from. Users invoke either:
+  - `curl -fsSL https://llamastash.dev/install.sh | sh` (preferred, short — content is the verified copy of the latest release's `install.sh`).
   - `curl -fsSL https://github.com/llamastash/llamastash/releases/download/v0.2.0/install.sh | sh` (works without site, useful for issue templates and version pinning).
   - `curl -fsSL https://raw.githubusercontent.com/llamastash/llamastash/main/scripts/install.sh | sh` (uses the HEAD of `main` — useful for testing in PR branches; not recommended for end users since it floats with the main branch).
 - **R92.** Script contract:
@@ -85,7 +85,7 @@ Audience:
   - **No `PATH` mutation.** The script does not edit `~/.bashrc`, `~/.zshrc`, `~/.profile`, or any other shell startup file. Users put `~/.local/bin` on `$PATH` themselves; the script prints the one-line hint if it's missing.
 - **R93.** Script test surface: `scripts/install.sh` has a shellcheck pass in CI (`shellcheck -s sh scripts/install.sh` — `-s sh` forces POSIX-ish lint mode despite the Bash 3 target) and a Bats integration test (`scripts/install.test.bats`) that runs against a mock GH Releases endpoint and asserts: download + checksum-verify + extract for each of the four targets, refusal on Windows / unknown arch, refusal on checksum mismatch, idempotence on re-run.
 
-**Website (`llamastash.cli.rs`)**
+**Website (`llamastash.dev`)**
 
 - **R94.** Site source repo: `llamastash/llamastash.github.io`. Layout:
   ```
@@ -103,7 +103,7 @@ Audience:
     screenshots/*.png
   astro.config.mjs
   package.json
-  CNAME                 # contains exactly: llamastash.cli.rs
+  CNAME                 # contains exactly: llamastash.dev
   .github/workflows/
     deploy.yml          # build on push, deploy to gh-pages
     bump.yml            # repository_dispatch handler for R85
@@ -131,7 +131,7 @@ Audience:
      - *Is it Windows-compatible?* — llamastash is Linux + macOS first. Windows via WSL works today; building from source with `cargo install llamastash` works on native Windows but isn't pre-built or smoke-tested. A native Windows binary is on the 0.3.x roadmap — follow the project's GitHub Releases for the announcement. (Framed as a strategic focus, not an unflattering gap; the entry is included rather than omitted because visitors who care will find out anyway, and controlling the framing beats not.)
   7. **Footer** — three columns: Project (GitHub, Releases, Changelog), Community (Discussions, Issues), Brand (Apache logo + Catppuccin attribution + license + maintainer handle).
 - **R97.** Hero demo content: the `demo.cast` asciinema recording shows, in order, `llamastash list` (5–10 GGUFs found), `llamastash init --yes` (compressed to skip the slow download), the TUI launcher opening with the discovered-models list, a `Ctrl-Enter` launching `qwen2.5-coder-7b`, a one-line `curl ... /v1/chat/completions` returning a streaming response. Total runtime ≤ 40s. Recorded once, committed; no auto-regeneration on releases. A static PNG of the same scene serves as the `og:image` and the reduced-motion fallback.
-- **R98.** `llamastash.cli.rs` CNAME setup: the `cli.rs` domain is community-managed; subdomains are provisioned by opening a PR against the community zone-config repo (same mechanism used for `kdash.cli.rs`). The PR adds a CNAME record `llamastash IN CNAME llamastash.github.io.` to the zone file. The site can be built and deployed to `llamastash.github.io` (which works without the CNAME) before the PR merges — the CNAME flip is the *last* step that swaps the marketing-visible URL. The site repo's `CNAME` file (containing `llamastash.cli.rs`) should be committed in the same PR that announces 0.2.0 publicly, not before — GitHub Pages serves the cleaner `*.github.io` URL until the DNS resolves, so committing CNAME early without DNS just yields a broken hostname error.
+- **R98.** `llamastash.dev` CNAME setup: the `cli.rs` domain is community-managed; subdomains are provisioned by opening a PR against the community zone-config repo (same mechanism used for `kdash.cli.rs`). The PR adds a CNAME record `llamastash IN CNAME llamastash.github.io.` to the zone file. The site can be built and deployed to `llamastash.github.io` (which works without the CNAME) before the PR merges — the CNAME flip is the *last* step that swaps the marketing-visible URL. The site repo's `CNAME` file (containing `llamastash.dev`) should be committed in the same PR that announces 0.2.0 publicly, not before — GitHub Pages serves the cleaner `*.github.io` URL until the DNS resolves, so committing CNAME early without DNS just yields a broken hostname error.
 - **R99.** Deploy workflow: `deploy.yml` runs `astro build` on every push to `main` of the site repo, then publishes `dist/` to GitHub Pages via the official `actions/deploy-pages` + `actions/upload-pages-artifact` action pair. GitHub Pages's "Build and deployment" source for the repo must be set to **GitHub Actions** (not "Deploy from a branch") in the repo Pages settings — this is a one-time manual setup, not part of the workflow YAML. The `CNAME` file in `dist/` (copied from `public/CNAME`) routes the domain. Build time target: ≤ 30s on the standard GH runner (a static Astro site with no SSR easily clears this).
 
 **Deferred to 0.2.x Point Releases**
@@ -148,12 +148,12 @@ A user on a fresh macOS or Linux machine runs **exactly one** of these three com
 ```bash
 brew install llamastash/llamastash/llamastash
 cargo install llamastash
-curl -fsSL https://llamastash.cli.rs/install.sh | sh
+curl -fsSL https://llamastash.dev/install.sh | sh
 ```
 
 A maintainer running `git tag v0.2.0 && git push --tags` triggers a fully automated release: GH Releases publishes the four tarballs + `SHA256SUMS`, crates.io receives the published crate, the Homebrew tap formula is auto-bumped and committed, the site's install-script copy + tab version strings auto-refresh. **Zero manual post-tag steps.** Any failure in this chain is visible in the GitHub Actions tab of the originating repo and aborts the rest of the chain — no half-released state where crates.io has 0.2.0 but the tap is still on 0.1.x.
 
-`llamastash.cli.rs` resolves to a Catppuccin-Macchiato-themed single-page site whose three install commands match the working commands above, with an asciinema cast in the hero showing the TUI in under 40 seconds, and whose `Cargo.toml`-linked README, AGENTS.md, and Cargo metadata all point at `github.com/llamastash/llamastash` — no surviving references to the old `github.com/llamastash/llamastash` URL anywhere in the published 0.2.0 artifact.
+`llamastash.dev` resolves to a Catppuccin-Macchiato-themed single-page site whose three install commands match the working commands above, with an asciinema cast in the hero showing the TUI in under 40 seconds, and whose `Cargo.toml`-linked README, AGENTS.md, and Cargo metadata all point at `github.com/llamastash/llamastash` — no surviving references to the old `github.com/llamastash/llamastash` URL anywhere in the published 0.2.0 artifact.
 
 ## Scope Boundaries
 
@@ -173,10 +173,10 @@ These are deliberate omissions, not gaps:
 1. **The kdash-rs analogy is engineering-only.** Repo layout (`llamastash/llamastash`, `llamastash/homebrew-llamastash`, `llamastash/llamastash.github.io`), brew-tap conventions, install-script shape, and release-workflow patterns all mirror kdash-rs. The **website does not** — it's modeled on opencode.ai's structure, painted in Catppuccin Macchiato.
 2. **First tag is 0.2.0, foundation channels only.** Cargo, brew tap, install script, website. AUR / Nix / Snap / Docker (R100–R103) land in 0.2.x point releases. Holding 0.2.0 for the long tail is a worse outcome than shipping the foundation now and iterating.
 3. **No macOS signing, no Windows binaries for 0.2.0** — each independently justified above. Both decisions can be revisited in 0.3.x without breaking any 0.2.x user.
-4. **Install script source of truth is in the main repo at `scripts/install.sh`; the *served* copy at `llamastash.cli.rs/install.sh` is a content-verified mirror of the per-tag GitHub Release asset.** The site never edits the script by hand — it fetches from GH Releases and SHA-256-verifies before commit (R91 + R85). This shape was chosen over a Cloudflare 302 (more infra) and over dropping the short URL (worse UX). The trust boundary is the bump-workflow's verification step: tamper requires compromising both the GH Release upload AND the workflow file, which is enforceable via branch protection on the site repo's `.github/workflows/bump.yml` plus required reviews on any workflow change.
+4. **Install script source of truth is in the main repo at `scripts/install.sh`; the *served* copy at `llamastash.dev/install.sh` is a content-verified mirror of the per-tag GitHub Release asset.** The site never edits the script by hand — it fetches from GH Releases and SHA-256-verifies before commit (R91 + R85). This shape was chosen over a Cloudflare 302 (more infra) and over dropping the short URL (worse UX). The trust boundary is the bump-workflow's verification step: tamper requires compromising both the GH Release upload AND the workflow file, which is enforceable via branch protection on the site repo's `.github/workflows/bump.yml` plus required reviews on any workflow change.
 5. **Brew tap is end-to-end automated.** No manual `Formula/llamastash.rb` edits. Manual tap maintenance is where formulas drift; we automate it on day one. Initial formula is binary-only (R89); source-build is a `--HEAD` branch, not the default.
 6. **Crate name verification is the first planning-phase action.** If `llamastash` is unavailable on crates.io, the entire downstream chain (install command in README + site + brew tap + install.sh) has to use `llamastash-cli` instead. Catching this before tag is cheap; catching it after tag is a rollback.
-7. **CNAME + DNS for `llamastash.cli.rs` is a hard prerequisite, not part of the site build.** The site repo committing a `CNAME` file with `llamastash.cli.rs` is necessary but not sufficient — DNS on `cli.rs` has to point at `llamastash.github.io` first. Outstanding (see below).
+7. **CNAME + DNS for `llamastash.dev` is a hard prerequisite, not part of the site build.** The site repo committing a `CNAME` file with `llamastash.dev` is necessary but not sufficient — DNS on `cli.rs` has to point at `llamastash.github.io` first. Outstanding (see below).
 
 ## Dependencies / Assumptions
 

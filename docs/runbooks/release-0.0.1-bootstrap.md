@@ -23,7 +23,7 @@ gh --version         # 2.40+ recommended for the api commands below
 | --------------------------------------- | --------------------------------------- | ---------- | ------------------------------------- |
 | `llamastash/llamastash`                | Main source repo (this one)             | public     | Push `main` from the local checkout   |
 | `llamastash/homebrew-llamastash`       | Homebrew tap                            | public     | Push from `../homebrew-llamastash/`    |
-| `llamastash/llamastash.github.io`   | Marketing site → `llamastash.cli.rs`     | public     | Push from `../llamastash.github.io/` |
+| `llamastash/llamastash.github.io`   | Marketing site → `llamastash.dev`     | public     | Push from `../llamastash.github.io/` |
 | `llamastash/.github`                  | Org profile (optional, low priority)    | public     | Minimal `profile/README.md`           |
 
 ```sh
@@ -46,7 +46,7 @@ cd ../llamastash.github.io
 git init -b main && git add -A && git commit -m "chore: bootstrap site"
 gh repo create llamastash/llamastash.github.io \
   --public \
-  --description "Marketing site for llamastash — llamastash.cli.rs" \
+  --description "Marketing site for llamastash — llamastash.dev" \
   --source=. --remote=origin --push
 ```
 
@@ -242,11 +242,11 @@ gh api /repos/llamastash/llamastash.github.io/commits/main \
 # 5. Fresh-box smoke (Ubuntu container + macOS VM):
 docker run --rm -it ubuntu:24.04 bash -c '
   apt-get update && apt-get install -y curl
-  curl -fsSL https://llamastash.cli.rs/install.sh | sh
+  curl -fsSL https://llamastash.dev/install.sh | sh
   ~/.local/bin/llamastash --version
 '
 # macOS smoke: cargo install llamastash, brew install llamastash/llamastash/llamastash,
-# curl -fsSL https://llamastash.cli.rs/install.sh | sh — all three.
+# curl -fsSL https://llamastash.dev/install.sh | sh — all three.
 ```
 
 If anything in the post-`publish-cargo` chain fails (rare):

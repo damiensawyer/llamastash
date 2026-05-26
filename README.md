@@ -18,7 +18,7 @@ Pick whichever channel you prefer — all install the same binary. Full per-plat
 
 ```bash
 # macOS + Linux, one-shot
-curl -fsSL https://llamastash.cli.rs/install.sh | sh
+curl -fsSL https://llamastash.dev/install.sh | sh
 
 # Homebrew (macOS + Linuxbrew)
 brew install llamastash/llamastash/llamastash

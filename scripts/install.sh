@@ -4,7 +4,7 @@
 #
 # Usage:
 #   curl -fsSL https://github.com/llamastash/llamastash/releases/latest/download/install.sh | sh
-#   curl -fsSL https://llamastash.cli.rs/install.sh | sh
+#   curl -fsSL https://llamastash.dev/install.sh | sh
 #
 # Flags:
 #   --version <vX.Y.Z>   Install a specific tag instead of the latest release.
