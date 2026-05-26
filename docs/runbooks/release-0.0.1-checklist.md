@@ -89,7 +89,7 @@ Pass:
 - `gh` is authenticated as an org owner or maintainer with release rights.
 - `CRATES_IO_TOKEN` and `GH_BUMP_TOKEN` are present on `llamastash/llamastash`.
 - GitHub Pages for `llamastash.github.io` is configured for the Actions workflow source.
-- The bootstrap dry run with `v0.0.0-rc1` has succeeded at least once.
+- The bootstrap dry run with a prerelease tag sharing the current release version (today `v0.0.1-rc1`) has succeeded at least once.
 
 ---
 

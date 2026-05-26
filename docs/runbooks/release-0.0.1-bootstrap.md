@@ -177,15 +177,17 @@ done
 
 ---
 
-## Step 5 — Dry-run the release pipeline with `v0.0.0-rc1` 
+## Step 5 — Dry-run the release pipeline with a prerelease tag that matches `Cargo.toml`
 
 Pre-release tags (`vX.Y.Z-<suffix>`) exercise the upstream half of the pipeline only: `create-release` → `build` → `publish-shasums`. The `publish-homebrew`, `publish-site`, and `publish-cargo` jobs all gate on `is_prerelease == 'false'` and are skipped. **This is intentional** — it means the dry run never writes to the tap, site, or crates.io, so cleanup after the dry run is just deleting the tag and the test release.
+
+Important: `prepare-release` requires the dry-run tag to share the same `major.minor.patch` as `Cargo.toml`. With `Cargo.toml` now at `0.0.1`, the dry-run tag should be `v0.0.1-rc1`.
 
 ```sh
 # From a throwaway branch in the main repo:
 git checkout -b release-dry-run
-git tag v0.0.0-rc1
-git push origin release-dry-run v0.0.0-rc1
+git tag v0.0.1-rc1
+git push origin release-dry-run v0.0.1-rc1
 
 # Watch the run live (blocks until completion):
 gh run list --repo llamastash/llamastash --workflow=release.yml --limit 1 \
@@ -193,22 +195,22 @@ gh run list --repo llamastash/llamastash --workflow=release.yml --limit 1 \
   | xargs -I {} gh run watch --repo llamastash/llamastash --exit-status {}
 
 # Verify what landed:
-gh release view v0.0.0-rc1 --repo llamastash/llamastash \
+gh release view v0.0.1-rc1 --repo llamastash/llamastash \
   --json assets --jq '.assets[].name | "  " + .'
 # Expect: 10 tarballs, 10 .sha256 sidecars, SHA256SUMS, install.sh, install.sh.sha256.
 
 # Verify nothing was written downstream (publish-homebrew / -site / -cargo
 # should all be skipped):
 gh api /repos/llamastash/homebrew-llamastash/commits/main \
-  --jq '.commit.message'   # must NOT mention v0.0.0-rc1
+  --jq '.commit.message'   # must NOT mention v0.0.1-rc1
 gh api /repos/llamastash/llamastash.github.io/commits/main \
-  --jq '.commit.message'   # must NOT mention v0.0.0-rc1
+  --jq '.commit.message'   # must NOT mention v0.0.1-rc1
 ```
 
 Cleanup:
 
 ```sh
-gh release delete v0.0.0-rc1 --repo llamastash/llamastash --yes --cleanup-tag
+gh release delete v0.0.1-rc1 --repo llamastash/llamastash --yes --cleanup-tag
 git push origin --delete release-dry-run
 git branch -D release-dry-run
 ```
