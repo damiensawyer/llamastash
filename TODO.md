@@ -94,11 +94,10 @@ Two release tracks:
 - [x] ~~**IP**: Audit (binary size, dependencies, test coverage, security, etc.).~~ — release binary `target/release/llamastash` is 12.7 MiB; `cargo audit --json` found 0 vulnerabilities across 375 lockfile deps; Tarpaulin line coverage is `11149 / 15072 = 73.97%`; `cargo geiger --all-targets --features test-fixtures` shows project `unsafe` is present but confined to deliberate libc/process/syscall boundaries (signals, `setsid`, `flock`, `umask`, peercred, `statvfs`), with no obvious crate swap or duplicate-dependency cleanup that materially improves the release.
 - [x] ~~Check and sync all docs, validate all repo docs~~
 - [x] ~~Add Agent Skills.~~ — an installable AgentSkills bundle now ships under [`skills/llamastash/`](skills/llamastash/) for Claude Code, OpenClaw, OpenCode, and similar harnesses that need to drive the LlamaStash CLI.
-- [x] **IP**: Update 
+- [x] **IP**: Update
   - [x] Readme and docs
   - [x] repo and org
   - [x] website
-- [ ] Publish to clawhub
 - [ ] Release setup validation (CI/CD etc).
 - [x] Setup llamastash.dev domain
 - [ ] **R1 launch promotion** — telling the world about v0.0.1.
@@ -107,6 +106,7 @@ Two release tracks:
 
 ### Follow-up
 
+- [ ] Publish to clawhub
 - [ ] random HF download failure ◓ Downloading 1/1 `Qwen_Qwen3.6-27B-Q8_0.gguf` (~27767.6 MiB) ✗ init download: hf-hub: request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): client error (SendRequest): connection error: Connection timed out (os error 110)
 - [ ] The Model drill in page inside HF pull (the last page) doesnt scroll.
 - [ ] Offer to update OpenCode and other supported tools during `init`

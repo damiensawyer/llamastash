@@ -1,5 +1,7 @@
 # Release 0.0.1 bootstrap — agent-native runbook
 
+Short release-day checklist: [`docs/runbooks/release-0.0.1-checklist.md`](release-0.0.1-checklist.md).
+
 This runbook lists the GitHub org-admin actions that have to happen **before** the first `v0.0.1` tag can produce a working release. Every step has a `gh` CLI primitive a human or an agent can run from the terminal; the web-UI fallback is documented inline for steps that benefit from it.
 
 Companion plan: [`docs/plans/2026-05-19-003-feat-0.2.0-release-setup-plan.md`](../plans/2026-05-19-003-feat-0.2.0-release-setup-plan.md) (filename retains the original `0.2.0` slug for historical record; the actual first release is `0.0.1` per the WIP-versioning decision documented in CHANGELOG).
@@ -19,12 +21,12 @@ gh --version         # 2.40+ recommended for the api commands below
 
 ## Step 1 — Create the four repos
 
-| Repo                                    | Purpose                                 | Visibility | Initial content                       |
-| --------------------------------------- | --------------------------------------- | ---------- | ------------------------------------- |
-| `llamastash/llamastash`                | Main source repo (this one)             | public     | Push `main` from the local checkout   |
-| `llamastash/homebrew-llamastash`       | Homebrew tap                            | public     | Push from `../homebrew-llamastash/`    |
-| `llamastash/llamastash.github.io`   | Marketing site → `llamastash.dev`     | public     | Push from `../llamastash.github.io/` |
-| `llamastash/.github`                  | Org profile (optional, low priority)    | public     | Minimal `profile/README.md`           |
+| Repo                              | Purpose                              | Visibility | Initial content                      |
+| --------------------------------- | ------------------------------------ | ---------- | ------------------------------------ |
+| `llamastash/llamastash`           | Main source repo (this one)          | public     | Push `main` from the local checkout  |
+| `llamastash/homebrew-llamastash`  | Homebrew tap                         | public     | Push from `../homebrew-llamastash/`  |
+| `llamastash/llamastash.github.io` | Marketing site → `llamastash.dev`    | public     | Push from `../llamastash.github.io/` |
+| `llamastash/.github`              | Org profile (optional, low priority) | public     | Minimal `profile/README.md`          |
 
 ```sh
 # Main repo — assumes you're inside the existing checkout.
@@ -133,7 +135,7 @@ Custom domain is left empty for now — the `cli.rs` zone-config PR sets it late
 
 ---
 
-## Step 4 — Branch protection (recommended)
+## Step 4 — Branch protection (recommended) - TODO
 
 Pre-bootstrap, you'll be pushing direct commits. Apply protection after the first real tag completes; until then the rules will block your own bootstrap pushes.
 
@@ -175,7 +177,7 @@ done
 
 ---
 
-## Step 5 — Dry-run the release pipeline with `v0.0.0-rc1`
+## Step 5 — Dry-run the release pipeline with `v0.0.0-rc1` 
 
 Pre-release tags (`vX.Y.Z-<suffix>`) exercise the upstream half of the pipeline only: `create-release` → `build` → `publish-shasums`. The `publish-homebrew`, `publish-site`, and `publish-cargo` jobs all gate on `is_prerelease == 'false'` and are skipped. **This is intentional** — it means the dry run never writes to the tap, site, or crates.io, so cleanup after the dry run is just deleting the tag and the test release.
 
@@ -193,7 +195,7 @@ gh run list --repo llamastash/llamastash --workflow=release.yml --limit 1 \
 # Verify what landed:
 gh release view v0.0.0-rc1 --repo llamastash/llamastash \
   --json assets --jq '.assets[].name | "  " + .'
-# Expect: 4 tarballs, 4 .sha256 sidecars, SHA256SUMS, install.sh, install.sh.sha256.
+# Expect: 10 tarballs, 10 .sha256 sidecars, SHA256SUMS, install.sh, install.sh.sha256.
 
 # Verify nothing was written downstream (publish-homebrew / -site / -cargo
 # should all be skipped):
@@ -260,10 +262,10 @@ gh run rerun --repo llamastash/llamastash --failed <run-id>
 
 ## Token rotation cadence
 
-| Secret             | Trigger to rotate                              | Default cadence | Rotation primitive |
-| ------------------ | ---------------------------------------------- | --------------- | ------------------ |
-| `CRATES_IO_TOKEN`  | First publish, suspected leak, annually        | annual          | crates.io UI → `gh secret set CRATES_IO_TOKEN --repo llamastash/llamastash --body '<new>'` |
-| `GH_BUMP_TOKEN`    | PAT expiry, leak, annually                     | annual          | GitHub PAT UI → `gh secret set GH_BUMP_TOKEN --repo llamastash/llamastash --body '<new>'` |
+| Secret            | Trigger to rotate                       | Default cadence | Rotation primitive                                                                         |
+| ----------------- | --------------------------------------- | --------------- | ------------------------------------------------------------------------------------------ |
+| `CRATES_IO_TOKEN` | First publish, suspected leak, annually | annual          | crates.io UI → `gh secret set CRATES_IO_TOKEN --repo llamastash/llamastash --body '<new>'` |
+| `GH_BUMP_TOKEN`   | PAT expiry, leak, annually              | annual          | GitHub PAT UI → `gh secret set GH_BUMP_TOKEN --repo llamastash/llamastash --body '<new>'`  |
 
 The long-term answer (tracked in `TODO.md`) is migrating to a scoped GitHub App with OIDC instead of PATs — eliminates rotation entirely. Out of scope for 0.0.1.
 

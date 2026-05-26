@@ -206,10 +206,7 @@ jobs:
           grcov ./target/debug/coverage/files.zip \
             -s . \
             --binary-path ./target/debug/ \
-            --service-job-id "${{ github.job }}" \
-            --service-name 'ci' \
-            --commit-sha "${{ github.sha }}" \
-            -o ./target/debug/coverage/ \
+            -o ./target/debug/coverage/lcov.info \
             --branch \
             --ignore-not-existing \
             --llvm \
@@ -217,12 +214,13 @@ jobs:
             --ignore '/*' \
             --ignore 'C:/*' \
             --ignore '../*' \
-            -t coveralls
+            -t lcov
       - name: Push grcov results to Coveralls
         uses: coverallsapp/github-action@v2
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./target/debug/coverage/coveralls
+          file: ./target/debug/coverage/lcov.info
+          format: lcov
 
   actionlint:
     # Static analysis for the workflow YAML themselves. Catches expression
