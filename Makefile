@@ -16,6 +16,45 @@ test-golden:
 test-cov:
 	@cargo tarpaulin --features test-fixtures
 
+AUDIT_DIR ?= target/audit
+UAT_MODE ?= warm
+UAT_REPORT_DIR ?= /tmp
+UAT_EXTRA ?=
+UAT_CMD = cargo run --features uat -- uat
+
+## Run the full maintainer audit suite (lint, tests, release build,
+## duplicate deps, advisories, unsafe scan, Tarpaulin XML). Requires
+## `cargo-audit`, `cargo-geiger`, and `cargo-tarpaulin` to be installed.
+audit:
+	@for tool in cargo-audit cargo-geiger cargo-tarpaulin; do \
+		command -v $$tool >/dev/null 2>&1 || { \
+			printf '%s\n' "missing $$tool; install it before running 'make audit'"; \
+			exit 1; \
+		}; \
+	done
+	@mkdir -p "$(AUDIT_DIR)/tarpaulin"
+	@$(MAKE) test
+	@cargo build --release
+	@bytes=$$(wc -c < "target/release/llamastash"); \
+		printf '%s\n' "$$bytes" > "$(AUDIT_DIR)/release-binary-bytes.txt"; \
+		printf '%s\n' "release binary bytes: $$bytes"
+	@cargo tree --duplicates > "$(AUDIT_DIR)/cargo-tree-duplicates.txt"
+	@cargo audit --json > "$(AUDIT_DIR)/cargo-audit.json"
+	@status=0; \
+		cargo geiger --all-targets --features test-fixtures > "$(AUDIT_DIR)/cargo-geiger.txt" 2>&1 || status=$$?; \
+		printf '%s\n' "$$status" > "$(AUDIT_DIR)/cargo-geiger.exit-code.txt"; \
+		if [ $$status -ne 0 ]; then \
+			printf '%s\n' "cargo geiger exited $$status; captured output in $(AUDIT_DIR)/cargo-geiger.txt"; \
+		fi
+	@cargo tarpaulin --features test-fixtures --engine llvm --out Xml --output-dir "$(AUDIT_DIR)/tarpaulin"
+	@printf '%s\n' "audit artifacts written to $(AUDIT_DIR)"
+	@$(MAKE) audit-summary
+
+## Print a one-screen summary of the latest audit artifacts under
+## `$(AUDIT_DIR)`. Run `make audit` first.
+audit-summary:
+	@python3 scripts/audit_summary.py "$(AUDIT_DIR)"
+
 ## Build the release binary for the current os-arch.
 ## Regenerates data/benchmark-snapshot.json from live sources first so
 ## every release ships with a fresh catalog (Unit 7 of plan 2026-05-20-001).
@@ -75,6 +114,38 @@ bench-test: .venv/bin/python
 ## `--json`, `--engine-map`) to the underlying module.
 bench-table: .venv/bin/python
 	@.venv/bin/python -m scripts.bench.end_to_end.table $(filter-out $@,$(MAKECMDGOALS))
+
+## Maintainer UAT shortcuts. Override:
+##   UAT_MODE=warm|cold
+##   UAT_REPORT_DIR=/tmp/uat-reports
+##   UAT_EXTRA='--some-extra-uat-flag' (appended after the per-target defaults)
+## For the Vulkan lane, set either UAT_VULKAN_SERVER=/path/to/llama-server
+## or the standard LLAMASTASH_LLAMA_SERVER env var.
+uat-amd:
+	@mkdir -p "$(UAT_REPORT_DIR)"
+	@$(UAT_CMD) --host-backend amd --mode "$(UAT_MODE)" --report-out "$(UAT_REPORT_DIR)/uat-amd-$(UAT_MODE).json" $(UAT_EXTRA)
+
+uat-vulkan:
+	@mkdir -p "$(UAT_REPORT_DIR)"
+	@if [ -z "$(UAT_VULKAN_SERVER)" ] && [ -z "$$LLAMASTASH_LLAMA_SERVER" ]; then \
+		printf '%s\n' "set UAT_VULKAN_SERVER=/path/to/build-vulkan/bin/llama-server or export LLAMASTASH_LLAMA_SERVER"; \
+		exit 1; \
+	fi
+	@LLAMASTASH_LLAMA_SERVER="$${LLAMASTASH_LLAMA_SERVER:-$(UAT_VULKAN_SERVER)}" \
+		$(UAT_CMD) --host-backend amd --runtime-backend vulkan --mode "$(UAT_MODE)" \
+		--report-out "$(UAT_REPORT_DIR)/uat-vulkan-$(UAT_MODE).json" $(UAT_EXTRA)
+
+uat-nvidia:
+	@mkdir -p "$(UAT_REPORT_DIR)"
+	@$(UAT_CMD) --host-backend nvidia --mode "$(UAT_MODE)" --report-out "$(UAT_REPORT_DIR)/uat-nvidia-$(UAT_MODE).json" $(UAT_EXTRA)
+
+uat-apple-metal:
+	@mkdir -p "$(UAT_REPORT_DIR)"
+	@$(UAT_CMD) --host-backend apple_metal --mode "$(UAT_MODE)" --report-out "$(UAT_REPORT_DIR)/uat-apple-metal-$(UAT_MODE).json" $(UAT_EXTRA)
+
+uat-cpu-only:
+	@mkdir -p "$(UAT_REPORT_DIR)"
+	@$(UAT_CMD) --host-backend cpu_only --mode "$(UAT_MODE)" --report-out "$(UAT_REPORT_DIR)/uat-cpu-only-$(UAT_MODE).json" $(UAT_EXTRA)
 
 ## Run llamastash against the local daemon (auto-spawns one if missing).
 ## Extra goals are forwarded to cargo as subcommand args, so:
@@ -139,35 +210,3 @@ release:
 ## Delete tag — usage: `make delete-tag V=v0.1.0`
 delete-tag:
 	@git tag -d ${V} && git push --delete origin ${V}
-## Maintainer UAT shortcuts. Override:
-##   UAT_MODE=warm|cold
-##   UAT_REPORT_DIR=/tmp/uat-reports
-##   UAT_EXTRA='--some-extra-uat-flag' (appended after the per-target defaults)
-## For the Vulkan lane, set either UAT_VULKAN_SERVER=/path/to/llama-server
-## or the standard LLAMASTASH_LLAMA_SERVER env var.
-uat-amd:
-@mkdir -p "$(UAT_REPORT_DIR)"
-@$(UAT_CMD) --host-backend amd --mode "$(UAT_MODE)" --report-out "$(UAT_REPORT_DIR)/uat-amd-$(UAT_MODE).json" $(UAT_EXTRA)
-
-uat-vulkan:
-@mkdir -p "$(UAT_REPORT_DIR)"
-@if [ -z "$(UAT_VULKAN_SERVER)" ] && [ -z "$$LLAMASTASH_LLAMA_SERVER" ]; then \
-printf '%s\n' "set UAT_VULKAN_SERVER=/path/to/build-vulkan/bin/llama-server or export LLAMASTASH_LLAMA_SERVER"; \
-exit 1; \
-fi
-@LLAMASTASH_LLAMA_SERVER="$${LLAMASTASH_LLAMA_SERVER:-$(UAT_VULKAN_SERVER)}" \
-$(UAT_CMD) --host-backend amd --runtime-backend vulkan --mode "$(UAT_MODE)" \
---report-out "$(UAT_REPORT_DIR)/uat-vulkan-$(UAT_MODE).json" $(UAT_EXTRA)
-
-uat-nvidia:
-@mkdir -p "$(UAT_REPORT_DIR)"
-@$(UAT_CMD) --host-backend nvidia --mode "$(UAT_MODE)" --report-out "$(UAT_REPORT_DIR)/uat-nvidia-$(UAT_MODE).json" $(UAT_EXTRA)
-
-uat-apple-metal:
-@mkdir -p "$(UAT_REPORT_DIR)"
-@$(UAT_CMD) --host-backend apple_metal --mode "$(UAT_MODE)" --report-out "$(UAT_REPORT_DIR)/uat-apple-metal-$(UAT_MODE).json" $(UAT_EXTRA)
-
-uat-cpu-only:
-@mkdir -p "$(UAT_REPORT_DIR)"
-@$(UAT_CMD) --host-backend cpu_only --mode "$(UAT_MODE)" --report-out "$(UAT_REPORT_DIR)/uat-cpu-only-$(UAT_MODE).json" $(UAT_EXTRA)
-

@@ -86,9 +86,10 @@ Two release tracks:
   - [x] AMD APU Vulkan : Linux
   - [ ] AMD GPU : Linux
   - [ ] Nvidia : Linux
-  - [ ] Apple Silicon : macOS
-  - [ ] CPU : macOS?
-  - [ ] CPU : linux?
+  - [ ] Apple Metal : macOS
+  - [ ] CPU : macOS -> CD
+  - [ ] CPU : linux -> CD
+  - [ ] Update CI for cpu only run. First optimize the nightly builds (fold into release)
 - [ ] **IP**: Update Readme, repo, org and website properly
 - [x] ~~**IP**: Audit (binary size, dependencies, test coverage, security, etc.).~~ — release binary `target/release/llamastash` is 12.7 MiB; `cargo audit --json` found 0 vulnerabilities across 375 lockfile deps; Tarpaulin line coverage is `11149 / 15072 = 73.97%`; `cargo geiger --all-targets --features test-fixtures` shows project `unsafe` is present but confined to deliberate libc/process/syscall boundaries (signals, `setsid`, `flock`, `umask`, peercred, `statvfs`), with no obvious crate swap or duplicate-dependency cleanup that materially improves the release.
 - [x] ~~Check and sync all docs, validate all repo docs~~

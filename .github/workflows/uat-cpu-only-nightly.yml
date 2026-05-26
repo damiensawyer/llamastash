@@ -1,0 +1,48 @@
+name: uat-cpu-only-nightly
+
+# CPU-only UAT lane on a stock Linux runner. Unlike the GPU-backed
+# lanes, this one is practical in GitHub-hosted CI because
+# `gpu::probe()` genuinely resolves to `cpu_only` on ubuntu-latest.
+# Run it on a schedule (plus workflow_dispatch for ad-hoc checks) so we
+# get real install + pull + launch coverage without slowing PR CI.
+
+on:
+  schedule:
+    - cron: "30 8 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+permissions:
+  contents: read
+
+concurrency:
+  group: uat-cpu-only-nightly
+  cancel-in-progress: true
+
+jobs:
+  uat:
+    name: CPU-only UAT
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: run cold-mode CPU-only UAT
+        run: cargo run --features uat -- uat --host-backend cpu_only --mode cold --report-out uat-cpu-only.json
+        env:
+          RUST_BACKTRACE: 1
+          TMPDIR: /tmp
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: uat-cpu-only-${{ github.run_id }}
+          path: uat-cpu-only.json
+          retention-days: 7

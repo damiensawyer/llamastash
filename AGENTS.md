@@ -100,7 +100,11 @@ cargo test --features test-fixtures --test <name>          # one integration bin
 cargo test --features test-fixtures <substring>            # filter by test name
 cargo fmt --all -- --check
 cargo clippy --all-targets --features test-fixtures -- -D warnings
+make audit                                                 # maintainer audit bundle: Outputs to `target/audit`. Tests + release build + deps/security/unsafe/coverage artifacts
+make audit-summary                                         # headline summary from `target/audit`
 ```
+
+Look at the `Makefile` for more commands, including `make uat-*` for the manual UAT runs.
 
 `--features test-fixtures` is required for the integration suite. It enables:
 

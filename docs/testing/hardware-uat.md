@@ -182,6 +182,21 @@ Optional knobs:
 at a Vulkan `llama-server` build via `UAT_VULKAN_SERVER=...` or the
 standard `LLAMASTASH_LLAMA_SERVER=...` environment variable.
 
+### CPU-only coverage on this repo
+
+`--host-backend cpu_only` is a **host-probe** expectation, not a
+"disable GPU offload on any box" flag. On a machine like the maintainer's
+AMD Linux host, the UAT preflight still detects `amd`, so the true
+CPU-only lane lives on GitHub Actions instead:
+
+- Workflow: `.github/workflows/uat-cpu-only-nightly.yml`
+- Runner: `ubuntu-latest`
+- Mode: `cold` (covers install + pull + launch, not just a cached warm run)
+- Artifact: `uat-cpu-only.json`
+
+Use the local `make uat-cpu-only` shortcut only on a box that actually
+probes as `cpu_only`.
+
 ### What each step does
 
 | Step | Action | Failure means |

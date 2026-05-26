@@ -2,18 +2,20 @@ name: macos-build-nightly
 
 # Tier 3 nightly macOS build lane. Activated 2026-05-20 after the
 # falsifying spike (run 26181924383) detected `cpu_only` on a headless
-# macos-14 runner despite `--backend apple_metal`, confirming Metal is
+# macos-14 runner despite `--host-backend apple_metal`, confirming Metal is
 # not exposed to GH-hosted runners.
 #
 # Catches the install-path side of the regression class (brew on
 # macos-14, cross-compile aarch64-apple-darwin) without claiming Metal
-# coverage. Maintainer-local UAT (`llamastash uat --backend apple_metal`)
-# remains the real Metal coverage. See R3 in
+# coverage. Maintainer-local UAT (`llamastash uat --host-backend apple_metal`)
+# remains the real Metal coverage; the CPU-only runner now lives in
+# `.github/workflows/uat-cpu-only-nightly.yml`. See R3 in
 # docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md.
 
 on:
   schedule:
     - cron: "0 9 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
