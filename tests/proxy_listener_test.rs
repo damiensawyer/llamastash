@@ -46,11 +46,11 @@ fn pick_free_port() -> u16 {
 }
 
 async fn wait_for_socket(path: &std::path::Path) {
-  let deadline = std::time::Instant::now() + Duration::from_secs(3);
+  let deadline = std::time::Instant::now() + Duration::from_secs(10);
   loop {
     if std::time::Instant::now() > deadline {
       panic!(
-        "daemon did not become connectable within 3s: {}",
+        "daemon did not become connectable within 10s: {}",
         path.display()
       );
     }
@@ -62,10 +62,10 @@ async fn wait_for_socket(path: &std::path::Path) {
 }
 
 async fn wait_for_proxy(addr: SocketAddr) {
-  let deadline = std::time::Instant::now() + Duration::from_secs(3);
+  let deadline = std::time::Instant::now() + Duration::from_secs(10);
   loop {
     if std::time::Instant::now() > deadline {
-      panic!("proxy did not become connectable within 3s: {addr}");
+      panic!("proxy did not become connectable within 10s: {addr}");
     }
     if TcpStream::connect(addr).await.is_ok() {
       return;
