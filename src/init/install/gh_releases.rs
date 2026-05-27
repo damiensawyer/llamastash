@@ -110,11 +110,12 @@ pub struct AssetPick {
   pub sha256: String,
 }
 
-/// Fetch the most recent release and pick the asset matching the
-/// host's variant suffix. Returns `Err(NoMatchingAsset)` when no
-/// asset in the most recent release matches — falling back to an
-/// older release lives in the wizard (Unit 10) since the choice is
-/// user-visible.
+/// Fetch the most recent releases and pick the newest one that has an
+/// asset matching the host's variant suffix. Walking back through the
+/// page covers the upstream-incomplete-release case (e.g. `b9352`
+/// shipped without `ubuntu-x64.tar.gz`); only when no surveyed release
+/// matches do we return `NoMatchingAsset`. The wizard (Unit 10) layers
+/// a user-visible fallback on top for the interactive flow.
 /// Backoff between the first and second GH API attempt when the
 /// initial call comes back rate-limited. 60 s is the practical floor
 /// — GitHub's unauthenticated quota resets in 60-minute windows but

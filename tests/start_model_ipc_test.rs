@@ -153,8 +153,10 @@ async fn start_model_drives_supervisor_status_logs_stop_and_last_params() {
 
   // 4) last_params is upserted on Loading → Ready. Poll the
   // state.json on disk to confirm — the supervisor stamps it via
-  // the recorder task so timing is asynchronous.
-  let last_params_deadline = std::time::Instant::now() + Duration::from_secs(3);
+  // the recorder task so timing is asynchronous. 20 s deadline
+  // tolerates slow macOS-arm64 GH-hosted runners under cargo test
+  // parallel load.
+  let last_params_deadline = std::time::Instant::now() + Duration::from_secs(20);
   loop {
     let s = state_store::load(&state_dir).expect("load state");
     if !s.last_params.is_empty() {
@@ -535,7 +537,9 @@ async fn last_params_persists_only_user_supplied_knob_deltas() {
   let first_launch = first["launch_id"].as_str().unwrap().to_string();
 
   // Wait for call 1's persistence to land before issuing call 2.
-  let deadline = std::time::Instant::now() + Duration::from_secs(5);
+  // 20 s deadline tolerates slow macOS-arm64 GH-hosted runners under
+  // cargo test parallel load (5 s was flaky in CI).
+  let deadline = std::time::Instant::now() + Duration::from_secs(20);
   loop {
     let s = state_store::load(&state_dir).expect("load state");
     if !s.last_params.is_empty() && s.last_params[0].params.knobs.threads == Some(4) {
@@ -574,8 +578,9 @@ async fn last_params_persists_only_user_supplied_knob_deltas() {
 
   // Poll for call 2's persistence — upsert promotes the entry to the
   // front of the Vec, so once `mlock == Some(true)` lands at index 0
-  // we know the recorder fired for call 2.
-  let deadline = std::time::Instant::now() + Duration::from_secs(5);
+  // we know the recorder fired for call 2. 20 s deadline matches the
+  // call-1 wait for the same macOS-arm64 runner-load reason.
+  let deadline = std::time::Instant::now() + Duration::from_secs(20);
   let knobs = loop {
     let s = state_store::load(&state_dir).expect("load state");
     if let Some(entry) = s.last_params.first() {
