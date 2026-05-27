@@ -41,6 +41,7 @@ pub async fn handle(args: UatArgs, cli: &Cli, _config: &Config) -> CliResult {
   let host_backend = args.host_backend;
   let runtime_backend = args.runtime_backend;
   let mode = args.mode;
+  let local_gguf = args.local_gguf.clone();
   let label = match runtime_backend {
     Some(runtime) => format!(
       "{}-x-{}-{}",
@@ -63,7 +64,7 @@ pub async fn handle(args: UatArgs, cli: &Cli, _config: &Config) -> CliResult {
 
   let guard = TempdirGuard::new(&label)
     .map_err(|e| CliExit::new(UNKNOWN, format!("uat: tempdir setup failed: {e}")))?;
-  let plan = LifecyclePlan::from_args(host_backend, runtime_backend, mode)
+  let plan = LifecyclePlan::from_args(host_backend, runtime_backend, mode, local_gguf)
     .map_err(|e| CliExit::new(UNKNOWN, format!("uat: plan setup failed: {e}")))?;
 
   let started_at = rfc3339_now();

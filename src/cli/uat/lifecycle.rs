@@ -62,6 +62,8 @@ pub struct LifecyclePlan {
   /// Per-step subprocess timeout. 5 minutes covers the warm budget
   /// per origin §Performance budgets; cold mode is given 15 minutes.
   pub per_step_timeout: Duration,
+  /// When set, skip the HF download and use this GGUF directly.
+  pub local_gguf: Option<PathBuf>,
 }
 
 impl LifecyclePlan {
@@ -69,6 +71,7 @@ impl LifecyclePlan {
     host_backend: UatBackend,
     runtime_backend: Option<UatBackend>,
     mode: UatMode,
+    local_gguf: Option<PathBuf>,
   ) -> std::io::Result<Self> {
     let llamastash_path = std::env::current_exe()?;
     let per_step_timeout = match mode {
@@ -81,6 +84,7 @@ impl LifecyclePlan {
       mode,
       llamastash_path,
       per_step_timeout,
+      local_gguf,
     })
   }
 }
@@ -253,6 +257,30 @@ async fn step_init(
   report: &mut UatReport,
 ) -> Result<PathBuf, StepError> {
   let started = Instant::now();
+  if let Some(local) = &plan.local_gguf {
+    if !local.exists() {
+      return Err(StepError {
+        message: format!("--local-gguf path does not exist: {}", local.display()),
+        exit_code: 1,
+        classification: FailureClass::InitOther,
+        duration: started.elapsed(),
+      });
+    }
+    report.host.model_used = local.display().to_string();
+    report
+      .host
+      .warnings
+      .push("--local-gguf: skipped HF download".to_string());
+    report.step_mut(StepName::Init).pass(
+      started.elapsed(),
+      Some(serde_json::json!({
+        "model_repo": "local",
+        "mode": match plan.mode { UatMode::Warm => "warm", UatMode::Cold => "cold" },
+        "gguf_path": local,
+      })),
+    );
+    return Ok(local.clone());
+  }
   let primary_outcome = run_init_for(plan, guard, &model::PRIMARY).await;
   let (used, init_stdout) = match primary_outcome {
     Ok(stdout) => (&model::PRIMARY, stdout),

@@ -769,6 +769,12 @@ pub struct UatArgs {
   /// to stdout in TTY-pretty form only.
   #[arg(long, value_name = "PATH")]
   pub report_out: Option<PathBuf>,
+  /// Skip the HuggingFace download and use an existing local GGUF
+  /// file for the start_model / smoke_chat steps. Useful on machines
+  /// without internet access, behind restrictive proxies, or for
+  /// faster iteration during development.
+  #[arg(long = "local-gguf", value_name = "GGUF_PATH")]
+  pub local_gguf: Option<PathBuf>,
 }
 
 /// GPU backend names used by UAT. Spellings mirror the `GpuInfo`

@@ -111,7 +111,11 @@ impl TempdirGuard {
   /// through `tempfile::Builder::tempdir_in` which uses mkdtemp(3) —
   /// atomic 0700 creation, no TOCTOU race on a predictable name.
   pub fn new(label: &str) -> std::io::Result<Self> {
-    let prefix = format!("llamastash-uat-{}-", sanitize_label(label));
+    // Short prefix to keep the socket path under the 104-byte sun_path
+    // limit on macOS. The /var/folders/…/T/ prefix alone consumes ~55
+    // characters; `llamastash-uat-apple_metal-warm-XXXXXX/runtime/d.sock`
+    // would exceed 104 with the old name.
+    let prefix = format!("ls-uat-{}-", sanitize_label(label));
     let root = tempfile::Builder::new()
       .prefix(&prefix)
       .tempdir_in(std::env::temp_dir())?;
@@ -137,8 +141,12 @@ impl TempdirGuard {
   }
 
   /// Path to the daemon's runtime socket inside the sandbox.
+  /// Placed directly under the `runtime/` subdir with a short filename
+  /// to stay within the 104-byte `sun_path` limit on macOS. Long
+  /// tempdir prefixes (e.g. `/var/folders/.../llamastash-uat-...`) can
+  /// exceed that limit if we use `daemon.sock` as the leaf.
   pub fn socket_path(&self) -> PathBuf {
-    self.root_path.join("runtime").join("daemon.sock")
+    self.root_path.join("runtime").join("d.sock")
   }
 
   /// Path to the sandbox's HF cache root. Children see this via
