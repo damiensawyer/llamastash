@@ -1,6 +1,6 @@
 # LlamaStash
 
-![Logo](./assets/logo-h.jpg)
+![Logo](https://raw.githubusercontent.com/llamastash/llamastash/main/assets/logo-h.jpg)
 
 A fast terminal native app (TUI) **and** CLI with init wizard for launching local LLMs via [llama.cpp](https://github.com/ggml-org/llama.cpp) with zero overhead. See [benchmarks](docs/benchmarks.md).
 
@@ -10,7 +10,7 @@ Heavy abstractions (Ollama, LM Studio) hide llama.cpp; raw `llama-server` use is
 
 > **AI agents installing this for a user:** jump to [`INSTALL.md` § For AI agents](INSTALL.md#for-ai-agents). The non-interactive install + verify contract, and exit-code branching live there.
 
-![TUI Gif](./assets/tui.gif)
+![TUI Gif](https://raw.githubusercontent.com/llamastash/llamastash/main/assets/tui.gif)
 
 ## Install
 
@@ -76,7 +76,7 @@ Full subcommand reference: [`docs/usage.md`](docs/usage.md). Proxy client setup 
 
 The CLI ships with an [Agent Skills](https://agentskills.io) manifest so supported agents can load repo-specific instructions for using `llamastash` as a local model-management CLI.
 
-- Canonical skill bundle: [`skills/llamastash/`](skills/llamastash/)
+- Canonical skill bundle: [`skills/llamastash/`](https://github.com/llamastash/llamastash/tree/main/skills/llamastash)
 
 **Claude Code plugin marketplace:** install the repo as a plugin, then install the bundled skill:
 
@@ -170,14 +170,14 @@ LlamaStash spawns the unmodified upstream `llama-server`. Three suites track wha
 | LM Studio 2.16.0   | **91.1** / 187 | **11.6** / 1 477 |      **7.9** / 1 274 |             37.0 / 683 | small=ROCm, mid/large=Vulkan |
 | Ollama 0.24.0      |     50.4 / 223 |      4.8 / 1 092 |          2.6 / 1 745 |             12.1 / 476 | bundled                      |
 
-Each cell is **decode tok/s / TTFT ms** on the `chat_turn` workload (50-token prompt → 64 tokens decode), averaged across `defaults` + `normalized` modes. LlamaStash matches raw `llama-server` within ≤1% on every cell. Curated report with seven findings: [`r1-amd-apu-final-report.md`](docs/benchmarks/r1-amd-apu-final-report.md). Re-run on your hardware: `make bench-end-to-end` (Suite B) or `make bench-overhead` (Suite A).
+Each cell is **decode tok/s / TTFT ms** on the `chat_turn` workload (50-token prompt → 64 tokens decode), averaged across `defaults` + `normalized` modes. LlamaStash matches raw `llama-server` within ≤1% on every cell. Curated report with seven findings: [`r1-amd-apu-final-report.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/r1-amd-apu-final-report.md). Re-run on your hardware: `make bench-end-to-end` (Suite B) or `make bench-overhead` (Suite A).
 
 ## Screenshots
 
-![Init](./assets/init.gif)
+![Init](https://raw.githubusercontent.com/llamastash/llamastash/main/assets/init.gif)
 
-![TUI 1](./assets/tui_3.png)
-![TUI 2](./assets/tui_2.png)
+![TUI 1](https://raw.githubusercontent.com/llamastash/llamastash/main/assets/tui_3.png)
+![TUI 2](https://raw.githubusercontent.com/llamastash/llamastash/main/assets/tui_2.png)
 
 ## Configuration
 
@@ -248,7 +248,7 @@ Linux (x86_64, aarch64) and macOS (Apple Silicon, Intel). Windows support is on 
 
 ## Roadmap
 
-Tracked in detail in [`TODO.md`](TODO.md). The headline items on deck after the first release:
+Tracked in detail in [`TODO.md`](https://github.com/llamastash/llamastash/blob/main/TODO.md). The headline items on deck after the first release:
 
 - **llama.cpp version pinning** — prevent silent drift / incompatibility on `brew upgrade`.
 - **MCP and LAN-exposed HTTP surfaces** — Model Context Protocol, plus auth + TLS + LAN binding for the proxy. The loopback OpenAI-compatible proxy ships today (see [Drop-in OpenAI + Ollama proxy](#drop-in-openai--ollama-proxy)); the rest of the v1 R34 deferral (Anthropic compat, MCP, network exposure) stays on the roadmap.

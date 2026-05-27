@@ -167,11 +167,11 @@ The default port is `11435` (one above Ollama's well-known `11434`) so a llamast
 
 If the named model isn't running yet, the proxy auto-starts it. If the launch fails and another model is already `Ready`, the proxy falls back to it and tags the response with `x-llamastash-served-by` + `x-llamastash-fallback-reason` (`launch_failed` for in-family substitution, `family_mismatch` for cross-arch picks) so clients can audit the substitution. The listener is enabled by default; flip `proxy.enabled: false` in `config.yaml` to turn it off.
 
-The full endpoint table, error envelopes, response headers, and config keys live in [`docs/usage.md` § Proxy (OpenAI-compatible listener)](docs/usage.md#proxy-openai-compatible-listener); the manual OpenCode + Pi smoke runbook is at [`tests/proxy_real_client_smoke.md`](tests/proxy_real_client_smoke.md).
+The full endpoint table, error envelopes, response headers, and config keys live in [`docs/usage.md` § Proxy (OpenAI-compatible listener)](docs/usage.md#proxy-openai-compatible-listener); the manual OpenCode + Pi smoke runbook is at [`tests/proxy_real_client_smoke.md`](https://github.com/llamastash/llamastash/blob/main/tests/proxy_real_client_smoke.md).
 
 ### Ollama discovery surface
 
-The proxy also exposes Ollama's discovery surface (`GET /api/tags`, `GET /api/version`, `GET /api/ps`, `POST /api/show`) so tools that auto-detect Ollama via `OLLAMA_HOST` or by probing `GET /api/tags` recognise llamastash and fall through to the OpenAI-compat endpoints for inference. Ollama's _inference_ endpoints (`/api/chat`, `/api/generate`, `/api/embed`) are not implemented — point Ollama-shape inference clients at the OpenAI-compat endpoints above. Tracked in [`TODO.md`](TODO.md) §R2.
+The proxy also exposes Ollama's discovery surface (`GET /api/tags`, `GET /api/version`, `GET /api/ps`, `POST /api/show`) so tools that auto-detect Ollama via `OLLAMA_HOST` or by probing `GET /api/tags` recognise llamastash and fall through to the OpenAI-compat endpoints for inference. Ollama's _inference_ endpoints (`/api/chat`, `/api/generate`, `/api/embed`) are not implemented — point Ollama-shape inference clients at the OpenAI-compat endpoints above. Tracked in [`TODO.md`](https://github.com/llamastash/llamastash/blob/main/TODO.md) §R2.
 
 ### Ollama drop-in mode (opt-in)
 

@@ -336,9 +336,9 @@ llamastash daemon status [--json]   # PID + uptime + connections + managed launc
 
 The daemon binds a single OpenAI-compatible HTTP proxy on `127.0.0.1:11435` (default mode) so any agent that speaks the OpenAI REST shape — OpenCode, Pi (pi.dev), the OpenAI SDKs, Cline, llm-cli — can talk to every discovered model through one stable URL. The default port is `11435` (one above Ollama's `11434`) so llamastash co-exists with an installed Ollama daemon without a collision. If the base port is taken the listener walks up to `11440` and binds the first free slot — the actual address is reported via `llamastash status` / the TUI Daemon pane under `proxy.listen`.
 
-The installable Agent Skills bundle for this flow lives under [`skills/llamastash/`](../skills/llamastash/). Claude Code, OpenClaw, OpenCode, and similar harnesses can install it by copying that directory into their configured skills path.
+The installable Agent Skills bundle for this flow lives under [`skills/llamastash/`](https://github.com/llamastash/llamastash/tree/main/skills/llamastash). Claude Code, OpenClaw, OpenCode, and similar harnesses can install it by copying that directory into their configured skills path.
 
-The proxy resolves `body.model` against the same fuzzy matcher `llamastash start <ref>` uses, forwards the request byte-for-byte to the matching `llama-server` child, and streams the response back. If the named model isn't running, the proxy auto-starts it (replaying `last_params`, else `arch_defaults`). If the launch fails and another model is already Ready, the proxy falls back to it and stamps `x-llamastash-served-by` + `x-llamastash-fallback-reason: launch_failed` headers on the response. Substitution is observable; no extra round-trip is needed to discover what served the request. The full mechanism — coalesced launches, family-MRU fallback selection, scope boundaries — is documented in [`docs/plans/2026-05-21-001-feat-proxy-router-plan.md`](plans/2026-05-21-001-feat-proxy-router-plan.md).
+The proxy resolves `body.model` against the same fuzzy matcher `llamastash start <ref>` uses, forwards the request byte-for-byte to the matching `llama-server` child, and streams the response back. If the named model isn't running, the proxy auto-starts it (replaying `last_params`, else `arch_defaults`). If the launch fails and another model is already Ready, the proxy falls back to it and stamps `x-llamastash-served-by` + `x-llamastash-fallback-reason: launch_failed` headers on the response. Substitution is observable; no extra round-trip is needed to discover what served the request. The full mechanism — coalesced launches, family-MRU fallback selection, scope boundaries — is documented in [`docs/plans/2026-05-21-001-feat-proxy-router-plan.md`](https://github.com/llamastash/llamastash/blob/main/docs/plans/2026-05-21-001-feat-proxy-router-plan.md).
 
 ### Ollama drop-in mode (opt-in)
 
@@ -369,7 +369,7 @@ Set the OpenAI base URL to `http://127.0.0.1:11435/v1` (default mode) or `http:/
 | Pi (pi.dev) | `OPENAI_API_BASE_URL` and `OPENAI_API_KEY` (their "OpenAI-compatible" guide) |
 | Cline / llm-cli | `OPENAI_BASE_URL` (or their tool-specific equivalent) and any key |
 
-Verify the exact env var name against the client's current docs if you're automating — names drift. The manual smoke runbook at [`tests/proxy_real_client_smoke.md`](../tests/proxy_real_client_smoke.md) carries the maintainer's verified OpenCode + Pi sequences.
+Verify the exact env var name against the client's current docs if you're automating — names drift. The manual smoke runbook at [`tests/proxy_real_client_smoke.md`](https://github.com/llamastash/llamastash/blob/main/tests/proxy_real_client_smoke.md) carries the maintainer's verified OpenCode + Pi sequences.
 
 #### OpenCode setup
 
@@ -408,7 +408,7 @@ The model keys must match what you send in `body.model`; llamastash
 will resolve that name against the catalog and auto-start the target if
 needed.
 
-> **Auth posture.** The proxy has **no authentication** by design. It binds loopback-only (`127.0.0.1`), so the threat model is "same machine, any UID can issue requests." Don't run llamastash on a shared host or expose the port; the proxy refuses to bind anything but loopback and the daemon ships no `--host` / `--bind` / `--api-key` knob. LAN exposure, auth, and TLS are deferred follow-ups (see the roadmap in [`TODO.md`](../TODO.md) and the v1 R34 deferral kept in [`AGENTS.md`](../AGENTS.md)).
+> **Auth posture.** The proxy has **no authentication** by design. It binds loopback-only (`127.0.0.1`), so the threat model is "same machine, any UID can issue requests." Don't run llamastash on a shared host or expose the port; the proxy refuses to bind anything but loopback and the daemon ships no `--host` / `--bind` / `--api-key` knob. LAN exposure, auth, and TLS are deferred follow-ups (see the roadmap in [`TODO.md`](https://github.com/llamastash/llamastash/blob/main/TODO.md) and the v1 R34 deferral kept in [`AGENTS.md`](https://github.com/llamastash/llamastash/blob/main/AGENTS.md)).
 
 ### Is the proxy up?
 
@@ -458,7 +458,7 @@ The Ollama **inference** endpoints (`POST /api/chat`, `POST /api/generate`, `POS
 
 A few field-level details where llamastash's projection diverges from Ollama's:
 
-- **`digest`** — Ollama uses `sha256:<hex>`; llamastash uses `blake3:<hex>` derived from the canonical path string of the discovered file. The value is stable across `/api/tags` and `/api/ps` for the same model — both endpoints hash the same path — so clients can join the two endpoints by digest. It is **not** the GGUF header BLAKE3 that `ModelId` carries internally; re-reading the header on every `/api/tags` row would brick discovery, and the catalog doesn't cache the header hash today. Lifting the digest to the truthful header BLAKE3 is tracked in [TODO §R2](../TODO.md) ("Ollama-compat digest from cached header BLAKE3"). Clients that round-trip the digest opaquely keep working; clients that *validate* the algorithm see the truthful `blake3:` tag rather than a misleading `sha256:` prefix on a non-SHA-256 hash.
+- **`digest`** — Ollama uses `sha256:<hex>`; llamastash uses `blake3:<hex>` derived from the canonical path string of the discovered file. The value is stable across `/api/tags` and `/api/ps` for the same model — both endpoints hash the same path — so clients can join the two endpoints by digest. It is **not** the GGUF header BLAKE3 that `ModelId` carries internally; re-reading the header on every `/api/tags` row would brick discovery, and the catalog doesn't cache the header hash today. Lifting the digest to the truthful header BLAKE3 is tracked in [TODO §R2](https://github.com/llamastash/llamastash/blob/main/TODO.md) ("Ollama-compat digest from cached header BLAKE3"). Clients that round-trip the digest opaquely keep working; clients that *validate* the algorithm see the truthful `blake3:` tag rather than a misleading `sha256:` prefix on a non-SHA-256 hash.
 - **`size`** — Ollama returns the on-disk file size; llamastash returns `weights_bytes` (the GGUF tensor footprint), typically within a few KiB of the full file size. `0` when discovery couldn't parse the header.
 - **`modified_at`** — llamastash doesn't track file mtime in the catalog. Emits `"1970-01-01T00:00:00Z"` (Unix epoch) as a placeholder so clients displaying this see a clearly-not-now sentinel.
 - **`/api/ps` `expires_at`** — far-future placeholder (`"9999-12-31T23:59:59Z"`) while idle-TTL eviction is deferred (R34).

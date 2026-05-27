@@ -19,11 +19,43 @@ rust-version = "1.95"
 # this hint.
 default-run = "llamastash"
 exclude = [
+  # Development / packaging scaffolding — never needed by `cargo install`
+  # users. The published crate must fit under crates.io's 10 MiB hard
+  # limit; without these excludes the package compresses to ~16 MiB,
+  # mostly from `assets/`'s marketing GIFs/screenshots.
   "test_data/*",
   "deployment/*",
   "artwork/*",
   ".github",
+  ".cargo-husky/*",
+  ".claude-plugin/*",
+  "skills/*",
+  "scripts/*",
+  # Marketing media. README references are rewritten to absolute
+  # https://raw.githubusercontent.com/llamastash/llamastash/main/assets/
+  # URLs so the README still renders on crates.io.
+  "assets/*",
+  # Maintainer-internal docs subtrees. The single-file docs at
+  # docs/{architecture,benchmarks,troubleshooting,usage}.md are kept
+  # since they're linked from the README and useful to users browsing
+  # the crate.
+  "docs/brainstorms/*",
+  "docs/plans/*",
+  "docs/reviews/*",
+  "docs/spikes/*",
+  "docs/runbooks/*",
+  "docs/testing/*",
+  "docs/benchmarks/*",
+  # Integration tests and benches are not used by binary consumers;
+  # `data/benchmark-snapshot.json` is kept because it's `include_str!`'d
+  # into the binary at compile time.
+  "tests/*",
+  "benches/*",
+  # Repo-only files.
+  "AGENTS.md",
   "CONTRIBUTING.md",
+  "Makefile",
+  "TODO.md",
   "*.log",
   "tags",
 ]
