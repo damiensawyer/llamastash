@@ -177,7 +177,9 @@ done
 
 ---
 
-## Step 5 — Dry-run the release pipeline with a prerelease tag that matches `Cargo.toml` - In progress
+## Step 5 — Dry-run the release pipeline with a prerelease tag that matches `Cargo.toml`
+
+> **2026-05-27**: First successful dry-run completed on run [`26503306323`](https://github.com/llamastash/llamastash/actions/runs/26503306323) — 23-asset release published at `v0.0.1-rc1`, all three downstream `publish-*` jobs correctly skipped, tap and site `main` untouched. The three issues that surfaced and were fixed during the dry-run cycle are captured in [Troubleshooting](#troubleshooting-step-5) at the bottom of this section.
 
 Pre-release tags (`vX.Y.Z-<suffix>`) exercise the upstream half of the pipeline only: `create-release` → `build` → `publish-shasums`. The `publish-homebrew`, `publish-site`, and `publish-cargo` jobs all gate on `is_prerelease == 'false'` and are skipped. **This is intentional** — it means the dry run never writes to the tap, site, or crates.io, so cleanup after the dry run is just deleting the tag and the test release.
 
@@ -214,6 +216,24 @@ gh release delete v0.0.1-rc1 --repo llamastash/llamastash --yes --cleanup-tag
 git push origin --delete release-dry-run
 git branch -D release-dry-run
 ```
+
+### Troubleshooting (Step 5)
+
+Three failure modes hit during the first dry-run cycle on 2026-05-27. All three are now permanently addressed in code; this list exists so the same diagnosis doesn't get repeated next cycle.
+
+1. **`release-gate (linux-cpu-only)` fails at UAT `init` with "no GH Releases asset matches this hardware (os=Linux, arch=X86_64)".**
+   Upstream `ggml-org/llama.cpp` sometimes publishes an incomplete asset matrix (observed on tag `b9352`, which shipped 8 assets instead of the usual 22–29, missing the Linux/Windows variants entirely — filed as [ggml-org/llama.cpp#23771](https://github.com/ggml-org/llama.cpp/issues/23771)). The original `fetch_latest_asset` in `src/init/install/gh_releases.rs` only looked at the single most-recent release; an incomplete latest wedged the dry-run gate.
+   *Fix in place*: `fetch_latest_asset` now queries `?per_page=10` and walks back to the newest release that contains a matching asset, logging which releases got skipped. macOS goes through brew so it never hit this. No action needed unless upstream's 10 most-recent releases are all incomplete (which would be a real regression worth investigating).
+
+2. **`release-gate (macos-cpu-only)` fails at `tests/start_model_ipc_test.rs:545` with "call 1 last_params.threads never persisted".**
+   The IPC test's state-file persistence poll loops used 3–5 s deadlines, which flaked on macOS-arm64 GH-hosted runners under cargo test parallel load.
+   *Fix in place*: bumped to 20 s in commit [`e5e4304`](https://github.com/llamastash/llamastash/commit/e5e4304). Watch for it if the same panic message returns on macOS — a 20 s timeout is generous, so a fresh failure here likely means a real bug in the supervisor's recorder path, not flake.
+
+3. **`build <target>-unknown-linux-musl` fails with `linker '<target>-musl-gcc' not found`.**
+   The release build step originally branched on `matrix.use_cross` and ran `cross build` for cross-compiled targets. `cross 0.2.5` detects the env vars that `taiki-e/setup-cross-toolchain-action` exports and falls back to plain `cargo` on the host — which has no musl linker, so the four musl matrix entries failed.
+   *Fix in place*: commit [`3ea0f63`](https://github.com/llamastash/llamastash/commit/3ea0f63) drops the `cross build` branch and always runs `cargo build`, matching the kdash pattern this workflow is descended from. `install-action@cross` is still installed (for ad-hoc debugging) but never invoked from the script.
+
+If a future failure doesn't match one of those three patterns, follow the standard diagnosis path: `gh run view <id> --log-failed | head -200`, then trace the panicking line back to source. Most release-pipeline failure modes are catalogued in `docs/plans/2026-05-19-003-feat-0.2.0-release-setup-plan.md` §Risks & Dependencies.
 
 ---
 
