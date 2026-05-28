@@ -1,8 +1,23 @@
 # LlamaStash
 
+![ci](https://github.com/llamastash/llamastash/actions/workflows/ci.yml/badge.svg)
+![release](https://github.com/llamastash/llamastash/actions/workflows/release.yml/badge.svg)
+[![crates.io](https://img.shields.io/crates/v/llamastash.svg)](https://crates.io/crates/llamastash)
+[![Crate downloads](https://img.shields.io/crates/d/llamastash?label=Crate%20downloads)](https://crates.io/crates/llamastash)
+[![GitHub Downloads](https://img.shields.io/github/downloads/llamastash/llamastash/total.svg?label=GitHub%20downloads)](https://github.com/llamastash/llamastash/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/llamastash/llamastash?color=%23c694ff)](https://github.com/llamastash/llamastash/releases)
+![License](https://img.shields.io/badge/license-MIT-blueviolet.svg)
+![Code size](https://img.shields.io/github/languages/code-size/llamastash/llamastash)
+[![Coverage](https://coveralls.io/repos/github/llamastash/llamastash/badge.svg?branch=main)](https://coveralls.io/github/llamastash/llamastash?branch=main)
+[![GitHub stars](https://img.shields.io/github/stars/llamastash/llamastash?style=social)](https://github.com/llamastash/llamastash)
+
+[![Follow Deepu K Sasidharan on Bluesky](https://img.shields.io/badge/Bluesky-Follow%20deepu105-1185fe?logo=bluesky&logoColor=white)](https://bsky.app/profile/deepu105.bsky.social)
+
 ![Logo](https://raw.githubusercontent.com/llamastash/llamastash/main/assets/logo-h.jpg)
 
-A fast terminal native app (TUI) **and** CLI with init wizard for launching local LLMs via [llama.cpp](https://github.com/ggml-org/llama.cpp) with zero overhead. See [benchmarks](docs/benchmarks.md).
+**Zero-overhead, terminal-native `llama.cpp` launcher.**
+
+A fast TUI **and** CLI with init wizard for launching local LLMs via [llama.cpp](https://github.com/ggml-org/llama.cpp). One Rust binary that's a TUI, a CLI, a daemon, and an OpenAI-compatible proxy. Zero overhead vs raw `llama-server`. See [benchmarks](docs/benchmarks.md).
 
 ## Why
 
