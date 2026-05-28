@@ -6,6 +6,13 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Added
 
+- **`list` shows live STATUS for each model.** Catalog rows now carry
+  a `STATUS` column showing `<glyph> <state> :<port>` for any model
+  with a running supervisor (e.g. `● ready :41100`). The glyph is the
+  same one the TUI uses, lifted via a shared
+  `SurfaceState::from_wire_label` mapping so the two surfaces never
+  drift. `list --json` gains a per-row `status: { state, port,
+  launch_id }` object for agents.
 - **Idle-TTL eviction for proxy-auto-started supervisors.** After
   `proxy.idle_ttl_secs` of no inbound request and no in-flight
   forward, the daemon's eviction sweeper calls `model.stop(5s grace)`
@@ -49,6 +56,10 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Changed
 
+- **`status` text output drops the `PATH` column** in favour of
+  `NAME` (file basename), matching the rest of the CLI's compact
+  human surfaces. `status --json` keeps the full `model_path` so
+  agents pinning the canonical path are unaffected.
 - Apple Metal GPU row in the Host panel now reads `GPU  unified`
   instead of `GPU  unified memory`. The `RAM*` glyph already flags the
   unified-memory machine, so the long form was redundant.

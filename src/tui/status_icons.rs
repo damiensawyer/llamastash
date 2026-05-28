@@ -28,6 +28,24 @@ pub enum SurfaceState {
 /// Glyph and palette colour for a state. Renderers call
 /// `glyph_for(state)` and `colour_for(state, palette)` directly to
 /// keep the dual encoding in lock-step.
+impl SurfaceState {
+  /// Map a daemon wire-form state label (`"ready"`, `"launching"`, …)
+  /// onto a [`SurfaceState`]. Centralised so the TUI's row builder and
+  /// the CLI's `list` STATUS column share one mapping. Unknown labels
+  /// fall back to [`SurfaceState::NotLaunched`] — same behaviour as
+  /// `app.rs`'s inline match did before this was lifted.
+  pub fn from_wire_label(label: &str) -> Self {
+    match label {
+      "launching" => Self::Launching,
+      "loading" => Self::Loading,
+      "ready" => Self::Ready,
+      "error" => Self::Error,
+      "stopped" => Self::Stopped,
+      _ => Self::NotLaunched,
+    }
+  }
+}
+
 pub fn glyph_for(state: SurfaceState) -> char {
   match state {
     SurfaceState::NotLaunched => ' ',

@@ -8,9 +8,12 @@
 //! Tab-separated text is the default human format. Agents pin against
 //! `--json`; humans get something `column -t` friendly.
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
-use crate::cli::resolve::{CatalogRow, StatusSnapshot};
+use crate::cli::resolve::{CatalogRow, RunningRow, StatusSnapshot};
+use crate::tui::status_icons::{glyph_for, SurfaceState};
 
 /// Decode the canonical model path out of a daemon row's nested
 /// `id.path` shape. Centralised so the five CLI subcommands that
@@ -24,21 +27,27 @@ pub fn row_path(v: &Value) -> Option<&str> {
 
 /// Render `list_models` rows as a padded table on TTY, or
 /// tab-separated rows when colors are disabled (piped / `--no-colors` /
-/// `NO_COLOR`). Columns: NAME, ARCH, QUANT, CTX, SIZE.
+/// `NO_COLOR`). Columns: NAME, ARCH, QUANT, CTX, SIZE, STATUS.
 ///
 /// SIZE displays the GGUF weights footprint (matches the TUI list
 /// pane's SIZE column) — PATH was dropped because the canonical paths
 /// dominated line width on real caches. `--json` still carries `path`
 /// for agent consumers.
 ///
+/// STATUS shows the live supervisor state when one exists for the
+/// row's path: a TUI-shared glyph (`● ready`, `◐ loading`, …) followed
+/// by `:<port>`. The column is empty for rows with no supervisor so
+/// the catalog stays uncluttered. `running` is the index produced by
+/// [`resolve::running_index`] — pass an empty map to opt out.
+///
 /// Footer line `(N models)` is appended on TTY only — the piped form
 /// stays byte-stable for `awk -F\t` / `column -t` pipelines.
-pub fn list_human(rows: &[CatalogRow]) -> String {
+pub fn list_human(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) -> String {
   use crate::cli::{colors, format};
   if rows.is_empty() {
     return format!("{}\n", colors::dim("(no models discovered)"));
   }
-  let header = ["NAME", "ARCH", "QUANT", "CTX", "SIZE"];
+  let header = ["NAME", "ARCH", "QUANT", "CTX", "SIZE", "STATUS"];
   let body: Vec<Vec<String>> = rows
     .iter()
     .map(|r| {
@@ -54,7 +63,15 @@ pub fn list_human(rows: &[CatalogRow]) -> String {
       // `weights_bytes` may predate a binary upgrade that fixed the
       // split-shard aggregation). One `stat` per row is cheap.
       let size = display_size(r);
-      vec![r.name(), arch.to_string(), quant.to_string(), ctx, size]
+      let status = running_status_cell(running.get(&r.path));
+      vec![
+        r.name(),
+        arch.to_string(),
+        quant.to_string(),
+        ctx,
+        size,
+        status,
+      ]
     })
     .collect();
   let mut out = format::table(&header, &body);
@@ -63,6 +80,31 @@ pub fn list_human(rows: &[CatalogRow]) -> String {
     out.push('\n');
   }
   out
+}
+
+/// Render the STATUS cell. Empty for non-running rows; for running
+/// rows: `<glyph> <state> :<port>`, reusing the TUI's `glyph_for`
+/// mapping so the two surfaces never drift.
+fn running_status_cell(row: Option<&RunningRow>) -> String {
+  use crate::cli::colors;
+  let Some(r) = row else {
+    return String::new();
+  };
+  let surface = SurfaceState::from_wire_label(&r.state);
+  let glyph = glyph_for(surface);
+  let tty = console::colors_enabled();
+  let state_label = if tty {
+    colors::state(&r.state)
+  } else {
+    r.state.clone()
+  };
+  let port_part = format!(":{port}", port = r.port);
+  let port_part = if tty {
+    colors::dim(&port_part)
+  } else {
+    port_part
+  };
+  format!("{glyph} {state_label} {port_part}")
 }
 
 /// SIZE column for one row. Tries the shared shard-sizes util first
@@ -88,7 +130,7 @@ pub(crate) fn display_size(row: &CatalogRow) -> String {
 /// against this, so column drift requires deliberate intent. Wrapped
 /// in `{"models": [...]}` so every CLI `--json` surface lives behind
 /// the same "always object at the root" rule.
-pub fn list_json(rows: &[CatalogRow]) -> Value {
+pub fn list_json(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) -> Value {
   let arr: Vec<Value> = rows
     .iter()
     .map(|r| {
@@ -112,6 +154,17 @@ pub fn list_json(rows: &[CatalogRow]) -> Value {
       });
       if let Some(id) = &r.model_id {
         row["model_id"] = serde_json::Value::String(id.clone());
+      }
+      // `status` is a small nested object so agents can pin
+      // `models[i].status.state` / `.port` rather than two flat
+      // `status_state` / `status_port` keys. Absent (not `null`) when
+      // the model has no live supervisor.
+      if let Some(live) = running.get(&r.path) {
+        row["status"] = serde_json::json!({
+          "state": live.state,
+          "port": live.port,
+          "launch_id": live.launch_id,
+        });
       }
       row
     })
@@ -179,10 +232,11 @@ pub fn filter_rows(rows: &[CatalogRow], pattern: &str) -> Vec<CatalogRow> {
 ///   pipelines.
 ///
 /// Columns are stable across modes (LAUNCH_ID, STATE, MODE, PORT, PID,
-/// PATH). RSS/CPU% are intentionally not surfaced here even when the
-/// per-PID sampler has primed them — they belong in a future
-/// `--detail` view rather than always-on columns that would push
-/// path truncation onto narrow terminals.
+/// NAME). NAME is the file basename so narrow terminals don't get
+/// crushed by canonical paths; `--json` keeps the full `model_path`
+/// for agents. RSS/CPU% are intentionally not surfaced here even when
+/// the per-PID sampler has primed them — they belong in a future
+/// `--detail` view rather than always-on columns.
 pub fn status_human(snap: &StatusSnapshot) -> String {
   use crate::cli::{colors, format};
 
@@ -237,13 +291,14 @@ pub fn status_human(snap: &StatusSnapshot) -> String {
     out.push_str(&colors::dim("(no managed launches)"));
     out.push('\n');
   } else {
-    let header = ["LAUNCH_ID", "STATE", "MODE", "PORT", "PID", "PATH"];
+    let header = ["LAUNCH_ID", "STATE", "MODE", "PORT", "PID", "NAME"];
     let mut rows: Vec<Vec<String>> = Vec::with_capacity(snap.models.len() + snap.external.len());
     for r in &snap.models {
       let pid = r
         .pid
         .map(|p| p.to_string())
         .unwrap_or_else(|| "-".to_string());
+      let name = r.name();
       rows.push(vec![
         if tty {
           colors::launch_id(&r.launch_id)
@@ -262,15 +317,11 @@ pub fn status_human(snap: &StatusSnapshot) -> String {
           r.port.to_string()
         },
         pid,
-        if tty {
-          colors::path(&r.model_path)
-        } else {
-          r.model_path.clone()
-        },
+        name,
       ]);
     }
     for r in &snap.external {
-      let path = r.model_path.as_deref().unwrap_or(&r.cmdline);
+      let name = r.name();
       // External rows are styled dim end-to-end so they read as
       // observer-only entries vs the bright managed ones.
       let dim_or_plain = |s: &str| if tty { colors::dim(s) } else { s.to_string() };
@@ -280,11 +331,7 @@ pub fn status_human(snap: &StatusSnapshot) -> String {
         dim_or_plain("-"),
         dim_or_plain("-"),
         dim_or_plain(&r.pid.to_string()),
-        if tty {
-          colors::dim(&colors::path(path))
-        } else {
-          path.to_string()
-        },
+        if tty { colors::dim(&name) } else { name },
       ]);
     }
     out.push_str(&format::table(&header, &rows));
@@ -550,10 +597,10 @@ mod tests {
     // produced so awk/cut/column pipelines don't drift.
     let _g = ColorGuard::set(false);
     let rows = vec![row("qwen", "qwen2", "Q4_K", 8192)];
-    let s = list_human(&rows);
+    let s = list_human(&rows, &HashMap::new());
     assert_eq!(
       s,
-      "NAME\tARCH\tQUANT\tCTX\tSIZE\nqwen.gguf\tqwen2\tQ4_K\t8192\t3.9G\n"
+      "NAME\tARCH\tQUANT\tCTX\tSIZE\tSTATUS\nqwen.gguf\tqwen2\tQ4_K\t8192\t3.9G\t\n"
     );
   }
 
@@ -564,7 +611,7 @@ mod tests {
       row("qwen", "qwen2", "Q4_K", 8192),
       row("phi", "phi3", "Q5_K", 4096),
     ];
-    let s = list_human(&rows);
+    let s = list_human(&rows, &HashMap::new());
     let plain = console::strip_ansi_codes(&s);
     assert!(plain.starts_with("NAME"), "header missing: {plain:?}");
     assert!(
@@ -581,7 +628,7 @@ mod tests {
     // bytes either way.
     for enabled in [true, false] {
       let _g = ColorGuard::set(enabled);
-      let s = list_human(&[]);
+      let s = list_human(&[], &HashMap::new());
       assert!(console::strip_ansi_codes(&s).contains("no models"));
     }
   }
@@ -589,7 +636,7 @@ mod tests {
   #[test]
   fn list_json_wraps_rows_in_models_object_with_documented_keys() {
     let rows = vec![row("qwen", "qwen2", "Q4_K", 8192)];
-    let v = list_json(&rows);
+    let v = list_json(&rows, &HashMap::new());
     let arr = v
       .get("models")
       .and_then(|m| m.as_array())
@@ -615,7 +662,7 @@ mod tests {
 
   #[test]
   fn list_json_empty_catalog_returns_empty_models_array() {
-    let v = list_json(&[]);
+    let v = list_json(&[], &HashMap::new());
     assert_eq!(v, serde_json::json!({"models": []}));
   }
 
@@ -628,7 +675,7 @@ mod tests {
     // BLAKE3 column.
     let mut r = row("qwen", "qwen2", "Q4_K", 8192);
     r.model_id = None;
-    let v = list_json(&[r]);
+    let v = list_json(&[r], &HashMap::new());
     let row_v = v["models"][0].clone();
     assert!(
       row_v.get("model_id").is_none(),
@@ -921,11 +968,11 @@ mod tests {
     // Regression guard: managed + external rows are exact tabs, no
     // padding, no color, no truncation.
     assert!(
-      s.contains("LAUNCH_ID\tSTATE\tMODE\tPORT\tPID\tPATH\n"),
+      s.contains("LAUNCH_ID\tSTATE\tMODE\tPORT\tPID\tNAME\n"),
       "header drifted: {s:?}"
     );
-    assert!(s.contains("L1\tready\tchat\t41100\t123\t/m/qwen.gguf\n"));
-    assert!(s.contains("external\texternal\t-\t-\t9999\t/m/ext.gguf\n"));
+    assert!(s.contains("L1\tready\tchat\t41100\t123\tqwen.gguf\n"));
+    assert!(s.contains("external\texternal\t-\t-\t9999\text.gguf\n"));
   }
 
   #[test]

@@ -111,6 +111,27 @@ pub struct RunningRow {
   pub latest_cpu_pct: Option<f32>,
 }
 
+impl RunningRow {
+  /// Human-friendly basename (mirrors [`CatalogRow::name`]). Strips
+  /// the parent directory but keeps the extension so split-shard
+  /// files stay distinguishable. Falls back to the raw path when it
+  /// has no separator.
+  pub fn name(&self) -> String {
+    basename(&self.model_path)
+  }
+}
+
+/// Internal basename helper shared by the row types above. Kept in
+/// this module so the row impls stay self-contained — callers should
+/// use `RunningRow::name()` / `ExternalRow::name()`, not this
+/// function directly.
+fn basename(path: &str) -> String {
+  std::path::Path::new(path)
+    .file_name()
+    .map(|s| s.to_string_lossy().into_owned())
+    .unwrap_or_else(|| path.to_string())
+}
+
 /// Fetch every catalog row via `list_models`. Centralised here so
 /// resolvers and the `list` handler share parsing.
 pub async fn fetch_catalog(client: &mut Client) -> Result<Vec<CatalogRow>, CliExit> {
@@ -305,6 +326,18 @@ pub enum ResolveError {
   Many(Vec<CatalogRow>),
 }
 
+/// Index running rows by canonical model path. Returns the first
+/// running row per path (multiple supervisors for one path is rare
+/// but possible — the picker uses the most recent ready_at row first
+/// when this matters; here the list view just needs *some* live row).
+pub fn running_index(rows: &[RunningRow]) -> std::collections::HashMap<String, RunningRow> {
+  let mut out = std::collections::HashMap::with_capacity(rows.len());
+  for r in rows {
+    out.entry(r.model_path.clone()).or_insert_with(|| r.clone());
+  }
+  out
+}
+
 /// Fetch the supervisor + external snapshot via `status`.
 pub async fn fetch_status(client: &mut Client) -> Result<StatusSnapshot, CliExit> {
   let body = client
@@ -412,6 +445,20 @@ pub struct ExternalRow {
   pub pid: u64,
   pub cmdline: String,
   pub model_path: Option<String>,
+}
+
+impl ExternalRow {
+  /// Best-effort label for an external row. Prefers the discovered
+  /// model path's basename so the row reads like a managed launch;
+  /// falls back to the cmdline's basename when the path is unknown
+  /// rather than dumping the full argv into a narrow column.
+  pub fn name(&self) -> String {
+    self
+      .model_path
+      .as_deref()
+      .map(basename)
+      .unwrap_or_else(|| basename(&self.cmdline))
+  }
 }
 
 fn parse_running_row(v: &Value) -> Option<RunningRow> {

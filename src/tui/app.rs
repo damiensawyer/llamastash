@@ -1652,14 +1652,7 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
     .and_then(|s| s.get("state"))
     .and_then(Value::as_str)
     .unwrap_or("");
-  let state = match state_label {
-    "launching" => SurfaceState::Launching,
-    "loading" => SurfaceState::Loading,
-    "ready" => SurfaceState::Ready,
-    "error" => SurfaceState::Error,
-    "stopped" => SurfaceState::Stopped,
-    _ => SurfaceState::NotLaunched,
-  };
+  let state = SurfaceState::from_wire_label(state_label);
   let rss_bytes = row.get("latest_rss_bytes").and_then(Value::as_u64);
   let cpu_pct = row
     .get("latest_cpu_pct")
