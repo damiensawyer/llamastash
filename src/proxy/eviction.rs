@@ -83,7 +83,7 @@ fn sweep_cadence(ttl: Duration) -> Duration {
 /// missing stamp signals either a race or a test fixture where the
 /// eviction predicate shouldn't fire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SweepDecision {
+pub(crate) enum SweepDecision {
   Skip,
   Evict,
 }
@@ -112,6 +112,12 @@ pub(crate) fn decide(
 
 /// One sweep pass. Public for integration tests; production use
 /// comes via [`run`].
+///
+/// Per-row `model.stop(GRACE).await` is dispatched via `tokio::spawn`
+/// so a sweep with N eligible rows doesn't serialise into `N × grace`
+/// seconds of cadence drift. The supervisor's own state-machine
+/// watcher drives Ready → Stopping → Stopped regardless of who's
+/// awaiting the stop future.
 pub async fn sweep_once(state: &Arc<ProxyState>, ttl: Duration) {
   let snap = state.ctx.supervisors.snapshot().await;
   for (launch_id, model) in snap {
@@ -137,7 +143,9 @@ pub async fn sweep_once(state: &Arc<ProxyState>, ttl: Duration) {
       served = model.params().model_path.display(),
       idle = idle_for,
     );
-    let _ = model.stop(EVICT_STOP_GRACE).await;
+    tokio::spawn(async move {
+      let _ = model.stop(EVICT_STOP_GRACE).await;
+    });
   }
 }
 

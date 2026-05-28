@@ -334,10 +334,10 @@ impl hyper::body::Body for GuardedBody {
     self: std::pin::Pin<&mut Self>,
     cx: &mut std::task::Context<'_>,
   ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-    // `BoxBody` is `Pin<Box<dyn Body + Send>>` — already `Unpin`
-    // externally — so safely projecting through `&mut self` to its
-    // `Pin::new` for the inner poll is a structural projection
-    // (`_guard` is not pinned).
+    // `GuardedBody` is `Unpin` (both fields are: `BoxBody` is a
+    // `Pin<Box<…>>` wrapper, `InflightGuard` holds only an `Arc`), so
+    // `get_mut` is safe and `Pin::new(inner)` re-pins for the inner
+    // body's `poll_frame` contract.
     let inner = &mut self.get_mut().inner;
     std::pin::Pin::new(inner).poll_frame(cx)
   }
