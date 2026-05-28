@@ -175,7 +175,7 @@ fn build_harness() -> Harness {
     let launch_id = registry.next_id();
     registry.insert(launch_id, supervisor.clone()).await;
     let ctx = MethodContext::with_catalog(ShutdownToken::new(), catalog).with_supervisors(registry);
-    let state = ProxyState::from_context(&ctx, false);
+    let state = ProxyState::from_context(&ctx, false, true);
 
     // 3) Spin up the proxy listener on an ephemeral port.
     let shutdown = ShutdownToken::new();

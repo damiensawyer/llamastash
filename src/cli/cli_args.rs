@@ -200,6 +200,16 @@ pub enum DaemonAction {
     /// (any of the three turns it on).
     #[arg(long)]
     ollama_compat: bool,
+    /// Disable the family-MRU fallback. When a requested model fails
+    /// to auto-start, the proxy normally serves the request from
+    /// another Ready supervisor (with `x-llamastash-fallback-reason`
+    /// stamped on the response). Pass this flag to make the proxy
+    /// return a 503 `launch_failed` instead. OR-ed with
+    /// `proxy.fallback_enabled: false` in `config.yaml` and the
+    /// `LLAMASTASH_NO_PROXY_FALLBACK` env var — any of the three
+    /// disables the fallback.
+    #[arg(long)]
+    no_proxy_fallback: bool,
   },
   /// Stop the running daemon. Running models keep running.
   Stop,
@@ -1205,12 +1215,14 @@ mod tests {
         socket_path,
         proxy_port,
         ollama_compat,
+        no_proxy_fallback,
       })) => {
         assert!(!foreground);
         assert!(state_dir.is_none());
         assert!(socket_path.is_none());
         assert!(proxy_port.is_none());
         assert!(!ollama_compat);
+        assert!(!no_proxy_fallback);
       }
       other => panic!("expected daemon start, got {other:?}"),
     }
@@ -1248,6 +1260,7 @@ mod tests {
         socket_path,
         proxy_port,
         ollama_compat,
+        no_proxy_fallback,
       })) => {
         assert!(!foreground);
         assert_eq!(state_dir, Some(PathBuf::from("/tmp/llamastash-test-state")));
@@ -1257,6 +1270,7 @@ mod tests {
         );
         assert!(proxy_port.is_none());
         assert!(!ollama_compat);
+        assert!(!no_proxy_fallback);
       }
       other => panic!("expected daemon start with paths, got {other:?}"),
     }
@@ -1269,12 +1283,14 @@ mod tests {
         socket_path,
         proxy_port,
         ollama_compat,
+        no_proxy_fallback,
       })) => {
         assert!(!foreground);
         assert!(state_dir.is_none());
         assert!(socket_path.is_none());
         assert_eq!(proxy_port, Some(8080));
         assert!(!ollama_compat);
+        assert!(!no_proxy_fallback);
       }
       other => panic!("expected daemon start --proxy-port 8080, got {other:?}"),
     }
@@ -1302,6 +1318,19 @@ mod tests {
         assert!(proxy_port.is_none());
       }
       other => panic!("expected daemon start --ollama-compat, got {other:?}"),
+    }
+
+    // --no-proxy-fallback flips the disable bool; build_options OR-merges
+    // it with the config + env so any of the three turns the family-MRU
+    // fallback off.
+    let cli_no_fallback = parse(&["daemon", "start", "--no-proxy-fallback"]);
+    match cli_no_fallback.command {
+      Some(Command::Daemon(DaemonAction::Start {
+        no_proxy_fallback, ..
+      })) => {
+        assert!(no_proxy_fallback);
+      }
+      other => panic!("expected daemon start --no-proxy-fallback, got {other:?}"),
     }
 
     let cli_stop = parse(&["daemon", "stop"]);

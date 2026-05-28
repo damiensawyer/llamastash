@@ -351,7 +351,7 @@ mod tests {
   async fn spawn_proxy_on_ephemeral_port() -> (SocketAddr, ShutdownToken, StatusCell, JoinHandle<()>)
   {
     let ctx = MethodContext::new(ShutdownToken::new());
-    let state = ProxyState::from_context(&ctx, false);
+    let state = ProxyState::from_context(&ctx, false, true);
     let token = ctx.shutdown.clone();
     let status = new_status_cell();
     let status_for_task = Arc::clone(&status);
@@ -524,7 +524,7 @@ mod tests {
     // an adjacent free port and turn the assertion green for the
     // wrong reason.
     let ctx = MethodContext::new(ShutdownToken::new());
-    let state = ProxyState::from_context(&ctx, false);
+    let state = ProxyState::from_context(&ctx, false, true);
     let token = ctx.shutdown.clone();
     let status = new_status_cell();
     serve_with_options(
@@ -558,7 +558,7 @@ mod tests {
       .expect("camp bind");
     let camp_addr = camp.local_addr().expect("camp addr");
     let ctx = MethodContext::new(ShutdownToken::new());
-    let state = ProxyState::from_context(&ctx, false);
+    let state = ProxyState::from_context(&ctx, false, true);
     let token = ctx.shutdown.clone();
     let status = new_status_cell();
     // Run the listener under a shutdown so the test can clean up; the

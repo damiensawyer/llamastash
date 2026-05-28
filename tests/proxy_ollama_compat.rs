@@ -201,7 +201,7 @@ async fn proxy_state_with_models_compat(
     catalog.upsert(m).await;
   }
   let ctx = MethodContext::with_catalog(ShutdownToken::new(), catalog);
-  ProxyState::from_context(&ctx, ollama_compat)
+  ProxyState::from_context(&ctx, ollama_compat, true)
 }
 
 #[allow(dead_code)]
@@ -594,7 +594,7 @@ async fn proxy_state_with_models_and_registry(
     catalog.upsert(m).await;
   }
   let ctx = MethodContext::with_catalog(ShutdownToken::new(), catalog).with_supervisors(registry);
-  ProxyState::from_context(&ctx, false)
+  ProxyState::from_context(&ctx, false, true)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

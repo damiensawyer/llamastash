@@ -324,6 +324,15 @@ pub(crate) async fn handle_not_running(
       .await
     }
     LaunchOutcome::Failed { cause } => {
+      // Operator can disable the family-MRU fallback entirely (see
+      // `ProxyConfig::fallback_enabled` and the `--no-proxy-fallback`
+      // CLI / `LLAMASTASH_NO_PROXY_FALLBACK` env overrides). When
+      // off, a launch failure flows straight to the 503
+      // `launch_failed` response below — clients never silently get a
+      // payload from a different model.
+      if !state.fallback_enabled {
+        return launch_failed_response(&cause, &requested_model);
+      }
       // Family-MRU fallback. Walk the supervisor snapshot, filter
       // to Ready, attach each entry's catalog arch + MRU
       // timestamp, then defer to `pick_fallback` for the policy.

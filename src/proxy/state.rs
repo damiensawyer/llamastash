@@ -63,15 +63,28 @@ pub struct ProxyState {
   /// `"LlamaStash is running"`); no other surface branches on it. Set
   /// once at daemon startup; never mutated thereafter.
   pub(crate) ollama_compat: bool,
+  /// `true` when the family-MRU fallback is enabled (the default). When
+  /// `false`, a failed auto-start returns a 503 `launch_failed`
+  /// envelope directly instead of picking another Ready supervisor and
+  /// serving the request with `x-llamastash-fallback-reason`. Set once
+  /// at daemon startup from
+  /// [`crate::config::loader::ProxyConfig::fallback_enabled`] (after
+  /// the CLI / env OR-chain that may force it off); never mutated
+  /// thereafter.
+  pub(crate) fallback_enabled: bool,
 }
 
 impl ProxyState {
   /// Project the relevant handles out of an existing [`MethodContext`].
   /// The proxy task receives this handle from `run_foreground` after
   /// the rest of the daemon context has been assembled. `ollama_compat`
-  /// reflects the resolved mode bool from
-  /// `ProxyConfig::ollama_compat` (after the CLI / env OR-chain).
-  pub fn from_context(ctx: &MethodContext, ollama_compat: bool) -> Arc<Self> {
+  /// and `fallback_enabled` reflect the resolved bools from
+  /// `ProxyConfig` (after the CLI / env OR-chain).
+  pub fn from_context(
+    ctx: &MethodContext,
+    ollama_compat: bool,
+    fallback_enabled: bool,
+  ) -> Arc<Self> {
     Arc::new(Self {
       http_client: Arc::new(build_http_client()),
       coalesce: Coalesce::new(),
@@ -79,6 +92,7 @@ impl ProxyState {
       failures: Arc::new(FailureTracker::new()),
       ctx: ctx.clone(),
       ollama_compat,
+      fallback_enabled,
     })
   }
 }

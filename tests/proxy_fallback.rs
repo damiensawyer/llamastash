@@ -150,6 +150,16 @@ async fn build_state(
   log_dir: &Path,
   port_range: PortRange,
 ) -> (Arc<ProxyState>, MethodContext) {
+  build_state_with_fallback(models, registry, log_dir, port_range, true).await
+}
+
+async fn build_state_with_fallback(
+  models: Vec<DiscoveredModel>,
+  registry: SupervisorRegistry,
+  log_dir: &Path,
+  port_range: PortRange,
+  fallback_enabled: bool,
+) -> (Arc<ProxyState>, MethodContext) {
   let catalog = ModelCatalog::new();
   for m in models {
     catalog.upsert(m).await;
@@ -165,7 +175,7 @@ async fn build_state(
   let ctx = MethodContext::with_catalog(token, catalog)
     .with_supervisors(registry)
     .with_launch_env(env);
-  let state = ProxyState::from_context(&ctx, false);
+  let state = ProxyState::from_context(&ctx, false, fallback_enabled);
   (state, ctx)
 }
 
@@ -450,6 +460,63 @@ async fn second_request_after_launch_failure_falls_back_independently() {
   assert_eq!(
     header_value(&h2, "x-llamastash-served-by"),
     Some("ready-qwen3")
+  );
+
+  stop_all(&ctx, &[live]).await;
+  shutdown_listener(shutdown, listener_handle).await;
+  std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- Scenario 11: fallback disabled — 503 instead of cross-model serve
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fallback_disabled_returns_503_instead_of_picking_other_model() {
+  // When the operator sets `ProxyConfig::fallback_enabled = false`
+  // (via config, `--no-proxy-fallback`, or the env var), a failed
+  // auto-start must surface as a 503 `launch_failed` envelope —
+  // never as a silent cross-model serve. This is the contract the
+  // disable flag exists to enforce: an embedding client must not
+  // receive a chat-shape payload from a fallback Ready supervisor.
+  let dir = unique_temp("nofallback");
+  let log_dir = dir.join("logs");
+  std::fs::create_dir_all(&log_dir).unwrap();
+  // Same shape as Scenario 6: a Ready qwen3 model that would
+  // otherwise be the fallback target, plus a catalog row for a
+  // missing file whose auto-start will fail.
+  let ready_path = write_gguf(&dir, "ready-qwen3.gguf", "qwen3");
+  let registry = SupervisorRegistry::new();
+  let live = pre_launch(&ready_path, &registry, &log_dir, LaunchMode::Chat).await;
+
+  let missing = dir.join("missing-qwen3.gguf");
+  let (state, ctx) = build_state_with_fallback(
+    vec![
+      discovered(&ready_path, Some("ready-qwen3"), Some("qwen3")),
+      discovered(&missing, Some("missing-qwen3"), Some("qwen3")),
+    ],
+    registry,
+    &log_dir,
+    allocate_port_range(),
+    false,
+  )
+  .await;
+  let (addr, shutdown, listener_handle) = spawn_listener(state).await;
+
+  let body = r#"{"model":"missing-qwen3","messages":[]}"#;
+  let (status, headers, _response) = http_post(addr, "/v1/chat/completions", body).await;
+  assert_eq!(
+    status, 503,
+    "fallback disabled — launch_failed must return 503"
+  );
+  // No fallback headers are stamped on the 503 path.
+  assert_eq!(
+    header_value(&headers, "x-llamastash-served-by"),
+    None,
+    "served-by header must not leak on 503"
+  );
+  assert_eq!(
+    header_value(&headers, "x-llamastash-fallback-reason"),
+    None,
+    "fallback-reason header must not leak on 503"
   );
 
   stop_all(&ctx, &[live]).await;

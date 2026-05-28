@@ -37,6 +37,7 @@ pub async fn handle(action: DaemonAction, cli: &Cli, config: &Config) -> Result<
       socket_path,
       proxy_port,
       ollama_compat,
+      no_proxy_fallback,
     } => {
       handle_start(
         foreground,
@@ -44,6 +45,7 @@ pub async fn handle(action: DaemonAction, cli: &Cli, config: &Config) -> Result<
         socket_path,
         proxy_port,
         ollama_compat,
+        no_proxy_fallback,
         cli,
         config,
       )
@@ -54,12 +56,20 @@ pub async fn handle(action: DaemonAction, cli: &Cli, config: &Config) -> Result<
   }
 }
 
+// `handle_start` is the single thin shim that unpacks every
+// `daemon start` flag and feeds them into `build_options`. Each new
+// CLI flag added here costs an argument; the alternative (a typed
+// `StartFlags` struct) would just push the unpack one level out
+// without changing how much information crosses the boundary. Allow
+// the count to grow with the CLI surface instead.
+#[allow(clippy::too_many_arguments)]
 async fn handle_start(
   foreground: bool,
   state_dir: Option<PathBuf>,
   socket_path: Option<PathBuf>,
   proxy_port: Option<u16>,
   ollama_compat: bool,
+  no_proxy_fallback: bool,
   cli: &Cli,
   config: &Config,
 ) -> Result<()> {
@@ -68,6 +78,7 @@ async fn handle_start(
     socket_path,
     proxy_port,
     ollama_compat,
+    no_proxy_fallback,
     cli,
     config,
   )?;
@@ -175,6 +186,7 @@ pub(crate) fn build_options(
   socket_path: Option<PathBuf>,
   proxy_port: Option<u16>,
   ollama_compat_cli: bool,
+  no_proxy_fallback_cli: bool,
   cli: &Cli,
   config: &Config,
 ) -> Result<DaemonOptions> {
@@ -219,6 +231,16 @@ pub(crate) fn build_options(
   // treated as false.
   let env_compat = env_flag_truthy("LLAMASTASH_OLLAMA_COMPAT");
   opts.proxy.ollama_compat = opts.proxy.ollama_compat || ollama_compat_cli || env_compat;
+  // Fallback-disable: OR of (config field cleared, `--no-proxy-fallback`
+  // CLI flag, `LLAMASTASH_NO_PROXY_FALLBACK` env var). Any one of the
+  // three turns the family-MRU fallback off — re-enabling requires
+  // unsetting all of them and keeping `fallback_enabled: true` in the
+  // config (which is the default). The CLI flag can only disable; we
+  // never re-enable from CLI on top of a config-level `false`.
+  let env_no_fallback = env_flag_truthy("LLAMASTASH_NO_PROXY_FALLBACK");
+  if no_proxy_fallback_cli || env_no_fallback {
+    opts.proxy.fallback_enabled = false;
+  }
   opts.propagated_cli_args = propagated_cli_args(cli);
   Ok(opts)
 }
@@ -595,11 +617,12 @@ mod tests {
         enabled: true,
         port: Some(22222),
         ollama_compat: false,
+        fallback_enabled: true,
         header_read_timeout_secs: 45,
       },
       ..Config::default()
     };
-    let opts = build_options(None, None, None, false, &cli, &config).expect("build_options");
+    let opts = build_options(None, None, None, false, false, &cli, &config).expect("build_options");
     assert_eq!(
       opts.proxy.port,
       Some(22222),
@@ -619,12 +642,14 @@ mod tests {
         enabled: true,
         port: Some(22222),
         ollama_compat: false,
+        fallback_enabled: true,
         header_read_timeout_secs: 30,
       },
       ..Config::default()
     };
     // The CLI override (Some(8080)) beats config.proxy.port.
-    let opts = build_options(None, None, Some(8080), false, &cli, &config).expect("build_options");
+    let opts =
+      build_options(None, None, Some(8080), false, false, &cli, &config).expect("build_options");
     assert_eq!(opts.proxy.port, Some(8080), "CLI flag overrides config");
     assert_eq!(opts.proxy.effective_port(), 8080);
     // Other proxy fields still come from config (not reset).
@@ -639,7 +664,7 @@ mod tests {
     // 11435 (default mode) when nothing pins `port` explicitly.
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
-    let opts = build_options(None, None, None, false, &cli, &config).expect("build_options");
+    let opts = build_options(None, None, None, false, false, &cli, &config).expect("build_options");
     assert_eq!(opts.proxy.port, None);
     assert_eq!(opts.proxy.effective_port(), 11435);
     assert!(!opts.proxy.ollama_compat);
@@ -649,7 +674,7 @@ mod tests {
   fn build_options_ollama_compat_cli_flag_flips_mode_and_default_port() {
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
-    let opts = build_options(None, None, None, true, &cli, &config).expect("build_options");
+    let opts = build_options(None, None, None, true, false, &cli, &config).expect("build_options");
     assert!(opts.proxy.ollama_compat);
     // Port stays None at the schema level — the CLI flag drives the
     // mode bool, and `effective_port()` derives the runtime port.
@@ -669,17 +694,59 @@ mod tests {
       ..Config::default()
     };
     let opts_config =
-      build_options(None, None, None, false, &cli, &config_compat).expect("build_options");
+      build_options(None, None, None, false, false, &cli, &config_compat).expect("build_options");
     assert!(opts_config.proxy.ollama_compat);
 
     // CLI-only: config has compat=false, CLI flag on → enabled.
     let config_off = Config::default();
-    let opts_cli = build_options(None, None, None, true, &cli, &config_off).expect("build_options");
+    let opts_cli =
+      build_options(None, None, None, true, false, &cli, &config_off).expect("build_options");
     assert!(opts_cli.proxy.ollama_compat);
 
     // Both off (neither config nor CLI) → disabled.
     let opts_neither =
-      build_options(None, None, None, false, &cli, &config_off).expect("build_options");
+      build_options(None, None, None, false, false, &cli, &config_off).expect("build_options");
     assert!(!opts_neither.proxy.ollama_compat);
+  }
+
+  #[test]
+  fn build_options_no_proxy_fallback_cli_flag_clears_fallback_enabled() {
+    let cli = parse_cli(&["daemon", "start"]);
+    let config = Config::default();
+    // Default is fallback_enabled = true.
+    let baseline =
+      build_options(None, None, None, false, false, &cli, &config).expect("build_options baseline");
+    assert!(baseline.proxy.fallback_enabled);
+    // CLI flag forces it off.
+    let opts = build_options(None, None, None, false, true, &cli, &config)
+      .expect("build_options no-fallback");
+    assert!(!opts.proxy.fallback_enabled);
+  }
+
+  #[test]
+  fn build_options_no_proxy_fallback_or_combines_config_cli() {
+    // Config-only: config has fallback_enabled=false, CLI off → disabled.
+    let cli = parse_cli(&["daemon", "start"]);
+    let config_off_fallback = Config {
+      proxy: crate::config::loader::ProxyConfig {
+        fallback_enabled: false,
+        ..crate::config::loader::ProxyConfig::default()
+      },
+      ..Config::default()
+    };
+    let opts_config = build_options(None, None, None, false, false, &cli, &config_off_fallback)
+      .expect("build_options");
+    assert!(!opts_config.proxy.fallback_enabled);
+
+    // CLI-only: config has fallback_enabled=true (default), CLI on → disabled.
+    let config_default = Config::default();
+    let opts_cli =
+      build_options(None, None, None, false, true, &cli, &config_default).expect("build_options");
+    assert!(!opts_cli.proxy.fallback_enabled);
+
+    // Both off → fallback_enabled stays true (the default).
+    let opts_neither =
+      build_options(None, None, None, false, false, &cli, &config_default).expect("build_options");
+    assert!(opts_neither.proxy.fallback_enabled);
   }
 }

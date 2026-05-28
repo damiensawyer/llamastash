@@ -125,6 +125,23 @@ pub struct ProxyConfig {
   /// one of them enables the mode for that daemon process.
   #[serde(default)]
   pub ollama_compat: bool,
+  /// Family-MRU fallback behaviour when a requested model fails to
+  /// auto-start. Default `true`: the proxy picks another Ready
+  /// supervisor (same arch first, then any) and serves the request
+  /// with `x-llamastash-fallback-reason`. Set to `false` to make the
+  /// proxy return a 503 `launch_failed` envelope instead — useful
+  /// when a client must not silently receive a response from a
+  /// different model (e.g. an embedding client that would
+  /// mis-interpret a chat-completion payload).
+  ///
+  /// CLI override: `--no-proxy-fallback` (only disables; cannot
+  /// re-enable from the CLI). Env override:
+  /// `LLAMASTASH_NO_PROXY_FALLBACK=1`. Any of the three "disable"
+  /// signals turns it off — re-enabling requires unsetting all of
+  /// them and setting `fallback_enabled: true` in config (the
+  /// default).
+  #[serde(default = "ProxyConfig::default_fallback_enabled")]
+  pub fallback_enabled: bool,
   /// How long hyper waits for a client to finish sending request
   /// headers, in seconds. Default `30`. Bounds partial-request clients
   /// (crashed agents leaving sockets half-open, slow-loris-style
@@ -151,6 +168,10 @@ impl ProxyConfig {
   fn default_header_read_timeout_secs() -> u64 {
     30
   }
+
+  fn default_fallback_enabled() -> bool {
+    true
+  }
 }
 
 impl Default for ProxyConfig {
@@ -159,6 +180,7 @@ impl Default for ProxyConfig {
       enabled: Self::default_enabled(),
       port: None,
       ollama_compat: false,
+      fallback_enabled: Self::default_fallback_enabled(),
       header_read_timeout_secs: Self::default_header_read_timeout_secs(),
     }
   }

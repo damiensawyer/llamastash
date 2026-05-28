@@ -168,7 +168,7 @@ async fn proxy_state_with_models(models: Vec<DiscoveredModel>) -> Arc<ProxyState
     catalog.upsert(m).await;
   }
   let ctx = MethodContext::with_catalog(ShutdownToken::new(), catalog);
-  ProxyState::from_context(&ctx, false)
+  ProxyState::from_context(&ctx, false, true)
 }
 
 // --- direct-listener tests ----------------------------------------------

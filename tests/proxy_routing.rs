@@ -196,7 +196,7 @@ async fn proxy_state_with(
   }
   let ctx =
     MethodContext::with_catalog(ShutdownToken::new(), catalog).with_supervisors(supervisors);
-  ProxyState::from_context(&ctx, false)
+  ProxyState::from_context(&ctx, false, true)
 }
 
 /// Send an HTTP POST and read the response head + body. Returns
