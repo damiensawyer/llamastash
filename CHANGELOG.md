@@ -4,11 +4,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
-### Fixed
-
-- `llamastash init` now walks back through the 10 most-recent `ggml-org/llama.cpp` releases when the latest release ships an incomplete asset matrix (observed on `b9352`). Previously, an incomplete upstream release would wedge `init` with "no GH Releases asset matches this hardware" until a new release was published.
-
-## [0.0.1] — 2026-05-26
+## [0.0.1] — 2026-05-28
 
 First publicly-installable release. A single `llamastash` binary acts as TUI, CLI, and on-demand daemon for running local LLMs via [llama.cpp](https://github.com/ggml-org/llama.cpp). Distributed via Cargo, a Homebrew tap, and a GitHub-hosted install script, with a marketing site at [llamastash.dev](https://llamastash.dev).
 

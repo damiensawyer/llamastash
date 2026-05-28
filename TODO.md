@@ -74,20 +74,18 @@ Two release tracks:
     - [x] Qwen3.6-35B-A3B-Q8_0
   - [ ] AMD GPU : Linux
     - [ ] gemma-4-E2B-it-Q4_K_M defaults
-  - [ ] Nvidia : Linux
+  - [x] Nvidia : Linux
     - [ ] gemma-4-E2B-it-Q4_K_M defaults
-  - [ ] Apple Silicon : macOS
-    - [ ] gemma-4-E2B-it-Q4_K_M defaults
+  - [x] Apple Silicon : macOS
+    - [x] Qwen2.5-0.5B-Instruct Q4_K_M
 - [x] **IP**: Test Proxy with OpenCode.
   - [x] ~~Proxy quick benchmark~~ — Suite C orchestrator at [`scripts/bench/proxy/orchestrator.py`](scripts/bench/proxy/orchestrator.py); brings up a model via the existing `LlamaStashDriver` and runs `chat_turn` alternating between the direct `llama-server` port and the proxy (`127.0.0.1:11434`). On `deepu-flowz13-arch` with `gemma-4-E2B-it-Q4_K_M` (15 reps, alternating order): TTFT p50 +0.45 ms (52.37 → 52.82 ms), decode p50 unchanged (92.80 → 92.70 tok/s). Result + method at [`docs/benchmarks/proxy/results.md`](docs/benchmarks/proxy/results.md); raw JSON under [`docs/benchmarks/proxy/deepu-flowz13-arch/`](docs/benchmarks/proxy/).
   - [x] **Auto-start retry cap**: when the proxy/supervisor relaunches a failing model, cap the attempts (e.g. 3 retries within a short window) and surface a clear error instead of looping. Observed 2026-05-25 with `Qwen3.6-27B-Q4_K_M` via OpenCode — 10+ failed launches in ~30s spamming logs while the real cause was VRAM pressure from the previously-loaded `gemma-4-E2B-it-Q4_K_M`. See `~/.cache/llamastash/logs/Qwen3.6-27B-Q4_K_M-113ab00c-17797117{36..823}.log`.
-- [ ] **IP**: Manual UAT smoke run
+- [x] **IP**: Manual UAT smoke run
   - [x] AMD APU ROCm : Linux
   - [x] AMD APU Vulkan : Linux
-  - [ ] AMD GPU : Linux
-  - [ ] Nvidia : Linux
-  - [ ] Nvidia Vulkan: Linux
-  - [ ] Apple Metal : macOS
+  - [x] Nvidia Vulkan: Linux
+  - [x] Apple Metal : macOS - HF download skipped due to proxy issues
   - [x] CPU : macOS -> CD
   - [x] CPU : linux -> CD
   - [x] Update CI for cpu only run. First optimize the nightly builds (fold into release)
@@ -105,8 +103,16 @@ Two release tracks:
   - [ ] Release blog.
   - [ ] Social promotion — research an approach for max reach.
 
-### Follow-up
+## R2 (post-v0.0.1 roadmap)
 
+### High priority
+
+- [ ] Manual UAT smoke run
+  - [ ] Nvidia CUDA: Linux
+  - [ ] Apple Metal : macOS
+  - [ ] AMD GPU ROCm: Linux
+  - [ ] AMD GPU Vulkan: Linux
+- [ ] AUR package
 - [ ] The Model drill in page inside HF pull (the last page) doesnt scroll.
 - [ ] flag to disable proxy fallback (or flip to off by default?)
 - [ ] Offer to update OpenCode and other supported tools during `init`
@@ -114,22 +120,18 @@ Two release tracks:
 - [ ] `show` command shows model info. gguf parses values, full path, size, etc, arch defauklts, last run vals, and any other useful stuff
 - [ ] Add a line in help page about the `*` in the `RAM*` in Host panel.
 - [ ] Publish to clawhub/Hermes/etc
-- [ ] check and make sure HTTP and CLI surfaces are consistent and reuses code and flow where it makes sense.
+- [ ] **Build CUDA llama.cpp prebuilts in CD** — ggml-org ships CUDA only for Windows (`cudart-llama-bin-win-cuda-{12.4,13.3}-x64.zip`); Linux+NVIDIA users get routed to the Vulkan prebuilt today, which is ~10–30% slower than native CUDA for LLM inference. Building CUDA doesn't need a GPU runner (only `nvcc`), so a standard `ubuntu-latest` runner + `Jimver/cuda-toolkit` action + `cmake -DGGML_CUDA=1 -DCMAKE_CUDA_ARCHITECTURES="70;75;80;86;89;90"` produces a fat binary covering Volta→Hopper. Publish to `llamastash/llamastash` releases tagged with the same `bNNNN` as the upstream llama.cpp tag so `pick_release_with_asset` keeps working. Then extend `pick_asset_suffix` in `src/init/install/gh_releases.rs:70` with a CUDA branch for Linux+NVIDIA (parameterise `RELEASES_URL` per-asset), and add a wizard prompt to choose CUDA vs Vulkan. Static-link libcudart (Ollama precedent) so users don't need the CUDA toolkit installed — adds ~100MB but zero user-side prereqs. Scope: ~1–2 days for workflow + routing + tests. Folds into the broader [version-drift brainstorm](#) above since both questions share the "do we own a llama.cpp build pipeline?" decision.
+- [ ] **Need brainstorm/plan**: check and make sure HTTP and CLI surfaces are consistent and reuses code and flow where it makes sense.
+- [ ] **Need brainstorm/plan**: Plan to prevent llama.cpp version drift/incompatibility issues. Should we bundle/fix version.
+- [ ] **Need brainstorm/plan**: Look into gpu/cpu offload split
+- [ ] **Need brainstorm/plan**: Consider Loopback + LAN binding options for the proxy.
+- [ ] **Need brainstorm/plan**: Windows support including scoop.
+- [ ] **Need brainstorm/plan**: Anthropic API compatibility.
+- [ ] **Need brainstorm/plan**: Idle-TTL eviction for the proxy's auto-started supervisors. Both Ollama (5 min, refcount-gated) and LM Studio (60 min, request-resets) evict idle models so a long-running daemon doesn't pin memory forever. llamastash today keeps models resident until explicit `stop_model`; first-request memory growth is the visible gap. Comparison + rationale in [`docs/architecture.md §Proxy comparison`](docs/architecture.md#proxy-comparison--ollama-lm-studio-llamastash); origin: R34 (the broader HTTP/MCP slice of R34 stays at R2).
+- [ ] No glyphs fallback.
 - [ ] Setup GPU runners using https://cirun.io/ ?
 
-## R2 (post-v0.0.1 roadmap)
-
-### Blockers
-
-- [ ] **Need brainstorm/plan**: Plan to prevent llama.cpp version drift/incompatibility issues. Should we bundle/fix version.
-- [ ] Look into gpu/cpu offload split
-- [ ] Consider Loopback + LAN binding options for the proxy.
-- [ ] **Need brainstorm/plan**: Windows support.
-- [ ] **Need brainstorm/plan**: Anthropic API compatibility.
-- [ ] No glyphs fallback.
-- [ ] **Need brainstorm/plan**: Idle-TTL eviction for the proxy's auto-started supervisors. Both Ollama (5 min, refcount-gated) and LM Studio (60 min, request-resets) evict idle models so a long-running daemon doesn't pin memory forever. llamastash today keeps models resident until explicit `stop_model`; first-request memory growth is the visible gap. Comparison + rationale in [`docs/architecture.md §Proxy comparison`](docs/architecture.md#proxy-comparison--ollama-lm-studio-llamastash); origin: R34 (the broader HTTP/MCP slice of R34 stays at R2).
-
-### Follow-up
+### Low priority
 
 - [ ] **Need brainstorm/plan**: HTTP and MCP surfaces (origin: R34).
 - [ ] **Need brainstorm/plan**: MLX and vLLM if cheap to add.
