@@ -16,6 +16,32 @@ Methodology, fairness notes, the variance gate, and the cross-backend determinis
 
 Each cross-tool run pits LlamaStash against raw `llama-server`, Ollama, and LM Studio on the same hardware, same model bytes, same workloads. We publish a curated report per run on the chronological [results index](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/index.md); the most recent run's headline lives here.
 
+### Apple M1 - macOS
+
+**Hardware:** Apple M1 · 16 GB unified memory · macOS 26 (Darwin 25.4.0) · Metal backend  
+**Date:** 2026-05-27 · **llama.cpp build:** `9330 (328874d05)` (Homebrew, Metal build)  
+**Tools:** LlamaStash 0.0.1, raw `llama-server` (same Homebrew binary), Ollama 0.24.0, LM Studio (Metal runtime)  
+**Workloads:** `chat_turn`, `agent_decode`, `rag_prefill`, `parallel_4` (1 warmup + 4 measured reps per cell)
+
+| Tool | small (Qwen2.5-0.5B Q4) |
+|---|---:|
+| **LlamaStash** | **95.6 / 18** ✦ |
+| raw `llama-server` | 91.9 / 20 |
+| LM Studio | 88.4 / 68 |
+| Ollama 0.24.0 | 79.6 / 102 |
+
+Each cell is **decode tok/s / TTFT ms**, averaged across `defaults` + `normalized` modes on the `chat_turn` workload.
+
+✦ In `defaults` mode LlamaStash reaches 99.0 tok/s / 15 ms TTFT vs raw `llama-server`'s 92.3 / 19 — a 7% decode lead from the Metal defaults overlay in `defaults_table.rs`. Normalized mode collapses the gap to <1% (92.2 vs 91.5), confirming zero wrapper overhead.
+
+**Highlights:**
+
+- **LlamaStash ≡ raw `llama-server`** in normalized mode (within ≤1%), and **beats it in defaults mode** by 7% thanks to Metal-aware hardware defaults.
+- **Ollama RAG TTFT: 2.8 s** per request vs 40–55 ms for the direct llama-server path — ~52× slower. No prefix caching in its default configuration.
+- **Proxy overhead: zero** — Suite C measured −0.6 ms TTFT and +1.4% decode (within noise) going through the proxy vs hitting `llama-server` directly.
+
+Full per-workload tables and six findings → [`docs/benchmarks/macos-m1-final-report.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/macos-m1-final-report.md).
+
 ### AMD APU - Linux
 
 **Hardware:** AMD Ryzen AI Max+ 395 ("Strix Halo") · Radeon 8060S iGPU (RDNA 3.5, `gfx1151`) · 121 GiB unified RAM · 70 W TDP · Linux  
@@ -32,7 +58,7 @@ Each cross-tool run pits LlamaStash against raw `llama-server`, Ollama, and LM S
 
 Each cell is **decode tok/s / TTFT ms**, averaged across `defaults` + `normalized` modes on the `chat_turn` workload (50-token prompt → 64 tokens decode).
 
-¹ LM Studio's bundled `amd-rocm-avx2 v2.16.0` runtime crashes on load for the mid / large models on `gfx1151`; the failure survives a full system reboot, so those rows use LMS's Vulkan runtime instead. Engine A/B on small showed LMS-ROCm and LMS-Vulkan within ~1%. See [Finding #2 of the full report](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/r1-amd-apu-final-report.md#2-engine-choice-hip-vs-vulkan-is-workload--and-model-size-dependent--not-a-simple-vulkan-wins).
+¹ LM Studio's bundled `amd-rocm-avx2 v2.16.0` runtime crashes on load for the mid / large models on `gfx1151`; the failure survives a full system reboot, so those rows use LMS's Vulkan runtime instead. Engine A/B on small showed LMS-ROCm and LMS-Vulkan within ~1%. See [Finding #2 of the full report](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/linux-amd-apu-final-report.md#2-engine-choice-hip-vs-vulkan-is-workload--and-model-size-dependent--not-a-simple-vulkan-wins).
 
 **Highlights:**
 
@@ -40,7 +66,7 @@ Each cell is **decode tok/s / TTFT ms**, averaged across `defaults` + `normalize
 - **Ollama** is 41–72% slower decode than raw `llama-server`, and **RAG is catastrophic** (cold prefill every rep — 17 s on small, ~4 min on mid 31B).
 - **LM Studio** wins decode on small / mid / large_dense by 7–17% (its bundled Vulkan runtime is well-tuned on this APU), loses on large_moe by 13%, and pays a consistent ~1–1.5 s TTFT tax from its OpenAI shim + reasoning-mode parser.
 
-Full per-workload tables, engine A/B, and seven findings → [`docs/benchmarks/r1-amd-apu-final-report.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/r1-amd-apu-final-report.md).  
+Full per-workload tables, engine A/B, and seven findings → [`docs/benchmarks/linux-amd-apu-final-report.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/linux-amd-apu-final-report.md).  
 Raw per-cell data → [`docs/benchmarks/runs/`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/runs/).  
 Regenerate this table any time: `make bench-table`.
 
@@ -62,7 +88,12 @@ Suite C answers a simple question: if you talk to the LlamaStash proxy instead o
 
 The harness brings up one model, then sends the same chat request to both URLs (direct port + proxy on `127.0.0.1:11434`), alternating one-for-one. Same `llama-server` behind both.
 
-First result on `deepu-flowz13-arch` (gemma-4-E2B-it-Q4_K_M, 15 requests each side): **time-to-first-token +0.45 ms at the median** (52.37 → 52.82 ms), **tokens/sec unchanged** (92.80 → 92.70). Full numbers and method → [`docs/benchmarks/proxy/results.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/proxy/results.md).
+Results so far:
+
+- **AMD APU** (`deepu-flowz13-arch`, gemma-4-E2B-it-Q4\_K\_M, 15 requests each side): TTFT +0.45 ms at the median (52.37 → 52.82 ms), tokens/sec unchanged (92.80 → 92.70).
+- **Apple M1** (`macos-m1`, Qwen2.5-0.5B-Instruct Q4\_K\_M, 5 measured reps per phase): TTFT −0.6 ms (within noise), decode +1.4% (within noise).
+
+On both platforms: **zero measurable proxy cost.** Full numbers and method → [`docs/benchmarks/proxy/results.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/proxy/results.md).
 
 ## Re-running
 
@@ -92,7 +123,8 @@ docs/benchmarks/
 │   └── <host-id>/<YYYY-MM-DD>-<sha>.json
 ├── methodology.md                # The fairness contract — read first
 ├── index.md                      # Chronological index of all published runs
-├── r1-amd-apu-final-report.md    # Curated AMD APU run (this page's headline)
+├── macos-m1-final-report.md      # Curated Apple M1 run
+├── linux-amd-apu-final-report.md # Curated AMD APU run
 └── results-<YYYY-MM-DD>.md       # Auto-rendered raw-data pages per run day
 ```
 
