@@ -52,22 +52,21 @@ impl ProbeOptions {
   /// 4-6 minutes and used to hit `health probe timeout (last status
   /// 503)` even though llama-server was still happily loading.
   ///
-  /// Formula: assume a conservative 50 MiB/s effective load rate
-  /// and add the derived seconds to the base. The 50 MiB/s floor
-  /// covers the worst-case observed path: HIP/ROCm + uncached HF
-  /// snapshot reads where 53 GB took 11+ minutes of probe time. RSS
-  /// growth measures ~95 MiB/s in that window, but the load isn't
-  /// done when the bytes are resident — they still have to be
-  /// uploaded to VRAM and the engine has to prime, which adds
-  /// another ~half of the read time before `/health` flips to 200.
-  /// Fast NVMe + CUDA users see plenty of headroom; truly stuck
-  /// processes still get killed within the +1 hour cap.
+  /// Formula: assume a conservative 30 MiB/s effective load rate
+  /// and add the derived seconds to the base. The 30 MiB/s floor is
+  /// where successive calibration rounds settled: a 53 GB Q5_K_M
+  /// model on HIP/ROCm needed ~30 min of probe time before `/health`
+  /// flipped to 200 — RSS grew at ~95 MiB/s but the load isn't done
+  /// when the bytes are resident (VRAM upload + engine prime add
+  /// roughly as much again on top). Truly stuck processes still get
+  /// killed within the +2 hour cap. Fast NVMe + CUDA users see
+  /// generous headroom but the kill path is reachable.
   /// `weights_bytes = 0` keeps the base timeout — typical for
   /// metadata-only rows where the catalog has no estimate.
   pub fn scale_for_model(self, weights_bytes: u64) -> Self {
-    const ASSUMED_LOAD_MIB_PER_SEC: u64 = 50;
+    const ASSUMED_LOAD_MIB_PER_SEC: u64 = 30;
     const MIB: u64 = 1024 * 1024;
-    const MAX_EXTRA_SECS: u64 = 3600;
+    const MAX_EXTRA_SECS: u64 = 2 * 60 * 60;
     if weights_bytes == 0 {
       return self;
     }
@@ -147,7 +146,7 @@ mod tests {
   #[test]
   fn scale_for_model_adds_seconds_proportional_to_size() {
     let base = ProbeOptions::default();
-    // 10 GiB at 50 MiB/s → 10*1024/50 = ~204 extra seconds.
+    // 10 GiB at 30 MiB/s → 10*1024/30 = ~341 extra seconds.
     let small = base.scale_for_model(10u64 * 1024 * 1024 * 1024);
     assert!(
       small.timeout > base.timeout,
@@ -155,30 +154,30 @@ mod tests {
     );
     let small_extra = small.timeout - base.timeout;
     assert!(
-      small_extra >= Duration::from_secs(195) && small_extra <= Duration::from_secs(220),
-      "10 GiB should add ~204s, got {small_extra:?}"
+      small_extra >= Duration::from_secs(330) && small_extra <= Duration::from_secs(360),
+      "10 GiB should add ~341s, got {small_extra:?}"
     );
-    // 53 GiB (the Qwen3-Next 80B Q5_K_M case) → ~1085 extra seconds.
-    // Round-2 calibration: observed 11 min of probe time wasn't
-    // enough even with the 100 MiB/s assumption, so the rate is now
-    // 50 MiB/s — covers HIP/ROCm + cold disk + VRAM upload.
+    // 53 GiB (the Qwen3-Next 80B Q5_K_M case) → ~1808 extra seconds.
+    // Round-3 calibration: even 18 min wasn't enough with the
+    // 50 MiB/s assumption, so the rate is now 30 MiB/s — covers
+    // HIP/ROCm + cold disk + VRAM upload + engine prime.
     let big = base.scale_for_model(53u64 * 1024 * 1024 * 1024);
     let big_extra = big.timeout - base.timeout;
     assert!(
-      big_extra >= Duration::from_secs(1000) && big_extra <= Duration::from_secs(1150),
-      "53 GiB should add ~1085s, got {big_extra:?}"
+      big_extra >= Duration::from_secs(1750) && big_extra <= Duration::from_secs(1900),
+      "53 GiB should add ~1808s, got {big_extra:?}"
     );
   }
 
   #[test]
-  fn scale_for_model_caps_extra_at_one_hour() {
-    // 1 TiB at 100 MiB/s would otherwise add ~10485 seconds — clamp
-    // to the 3600s ceiling so a corrupt weights_bytes can't pin the
+  fn scale_for_model_caps_extra_at_two_hours() {
+    // 1 TiB at 30 MiB/s would otherwise add ~34952 seconds — clamp
+    // to the 7200s ceiling so a corrupt weights_bytes can't pin the
     // probe forever.
     let base = ProbeOptions::default();
     let huge = base.scale_for_model(1024u64 * 1024 * 1024 * 1024);
     let extra = huge.timeout - base.timeout;
-    assert_eq!(extra, Duration::from_secs(3600));
+    assert_eq!(extra, Duration::from_secs(7200));
   }
 
   #[test]
