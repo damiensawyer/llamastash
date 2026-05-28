@@ -1558,7 +1558,16 @@ fn parse_list_models_row(row: &Value) -> Option<DiscoveredModel> {
       .get("parse_error")
       .and_then(Value::as_str)
       .map(String::from),
-    split_siblings: Vec::new(),
+    split_siblings: row
+      .get("split_siblings")
+      .and_then(Value::as_array)
+      .map(|arr| {
+        arr
+          .iter()
+          .filter_map(|v| v.as_str().map(PathBuf::from))
+          .collect()
+      })
+      .unwrap_or_default(),
     display_label: row
       .get("display_label")
       .and_then(Value::as_str)
@@ -1694,6 +1703,34 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
     }
+  }
+
+  #[test]
+  fn parse_list_models_row_preserves_split_siblings() {
+    // Regression: the parser used to throw away `split_siblings`,
+    // which meant the TUI's shard-aware SIZE computation only ever
+    // stat'd shard 1 and reported ~half the real size for split
+    // GGUFs. The wire shape carries the siblings; the TUI needs
+    // them to call `shard_sizes::on_disk_total` correctly.
+    let row = json!({
+      "path": "/m/m-00001-of-00002.gguf",
+      "parent": "/m",
+      "source": "huggingface",
+      "split_siblings": [
+        "/m/m-00002-of-00002.gguf",
+      ],
+      "metadata": {
+        "arch": "qwen3next",
+        "quant": "Q5_K",
+        "weights_bytes": 1_000_000_000_u64,
+      },
+    });
+    let parsed = parse_list_models_row(&row).expect("row parses");
+    assert_eq!(parsed.split_siblings.len(), 1);
+    assert_eq!(
+      parsed.split_siblings[0],
+      PathBuf::from("/m/m-00002-of-00002.gguf")
+    );
   }
 
   #[test]
