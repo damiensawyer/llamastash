@@ -1,0 +1,193 @@
+name: publish-homebrew-manual
+
+# Manual recovery workflow for the publish-homebrew step in release.yml.
+#
+# Use when release.yml's publish-homebrew job failed but cargo publish
+# already succeeded — re-running release.yml would re-publish to crates.io,
+# which fails on the duplicate version. This workflow re-does ONLY the
+# homebrew tap bump.
+#
+# Inputs:
+#   release-tag   — existing GH Release tag whose .tar.gz.sha256 sidecars
+#                   feed the Formula (e.g. v0.0.1). Must already exist.
+#   template-ref  — source ref used for the template + packager.py.
+#                   Defaults to "main" so a hotfix on main can drive a
+#                   re-run WITHOUT having to move the release tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: "Existing GH Release tag to publish (e.g. v0.0.1)"
+        required: true
+        type: string
+      template-ref:
+        description: "Source ref for template + packager.py (default: main)"
+        required: false
+        type: string
+        default: main
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-homebrew-manual-${{ inputs.release-tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish-homebrew:
+    name: publish homebrew formula (manual)
+    runs-on: ubuntu-latest
+    steps:
+      - name: validate inputs (tag shape + release exists)
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'; then
+            echo "::error::invalid release-tag: $RELEASE_TAG (expected vX.Y.Z or vX.Y.Z-suffix)"
+            exit 1
+          fi
+          if ! gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::no GH Release exists for tag $RELEASE_TAG in ${{ github.repository }}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.template-ref }}
+
+      - name: download per-target .sha256 sidecars from the GH Release
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sha-stash
+          # GH Releases asset propagation can lag briefly after upload; the
+          # release we're recovering is normally minutes-to-hours old so one
+          # download attempt is usually enough, but mirror release.yml's
+          # download retry to be safe.
+          for attempt in 1 2 3 4 5; do
+            if gh release download "$RELEASE_TAG" \
+                 --repo "${{ github.repository }}" \
+                 --pattern '*.tar.gz.sha256' \
+                 --dir sha-stash \
+                 --clobber; then
+              break
+            fi
+            echo "download attempt ${attempt} failed; sleeping ${attempt}s"
+            sleep "$attempt"
+          done
+          ls -la sha-stash
+
+      - name: extract per-target sha256s
+        id: shas
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Strip the leading v for the version that appears in the formula
+          # and the asset filenames — mirrors release.yml's normalization.
+          version="${RELEASE_TAG#v}"
+          extract() {
+            local triple="$1"
+            local f="sha-stash/llamastash-${version}-${triple}.tar.gz.sha256"
+            if [ ! -f "$f" ]; then
+              echo "::error::missing sha256 sidecar for ${triple}: $f" >&2
+              exit 1
+            fi
+            awk '{print $1; exit}' "$f"
+          }
+          {
+            echo "version=${version}"
+            echo "sha_aarch64_darwin=$(extract aarch64-apple-darwin)"
+            echo "sha_x86_64_darwin=$(extract x86_64-apple-darwin)"
+            echo "sha_aarch64_linux=$(extract aarch64-unknown-linux-gnu)"
+            echo "sha_x86_64_linux=$(extract x86_64-unknown-linux-gnu)"
+          } >>"$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: render formula
+        env:
+          RELEASE_VERSION: ${{ steps.shas.outputs.version }}
+          SHA_AARCH64_DARWIN: ${{ steps.shas.outputs.sha_aarch64_darwin }}
+          SHA_X86_64_DARWIN:  ${{ steps.shas.outputs.sha_x86_64_darwin }}
+          SHA_AARCH64_LINUX:  ${{ steps.shas.outputs.sha_aarch64_linux }}
+          SHA_X86_64_LINUX:   ${{ steps.shas.outputs.sha_x86_64_linux }}
+        run: |
+          set -euo pipefail
+          python3 deployment/homebrew/packager.py \
+            "$RELEASE_VERSION" \
+            deployment/homebrew/llamastash.rb.template \
+            llamastash.rb \
+            "$SHA_AARCH64_DARWIN" \
+            "$SHA_X86_64_DARWIN" \
+            "$SHA_AARCH64_LINUX" \
+            "$SHA_X86_64_LINUX"
+
+      - name: brew style (catches template regressions before push)
+        run: |
+          set -euo pipefail
+          # Linuxbrew installs to /home/linuxbrew/.linuxbrew/bin which is not
+          # on $PATH by default on the runner.
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/null
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew style llamastash.rb
+
+      - name: clone + push tap (token via GIT_ASKPASS, retry on non-fast-forward)
+        env:
+          GH_BUMP_TOKEN: ${{ secrets.GH_BUMP_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_BUMP_TOKEN:-}" ]; then
+            echo "::error::GH_BUMP_TOKEN secret is unset; cannot push to tap repo"
+            exit 1
+          fi
+
+          # GIT_ASKPASS keeps the token out of process argv and any URL log.
+          askpass_dir=$(mktemp -d)
+          cat >"$askpass_dir/askpass.sh" <<'ASKPASS'
+          #!/bin/sh
+          printf '%s\n' "$GH_BUMP_TOKEN"
+          ASKPASS
+          chmod +x "$askpass_dir/askpass.sh"
+          export GIT_ASKPASS="$askpass_dir/askpass.sh"
+
+          git config --global user.email "release-bot@users.noreply.github.com"
+          git config --global user.name  "llamastash-release-bot"
+          git config --global credential.helper ""
+
+          git clone "https://x-access-token@github.com/llamastash/homebrew-llamastash.git" --branch main brew
+          cp llamastash.rb brew/Formula/llamastash.rb
+          cd brew
+          git add Formula/llamastash.rb
+          if git diff-index --quiet HEAD; then
+            echo "tap already up to date for ${RELEASE_TAG}; nothing to commit"
+            exit 0
+          fi
+          git commit -m "chore(formula): bump llamastash to ${RELEASE_TAG}"
+
+          # Retry push with pull --rebase on non-fast-forward (concurrent
+          # human edit to the tap repo's main during the recovery window).
+          for attempt in 1 2 3; do
+            if git push origin main; then
+              exit 0
+            fi
+            echo "push attempt ${attempt} failed; pulling --rebase and retrying"
+            git pull --rebase origin main
+            sleep $((attempt * 5))
+          done
+          echo "::error::tap push failed after 3 attempts; inspect manually"
+          exit 1
