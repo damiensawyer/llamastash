@@ -144,7 +144,7 @@ async fn config_model_paths_populate_list_models() {
     },
     ..DaemonOptions::rooted_at(state.clone())
   };
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });
   wait_for_socket(&socket).await;
 
@@ -241,7 +241,7 @@ async fn ollama_default_cache_surfaces_through_list_models() {
     },
     ..DaemonOptions::rooted_at(state.clone())
   };
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });
   wait_for_socket(&socket).await;
 

@@ -92,16 +92,6 @@ pub struct MethodContext {
   /// `RwLock` so a periodic re-sweep can refresh the slot without
   /// rebuilding the context.
   pub external: Arc<RwLock<Vec<ExternalProcess>>>,
-  /// Hook for the accept-loop's peercred decision. Production uses
-  /// [`crate::daemon::peercred::is_authorized_peer`]; tests can
-  /// inject `|_| false` to drive the rejection branch.
-  pub peer_authorizer: Arc<dyn Fn(crate::daemon::peercred::PeerCred) -> bool + Send + Sync>,
-  /// Absolute path of the Unix-domain socket the daemon bound on
-  /// startup. Surfaced under `status.daemon.socket_path` so the TUI
-  /// can render it in the Daemon info panel (`socket  …/daemon.sock
-  /// pid 1234`). `None` only in catalog-only tests that never bind
-  /// a real socket.
-  pub socket_path: Option<PathBuf>,
   /// Read handle to the proxy listener's status cell. The proxy
   /// task is the sole writer (every bind / disable transition lands
   /// here); the IPC `status` handler clones this and reads it to
@@ -199,19 +189,8 @@ impl MethodContext {
       state: PersistedState::ephemeral(),
       launch: None,
       external: Arc::new(RwLock::new(Vec::new())),
-      peer_authorizer: Arc::new(crate::daemon::peercred::is_authorized_peer),
-      socket_path: None,
       proxy_status: None,
     }
-  }
-
-  /// Builder helper: attach the daemon's listening socket path so
-  /// `status.daemon.socket_path` surfaces a real value instead of
-  /// `null`. Production wiring passes the path the daemon actually
-  /// bound; tests typically skip this.
-  pub fn with_socket_path(mut self, path: PathBuf) -> Self {
-    self.socket_path = Some(path);
-    self
   }
 
   /// Builder helper: seed the external (unmanaged `llama-server`)
@@ -506,7 +485,6 @@ async fn status_response(ctx: &MethodContext) -> Value {
         .launch
         .as_ref()
         .map(|env| env.binary.display().to_string()),
-      "socket_path": ctx.socket_path.as_ref().map(|p| p.display().to_string()),
     },
   });
   if let Some(proxy) = proxy {

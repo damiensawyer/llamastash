@@ -86,7 +86,7 @@ async fn drive_to_ready_port() -> (u16, tokio::task::JoinHandle<()>, PathBuf) {
     port_range: allocate_port_range(),
     ..DaemonOptions::rooted_at(state.clone())
   };
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let daemon = tokio::spawn(async move {
     let _ = run_foreground(opts).await;
   });

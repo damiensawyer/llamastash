@@ -22,20 +22,24 @@ fn opts_for(temp: &Path) -> DaemonOptions {
   DaemonOptions::rooted_at(temp.to_path_buf())
 }
 
-/// Poll until a connection to `path` succeeds — file existence isn't
-/// enough because the test fixture can pre-seed a regular file at the
-/// same path; the daemon will remove it and re-bind.
-async fn wait_for_socket(path: &Path) {
+/// Poll until the daemon at `state_dir` responds to a `ping`. Connect
+/// alone isn't enough — `Client::connect` succeeds on whatever
+/// `runtime.json` is on disk (which could be a stale seed from a
+/// previous run); only a successful round-trip proves the daemon is
+/// actually behind the URL+token we just read.
+async fn wait_for_socket(state_dir: &Path) {
   let deadline = std::time::Instant::now() + Duration::from_secs(3);
   loop {
     if std::time::Instant::now() > deadline {
       panic!(
         "daemon did not become connectable within 3s: {}",
-        path.display()
+        state_dir.display()
       );
     }
-    if Client::connect(path).await.is_ok() {
-      return;
+    if let Ok(mut client) = Client::connect(state_dir).await {
+      if client.call("ping", None).await.is_ok() {
+        return;
+      }
     }
     tokio::time::sleep(Duration::from_millis(20)).await;
   }
@@ -48,7 +52,7 @@ async fn second_start_reports_already_running() {
   let opts_copy = opts.clone();
 
   let handle = tokio::spawn(async move { run_foreground(opts).await });
-  wait_for_socket(&opts_copy.socket_path).await;
+  wait_for_socket(&opts_copy.state_dir).await;
 
   // Same state_dir — should observe the live pidfile and bail out.
   let outcome = run_foreground(opts_copy.clone())
@@ -60,7 +64,7 @@ async fn second_start_reports_already_running() {
   }
 
   // Shutdown the first daemon so the test cleans up.
-  let mut client = Client::connect(&opts_copy.socket_path)
+  let mut client = Client::connect(&opts_copy.state_dir)
     .await
     .expect("connect to first daemon");
   let _ = client.call("shutdown", None).await.expect("shutdown");
@@ -74,17 +78,22 @@ async fn second_start_reports_already_running() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shutdown_removes_socket_and_pidfile() {
+async fn shutdown_removes_runtime_file_and_pidfile() {
   let dir = unique_temp_dir("cleanup");
   let opts = opts_for(&dir);
-  let socket = opts.socket_path.clone();
+  let attach = opts.state_dir.clone();
   let pidfile = dir.join("daemon.pid");
+  let runtime = llamastash::daemon::runtime_file::path(&dir);
   let handle = tokio::spawn(async move { run_foreground(opts).await });
-  wait_for_socket(&socket).await;
+  wait_for_socket(&attach).await;
 
   assert!(pidfile.exists(), "pidfile must exist while daemon runs");
+  assert!(
+    runtime.exists(),
+    "runtime.json must exist while daemon runs"
+  );
 
-  let mut client = Client::connect(&socket).await.expect("connect");
+  let mut client = Client::connect(&attach).await.expect("connect");
   let _ = client.call("shutdown", None).await.expect("shutdown");
   timeout(Duration::from_secs(3), handle)
     .await
@@ -92,28 +101,49 @@ async fn shutdown_removes_socket_and_pidfile() {
     .expect("join")
     .expect("daemon result");
 
-  assert!(!socket.exists(), "socket file must be removed on shutdown");
+  assert!(
+    !runtime.exists(),
+    "runtime.json must be removed on shutdown"
+  );
   assert!(!pidfile.exists(), "pidfile must be removed on shutdown");
 
   std::fs::remove_dir_all(&dir).ok();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stale_socket_is_cleaned_before_bind() {
-  let dir = unique_temp_dir("stale-sock");
+async fn stale_runtime_file_is_overwritten_on_start() {
+  let dir = unique_temp_dir("stale-runtime");
   let opts = opts_for(&dir);
-  let socket = opts.socket_path.clone();
+  let attach = opts.state_dir.clone();
+  let runtime = llamastash::daemon::runtime_file::path(&dir);
 
-  // Drop a non-socket file at the socket path to simulate a SIGKILL'd
-  // previous run that never got to clean up. The daemon must remove it
-  // before binding rather than failing.
-  std::fs::write(&socket, b"this used to be a socket").expect("seed stale file");
+  // Drop a stale `runtime.json` to simulate a SIGKILL'd previous
+  // run that never got to clean up. The daemon must atomically
+  // overwrite it on its next start rather than refusing.
+  std::fs::create_dir_all(&dir).ok();
+  std::fs::write(
+    &runtime,
+    br#"{"schema_version":1,"ipc_url":"http://127.0.0.1:1","ipc_token":"stale","started_at_unix":0,"daemon_pid":0}"#,
+  )
+  .expect("seed stale runtime.json");
 
   let handle = tokio::spawn(async move { run_foreground(opts).await });
-  wait_for_socket(&socket).await;
+  wait_for_socket(&attach).await;
 
-  // Confirm we're talking to a real listener, not the stale file.
-  let mut client = Client::connect(&socket).await.expect("connect");
+  // Confirm we're talking to the *new* daemon: the token differs
+  // from the stale "stale" placeholder above, and the URL points
+  // at a real port.
+  let info = llamastash::daemon::runtime_file::load(&dir)
+    .expect("load runtime.json")
+    .expect("file present");
+  assert_ne!(info.ipc_token, "stale", "runtime.json was not refreshed");
+  assert!(
+    info.ipc_url.starts_with("http://127.0.0.1:"),
+    "unexpected ipc_url: {}",
+    info.ipc_url
+  );
+
+  let mut client = Client::connect(&attach).await.expect("connect");
   let _ = client
     .call("ping", None)
     .await
@@ -128,18 +158,18 @@ async fn stale_socket_is_cleaned_before_bind() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Regression test for the Unit 2 P2 follow-up: `start_detached` used to
-/// re-exec the child as plain `llamastash daemon start`, which rebuilt
-/// `DaemonOptions` from XDG defaults and silently ignored the caller's
-/// `state_dir` / `socket_path`. With the hidden `--state-dir` /
-/// `--socket-path` flags wired through, the child must bind the
-/// caller-specified temp socket, not the production default.
+/// Regression: `start_detached` used to re-exec the child as plain
+/// `llamastash daemon start`, which rebuilt `DaemonOptions` from XDG
+/// defaults and silently ignored the caller's `state_dir`. With the
+/// hidden `--state-dir` flag wired through, the child must bind under
+/// the caller-supplied state directory, not the production default.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_detached_honours_caller_supplied_paths() {
   let dir = unique_temp_dir("detach-opts");
   let opts = opts_for(&dir);
-  let socket = opts.socket_path.clone();
+  let attach = opts.state_dir.clone();
   let pidfile = dir.join("daemon.pid");
+  let runtime = llamastash::daemon::runtime_file::path(&dir);
   let exe = PathBuf::from(env!("CARGO_BIN_EXE_llamastash"));
 
   // `start_detached_with_exe` blocks on a sync poll loop, so push it off
@@ -156,21 +186,22 @@ async fn start_detached_honours_caller_supplied_paths() {
     }
   }
 
-  // The child must be listening on *our* temp socket, not the XDG default.
-  assert!(
-    socket.exists(),
-    "child must bind the caller-supplied socket at {}",
-    socket.display()
-  );
+  // The child must be running in *our* temp state dir, not the XDG
+  // default. The pidfile + runtime.json are the visible markers.
   assert!(
     pidfile.exists(),
     "child must drop its pidfile in the caller-supplied state dir at {}",
     pidfile.display()
   );
+  assert!(
+    runtime.exists(),
+    "child must drop runtime.json in the caller-supplied state dir at {}",
+    runtime.display()
+  );
 
-  let mut client = Client::connect(&socket)
+  let mut client = Client::connect(&attach)
     .await
-    .expect("connect to detached child via temp socket");
+    .expect("connect to detached child via runtime.json");
   let _ = client
     .call("ping", None)
     .await
@@ -180,15 +211,15 @@ async fn start_detached_honours_caller_supplied_paths() {
     .await
     .expect("shutdown detached child");
 
-  // Wait for the child to tear down its socket so the temp dir cleanup
-  // doesn't race a still-running process.
+  // Wait for the child to tear down its runtime.json so the temp dir
+  // cleanup doesn't race a still-running process.
   let deadline = std::time::Instant::now() + Duration::from_secs(3);
-  while socket.exists() && std::time::Instant::now() < deadline {
+  while runtime.exists() && std::time::Instant::now() < deadline {
     tokio::time::sleep(Duration::from_millis(50)).await;
   }
   assert!(
-    !socket.exists(),
-    "detached child must remove its socket on shutdown"
+    !runtime.exists(),
+    "detached child must remove runtime.json on shutdown"
   );
 
   std::fs::remove_dir_all(&dir).ok();
@@ -202,7 +233,7 @@ async fn start_detached_honours_caller_supplied_paths() {
 async fn shutdown_drains_in_flight_request_within_budget() {
   let dir = unique_temp_dir("drain-completes");
   let opts = opts_for(&dir);
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });
   wait_for_socket(&socket).await;
 
@@ -259,7 +290,7 @@ async fn shutdown_drains_in_flight_request_within_budget() {
 async fn corrupt_state_json_is_quarantined_on_boot() {
   let dir = unique_temp_dir("quarantine");
   let opts = opts_for(&dir);
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
 
   // Seed a corrupt state.json before the daemon starts.
   std::fs::create_dir_all(&dir).expect("mk state dir");

@@ -1,22 +1,25 @@
-//! OS-aware path resolution for state, config, cache, logs, and the runtime
-//! socket.
+//! OS-aware path resolution for state, config, cache, and logs.
 //!
 //! Linux follows XDG; macOS follows the Apple convention (everything under
 //! `~/Library/...`). `state_dir` falls back to `data_dir` on macOS because
 //! the `directories` crate only exposes a distinct state directory on Linux.
-//! The runtime socket falls back to `$TMPDIR/llamastash-$USER/daemon.sock`
-//! when no `runtime_dir` is available.
 //!
 //! Env-var overrides (consulted as resolution step #1, all empty values
 //! treated as unset):
 //!
-//! * `LLAMASTASH_STATE_DIR` — verbatim override for `state_dir()`.
+//! * `LLAMASTASH_STATE_DIR` — verbatim override for `state_dir()`. The
+//!   daemon's `runtime.json` (URL + bearer token) lives here, so clients
+//!   attaching to a non-default daemon set this env var rather than
+//!   passing a socket path.
 //! * `LLAMASTASH_CONFIG_DIR` — verbatim override for `config_dir()`;
 //!   `user_config_file()` inherits because it is
 //!   `config_dir().join("config.yaml")`.
 //! * `LLAMASTASH_CACHE_DIR` — verbatim override for `cache_dir()`; `log_dir()`
 //!   inherits because it is `cache_dir().join("logs")`.
-//! * `LLAMASTASH_SOCKET` — verbatim override for `runtime_socket_path()`.
+//! * `LLAMASTASH_IPC_URL` + `LLAMASTASH_IPC_TOKEN` — direct overrides
+//!   for the IPC client's URL+bearer attach (see [`crate::ipc::client`]).
+//!   Both must be set together when used; partial overrides are
+//!   rejected.
 //! * HuggingFace, Ollama, and LM Studio model-cache paths are resolved
 //!   by [`crate::util::model_caches`] (single source of truth for both
 //!   writes via `init::download` and scans via `discovery::known_caches`).
@@ -24,12 +27,9 @@
 //!   `HF_HOME`, `XDG_CACHE_HOME`, and `OLLAMA_MODELS`. Not a `paths::*`
 //!   concern, but worth naming here because callers isolating a child
 //!   process need to clear or override them to fully sandbox the HF
-//!   cache alongside state, config, cache/logs, and socket.
+//!   cache alongside state, config, and cache/logs.
 
-use std::{
-  ffi::OsString,
-  path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use directories::{BaseDirs, ProjectDirs};
 
@@ -87,8 +87,8 @@ pub fn cache_dir() -> Option<PathBuf> {
 }
 
 /// Read an env var as a `PathBuf`, treating unset and empty values
-/// identically. Shared with `runtime_socket_path` so override semantics
-/// stay uniform across `state_dir`, `cache_dir`, and the socket.
+/// identically. Used by `state_dir` / `config_dir` / `cache_dir` to
+/// keep override semantics uniform.
 fn env_path_override(name: &str) -> Option<PathBuf> {
   let raw = std::env::var_os(name)?;
   let p = PathBuf::from(raw);
@@ -101,60 +101,6 @@ fn env_path_override(name: &str) -> Option<PathBuf> {
 
 pub fn log_dir() -> Option<PathBuf> {
   cache_dir().map(|d| d.join("logs"))
-}
-
-/// Resolve the Unix-socket path for the daemon.
-///
-/// Always returns a path. Resolution order:
-/// 1. `LLAMASTASH_SOCKET` env var (verbatim) — used by tests and by
-///    operators who want to point a CLI at a non-default daemon
-///    without the `--socket-path` hidden flag dance.
-/// 2. `XDG_RUNTIME_DIR/llamastash/daemon.sock` (Linux).
-/// 3. `$TMPDIR/llamastash-$USER/daemon.sock` (macOS / no runtime dir).
-pub fn runtime_socket_path() -> PathBuf {
-  if let Some(p) = env_path_override("LLAMASTASH_SOCKET") {
-    return p;
-  }
-  if let Some(dirs) = project_dirs() {
-    if let Some(rt) = dirs.runtime_dir() {
-      return rt.join("daemon.sock");
-    }
-  }
-  fallback_runtime_dir_from(std::env::var_os("TMPDIR"), &username()).join("daemon.sock")
-}
-
-fn username() -> String {
-  let raw = std::env::var("USER")
-    .or_else(|_| std::env::var("LOGNAME"))
-    .unwrap_or_else(|_| String::from("default"));
-  sanitize_username(&raw)
-}
-
-/// Strip any character not in `[A-Za-z0-9_.-]` from the supplied username.
-/// `$USER=../../root` would otherwise let an attacker direct the fallback
-/// socket out of the per-user scratch dir; see the Unit 1 review findings.
-/// Returns `"default"` if sanitization eats the whole string.
-fn sanitize_username(raw: &str) -> String {
-  let cleaned: String = raw
-    .chars()
-    .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
-    .collect();
-  if cleaned.is_empty() {
-    String::from("default")
-  } else {
-    cleaned
-  }
-}
-
-/// Build the fallback runtime directory used when `XDG_RUNTIME_DIR` is not
-/// set (notably on macOS). Per-user scoped so concurrent users on the same
-/// host don't collide. Callers must supply a sanitized username — see
-/// `sanitize_username`.
-fn fallback_runtime_dir_from(tmpdir: Option<OsString>, user: &str) -> PathBuf {
-  let tmp = tmpdir
-    .map(PathBuf::from)
-    .unwrap_or_else(|| PathBuf::from("/tmp"));
-  tmp.join(format!("llamastash-{user}"))
 }
 
 /// Convenience: return the canonical user config-file path.
@@ -298,7 +244,7 @@ mod tests {
   /// leak state into siblings sharing the env mutex.
   struct EnvVarGuard {
     key: &'static str,
-    previous: Option<OsString>,
+    previous: Option<std::ffi::OsString>,
   }
 
   impl EnvVarGuard {
@@ -322,17 +268,6 @@ mod tests {
         None => std::env::remove_var(self.key),
       }
     }
-  }
-
-  /// Pure helper used in tests so callers can verify the path-joining logic
-  /// without manipulating process-wide environment variables.
-  fn build_socket_path(runtime_dir: Option<&Path>, fallback_tmp: &Path, user: &str) -> PathBuf {
-    if let Some(rt) = runtime_dir {
-      return rt.join("daemon.sock");
-    }
-    fallback_tmp
-      .join(format!("llamastash-{user}"))
-      .join("daemon.sock")
   }
 
   #[test]
@@ -410,16 +345,6 @@ mod tests {
   }
 
   #[test]
-  fn runtime_socket_path_always_resolves() {
-    // Infallible by design — see runtime_socket_path's contract.
-    let path = runtime_socket_path();
-    assert_eq!(
-      path.file_name().and_then(|s| s.to_str()),
-      Some("daemon.sock")
-    );
-  }
-
-  #[test]
   fn log_dir_is_logs_under_cache_dir() {
     // Hold env_mutex so a concurrent override-setting test can't flip
     // LLAMASTASH_CACHE_DIR between our two reads and split the answer.
@@ -455,54 +380,6 @@ mod tests {
     let _guard = env_mutex().lock().unwrap_or_else(|e| e.into_inner());
     let path = init_snapshot_file().unwrap();
     assert_eq!(path, state_dir().unwrap().join("init_snapshot.json"));
-  }
-
-  #[test]
-  fn build_socket_path_uses_runtime_dir_when_present() {
-    let rt = PathBuf::from("/run/user/1000/llamastash");
-    let path = build_socket_path(Some(&rt), Path::new("/tmp"), "ignored");
-    assert_eq!(path, PathBuf::from("/run/user/1000/llamastash/daemon.sock"));
-  }
-
-  #[test]
-  fn build_socket_path_falls_back_to_tmp_dir_with_username() {
-    let path = build_socket_path(None, Path::new("/tmp"), "alice");
-    assert_eq!(path, PathBuf::from("/tmp/llamastash-alice/daemon.sock"));
-  }
-
-  #[test]
-  fn fallback_runtime_dir_uses_provided_tmp_and_username() {
-    let path = fallback_runtime_dir_from(Some(OsString::from("/var/tmp")), "bob");
-    assert_eq!(path, PathBuf::from("/var/tmp/llamastash-bob"));
-  }
-
-  #[test]
-  fn fallback_runtime_dir_defaults_to_slash_tmp() {
-    let path = fallback_runtime_dir_from(None, "default");
-    assert_eq!(path, PathBuf::from("/tmp/llamastash-default"));
-  }
-
-  #[test]
-  fn sanitize_username_strips_path_traversal() {
-    assert_eq!(sanitize_username("../../root"), "....root");
-  }
-
-  #[test]
-  fn sanitize_username_strips_slashes_and_specials() {
-    assert_eq!(sanitize_username("alice/../bob"), "alice..bob");
-    assert_eq!(sanitize_username("alice;rm -rf /"), "alicerm-rf");
-  }
-
-  #[test]
-  fn sanitize_username_keeps_well_formed_names() {
-    assert_eq!(sanitize_username("alice"), "alice");
-    assert_eq!(sanitize_username("alice_user-1.0"), "alice_user-1.0");
-  }
-
-  #[test]
-  fn sanitize_username_falls_back_when_all_chars_stripped() {
-    assert_eq!(sanitize_username("///"), "default");
-    assert_eq!(sanitize_username(""), "default");
   }
 
   #[test]

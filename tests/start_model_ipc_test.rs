@@ -69,7 +69,7 @@ async fn start_model_drives_supervisor_status_logs_stop_and_last_params() {
     port_range: allocate_port_range(),
     ..DaemonOptions::rooted_at(state.clone())
   };
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let state_dir = opts.state_dir.clone();
   let daemon = tokio::spawn(async move { run_foreground(opts).await });
   wait_for_socket(&socket).await;
@@ -321,7 +321,7 @@ async fn prefer_port_falls_back_to_range_allocator_when_busy() {
     port_range: range,
     ..DaemonOptions::rooted_at(state.clone())
   };
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let daemon = tokio::spawn(async move { run_foreground(opts).await });
   wait_for_socket(&socket).await;
   let mut client = Client::connect(&socket).await.expect("connect");
@@ -386,7 +386,7 @@ async fn start_model_refuses_both_port_and_prefer_port() {
   // time before any reservation work.
   let state = unique_temp("port-conflict");
   let opts = DaemonOptions::rooted_at(state.clone());
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let daemon = tokio::spawn(async move { run_foreground(opts).await });
   wait_for_socket(&socket).await;
   let mut client = Client::connect(&socket).await.expect("connect");
@@ -431,7 +431,7 @@ async fn start_model_refuses_forbidden_extras_without_leaking_secret_values() {
     port_range: allocate_port_range(),
     ..DaemonOptions::rooted_at(state.clone())
   };
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let daemon = tokio::spawn(async move { run_foreground(opts).await });
   wait_for_socket(&socket).await;
   let mut client = Client::connect(&socket).await.expect("connect");
@@ -506,7 +506,7 @@ async fn last_params_persists_only_user_supplied_knob_deltas() {
     port_range: PortRange { start: lo, end: hi },
     ..DaemonOptions::rooted_at(state.clone())
   };
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let state_dir = opts.state_dir.clone();
   let daemon = tokio::spawn(async move { run_foreground(opts).await });
   wait_for_socket(&socket).await;
@@ -620,7 +620,7 @@ async fn start_model_returns_error_when_binary_unconfigured() {
   // must surface a clear error rather than blowing up internally.
   let state = unique_temp("no-binary");
   let opts = DaemonOptions::rooted_at(state.clone());
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let daemon = tokio::spawn(async move { run_foreground(opts).await });
   wait_for_socket(&socket).await;
 

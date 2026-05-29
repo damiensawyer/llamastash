@@ -80,11 +80,11 @@ async fn status_lists_active_supervised_model() {
 
   // Start the daemon with that registry attached.
   let opts = DaemonOptions::rooted_at(state.clone());
-  let socket = opts.socket_path.clone();
+  let attach = opts.state_dir.clone();
   let registry_for_daemon = registry.clone();
   let daemon =
     tokio::spawn(async move { run_foreground_with_supervisors(opts, registry_for_daemon).await });
-  wait_for_socket(&socket).await;
+  wait_for_socket(&attach).await;
 
   // Wait for Ready so status has something deterministic to assert.
   let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -99,7 +99,7 @@ async fn status_lists_active_supervised_model() {
   }
 
   // Call `status`.
-  let mut client = Client::connect(&socket).await.expect("connect");
+  let mut client = Client::connect(&attach).await.expect("connect");
   // Poll until the host-metrics sampler has produced a real reading
   // (`ram_total_bytes > 0`). The sampler's first tick lands one
   // interval after spawn (~1s); without this poll the assertions
@@ -194,13 +194,13 @@ async fn stop_model_returns_error_for_unknown_launch_id() {
   let state = unique_temp("unknown");
   let registry = SupervisorRegistry::new();
   let opts = DaemonOptions::rooted_at(state.clone());
-  let socket = opts.socket_path.clone();
+  let attach = opts.state_dir.clone();
   let registry_for_daemon = registry.clone();
   let daemon =
     tokio::spawn(async move { run_foreground_with_supervisors(opts, registry_for_daemon).await });
-  wait_for_socket(&socket).await;
+  wait_for_socket(&attach).await;
 
-  let mut client = Client::connect(&socket).await.expect("connect");
+  let mut client = Client::connect(&attach).await.expect("connect");
   let err = client
     .call("stop_model", Some(json!({"launch_id": "L9999"})))
     .await
@@ -233,7 +233,6 @@ async fn run_foreground_with_supervisors(
   use llamastash::daemon::runtime_file::{self, RuntimeInfo};
   use llamastash::daemon::{lockfile::acquire, lockfile::AcquireOutcome};
   use llamastash::ipc::methods::MethodContext;
-  use std::fs;
   use std::sync::Arc;
   use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -244,18 +243,6 @@ async fn run_foreground_with_supervisors(
       return Ok(llamastash::daemon::StartOutcome::AlreadyRunning(pid));
     }
   };
-  if opts.socket_path.exists() {
-    fs::remove_file(&opts.socket_path)?;
-  }
-  if let Some(parent) = opts.socket_path.parent() {
-    fs::create_dir_all(parent)?;
-  }
-  let listener = tokio::net::UnixListener::bind(&opts.socket_path)?;
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&opts.socket_path, fs::Permissions::from_mode(0o600))?;
-  }
   let token = llamastash::daemon::shutdown::ShutdownToken::new();
   let _signal = llamastash::daemon::shutdown::install_signal_handlers(token.clone());
   let catalog = llamastash::discovery::ModelCatalog::new();
@@ -268,39 +255,41 @@ async fn run_foreground_with_supervisors(
     .with_sampler(sampler);
 
   // Bind the HTTP control plane so `Client::connect(state_dir)` can
-  // attach via the new transport. Best-effort on bind failure (mirrors
-  // production's posture in `run_foreground`).
+  // attach. Bind failure is fatal (mirrors production's posture).
   let control_token = Arc::new(IpcToken::generate());
   let control_addr = control_plane::loopback_addr(opts.control_plane_port);
-  if let control_plane::BindResult::Bound {
-    listener: cp_listener,
-    addr: cp_bound,
-  } = control_plane::bind(control_addr).await
-  {
-    let info = RuntimeInfo {
-      schema_version: 1,
-      ipc_url: format!("http://{cp_bound}"),
-      ipc_token: control_token.as_str().to_owned(),
-      started_at_unix: SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default(),
-      daemon_pid: std::process::id() as i32,
-    };
-    let _ = runtime_file::save(&opts.state_dir, &info);
-    let cp_token = Arc::clone(&control_token);
-    let cp_ctx = ctx.clone();
-    let cp_shutdown = token.clone();
-    tokio::spawn(async move {
-      let _ = control_plane::serve(cp_listener, cp_token, cp_ctx, cp_shutdown).await;
-    });
-  }
+  let (cp_listener, cp_bound) = match control_plane::bind(control_addr).await {
+    control_plane::BindResult::Bound { listener, addr } => (listener, addr),
+    control_plane::BindResult::AllPortsInUse { last_addr } => {
+      anyhow::bail!("supervisor_ipc fixture: ports in use up to {last_addr}")
+    }
+    control_plane::BindResult::Failed { addr, error } => {
+      anyhow::bail!("supervisor_ipc fixture: bind {addr} failed: {error}")
+    }
+  };
+  let info = RuntimeInfo {
+    schema_version: 1,
+    ipc_url: format!("http://{cp_bound}"),
+    ipc_token: control_token.as_str().to_owned(),
+    started_at_unix: SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|d| d.as_secs())
+      .unwrap_or_default(),
+    daemon_pid: std::process::id() as i32,
+  };
+  let _ = runtime_file::save(&opts.state_dir, &info);
+  let cp_token = Arc::clone(&control_token);
+  let cp_ctx = ctx.clone();
+  let cp_shutdown = token.clone();
+  tokio::spawn(async move {
+    let _ = control_plane::serve(cp_listener, cp_token, cp_ctx, cp_shutdown).await;
+  });
 
-  // Suppress unused-mut warning when opts isn't mutated further.
+  // Park on the shutdown token so the helper exits the same way the
+  // production `run_foreground` does.
   let _ = &mut opts;
-  let result = llamastash::daemon::server::serve(listener, ctx).await;
-  let _ = fs::remove_file(&opts.socket_path);
+  token.wait_until_triggered().await;
   runtime_file::remove(&opts.state_dir);
   drop(lock);
-  result.map(|()| llamastash::daemon::StartOutcome::RanToCompletion)
+  Ok(llamastash::daemon::StartOutcome::RanToCompletion)
 }

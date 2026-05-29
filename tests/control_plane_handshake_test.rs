@@ -68,7 +68,7 @@ async fn join_daemon(
 async fn rpc_ping_roundtrips_with_bearer_token() {
   let dir = unique_temp_dir("ping");
   let opts = opts_for(&dir);
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let state_dir = opts.state_dir.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });
 
@@ -95,7 +95,7 @@ async fn rpc_ping_roundtrips_with_bearer_token() {
 async fn rpc_without_bearer_returns_401() {
   let dir = unique_temp_dir("noauth");
   let opts = opts_for(&dir);
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let state_dir = opts.state_dir.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });
 
@@ -118,7 +118,7 @@ async fn rpc_without_bearer_returns_401() {
 async fn rpc_with_wrong_bearer_returns_401() {
   let dir = unique_temp_dir("wrongauth");
   let opts = opts_for(&dir);
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let state_dir = opts.state_dir.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });
 
@@ -142,7 +142,7 @@ async fn rpc_with_wrong_bearer_returns_401() {
 async fn health_succeeds_without_bearer() {
   let dir = unique_temp_dir("health");
   let opts = opts_for(&dir);
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let state_dir = opts.state_dir.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });
 
@@ -170,7 +170,7 @@ async fn rpc_dispatches_existing_methods_unchanged() {
   // shape, but does not require a `LaunchEnv`.
   let dir = unique_temp_dir("dispatch");
   let opts = opts_for(&dir);
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let state_dir = opts.state_dir.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });
 
@@ -200,7 +200,7 @@ async fn rpc_dispatches_existing_methods_unchanged() {
 async fn runtime_json_is_removed_on_shutdown() {
   let dir = unique_temp_dir("cleanup");
   let opts = opts_for(&dir);
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let state_dir = opts.state_dir.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });
 

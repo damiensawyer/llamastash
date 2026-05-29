@@ -144,12 +144,13 @@ impl Drop for DaemonHandle {
     // historically the source of hundreds of leaked test fixtures.
     if let Some(join) = self.join.take() {
       let _ = best_effort_sync_shutdown(&self.socket);
-      // Poll for the daemon to remove its socket file (the last
-      // step of run_foreground), bounded so a wedged daemon can't
-      // pin the test process forever. 5 s matches the per-launch
-      // SIGTERM grace baked into `stop_all_managed`.
+      // Poll for the daemon to remove `runtime.json` (the last step of
+      // `run_foreground`), bounded so a wedged daemon can't pin the
+      // test process forever. 5 s matches the per-launch SIGTERM
+      // grace baked into `stop_all_managed`.
+      let runtime = llamastash::daemon::runtime_file::path(&self.socket);
       let deadline = Instant::now() + Duration::from_secs(5);
-      while self.socket.exists() && Instant::now() < deadline {
+      while runtime.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
       }
       join.abort();
@@ -160,27 +161,46 @@ impl Drop for DaemonHandle {
 }
 
 /// Sync-only IPC shutdown for use from `DaemonHandle::Drop`. Drop runs
-/// during unwind and can't drive an async client; this writes one
-/// length-prefixed JSON-RPC `shutdown` frame on a `std::os::unix::net`
-/// stream. The daemon's IPC `shutdown` method trips its shutdown
-/// token, which causes `serve` to exit and `run_foreground` to run
-/// its `stop_all_managed` step — that's where the kill of managed
-/// children actually happens.
-fn best_effort_sync_shutdown(socket: &Path) -> std::io::Result<()> {
+/// during unwind and can't drive an async client; this hand-rolls one
+/// HTTP/1.0 `POST /rpc` carrying the JSON-RPC `shutdown` envelope
+/// against the URL+token recorded in `runtime.json`. The daemon's
+/// `shutdown` method trips its shutdown token, which causes
+/// `run_foreground` to run its `stop_all_managed` step — that's
+/// where the kill of managed children actually happens.
+fn best_effort_sync_shutdown(state_dir: &Path) -> std::io::Result<()> {
   use std::io::{Read, Write};
-  use std::os::unix::net::UnixStream;
-  let mut stream = UnixStream::connect(socket)?;
+  use std::net::TcpStream;
+  let info = match llamastash::daemon::runtime_file::load(state_dir) {
+    Ok(Some(i)) => i,
+    _ => return Ok(()),
+  };
+  // Parse host:port out of the recorded URL. Format is always
+  // `http://127.0.0.1:<port>` because the daemon binds loopback only.
+  let host_port = info
+    .ipc_url
+    .strip_prefix("http://")
+    .unwrap_or(info.ipc_url.as_str());
+  let mut stream = TcpStream::connect(host_port)?;
   stream.set_write_timeout(Some(Duration::from_secs(1)))?;
   stream.set_read_timeout(Some(Duration::from_secs(1)))?;
   let body = br#"{"jsonrpc":"2.0","id":1,"method":"shutdown"}"#;
-  let prefix = (body.len() as u32).to_be_bytes();
-  stream.write_all(&prefix)?;
+  let req = format!(
+    "POST /rpc HTTP/1.0\r\n\
+     Host: {host_port}\r\n\
+     Authorization: Bearer {token}\r\n\
+     Content-Type: application/json\r\n\
+     Content-Length: {len}\r\n\
+     Connection: close\r\n\r\n",
+    token = info.ipc_token,
+    len = body.len(),
+  );
+  stream.write_all(req.as_bytes())?;
   stream.write_all(body)?;
   // Drain the response so the daemon's writer doesn't block on a
   // full peer buffer. We don't parse it — the only thing that
   // matters is that the shutdown token was tripped.
-  let mut len_buf = [0u8; 4];
-  let _ = stream.read_exact(&mut len_buf);
+  let mut sink = [0u8; 512];
+  let _ = stream.read(&mut sink);
   Ok(())
 }
 
@@ -198,7 +218,7 @@ async fn spawn_daemon_with_model(label: &str, model_name: &str, arch: &str) -> D
     }]),
     ..DaemonOptions::rooted_at(state.clone())
   };
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let join = tokio::spawn(async move { run_foreground(opts).await });
   wait_for_socket(&socket).await;
   await_catalog_populated(&socket).await;
@@ -276,35 +296,19 @@ fn build_cli(model_dir: &Path, command: Command) -> (Cli, LoadedConfig) {
 /// flight).
 static SOCKET_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-async fn run_dispatch_at(socket: Option<&Path>, model_dir: &Path, command: Command) -> i32 {
+async fn run_dispatch_at(state_dir: Option<&Path>, model_dir: &Path, command: Command) -> i32 {
   let (cli, cfg) = build_cli(model_dir, command);
   let _guard = SOCKET_ENV_LOCK.lock().await;
-  let prev_socket = std::env::var_os("LLAMASTASH_SOCKET");
   let prev_state = std::env::var_os("LLAMASTASH_STATE_DIR");
-  // Phase A of the Windows+HTTP-IPC plan: the CLI attaches via the
-  // HTTP control plane which reads `runtime.json` from the resolved
-  // state dir. Test daemons place their state dir at the parent of
-  // the socket file (`DaemonOptions::rooted_at(temp)` convention), so
-  // mirror that here. Set both env vars — `LLAMASTASH_SOCKET` covers
-  // the still-around Unix-socket auto-spawn path; `LLAMASTASH_STATE_DIR`
-  // covers the new HTTP attach.
-  match socket {
-    Some(s) => {
-      std::env::set_var("LLAMASTASH_SOCKET", s);
-      if let Some(parent) = s.parent() {
-        std::env::set_var("LLAMASTASH_STATE_DIR", parent);
-      }
-    }
-    None => {
-      std::env::remove_var("LLAMASTASH_SOCKET");
-      std::env::remove_var("LLAMASTASH_STATE_DIR");
-    }
+  // The CLI attaches via the HTTP control plane which reads
+  // `runtime.json` from the resolved state dir. Point the binary's
+  // path resolver at the per-test temp state dir so each integration
+  // test talks to its own daemon.
+  match state_dir {
+    Some(d) => std::env::set_var("LLAMASTASH_STATE_DIR", d),
+    None => std::env::remove_var("LLAMASTASH_STATE_DIR"),
   }
   let code = dispatch(cli, cfg).await.expect("dispatch");
-  match prev_socket {
-    Some(v) => std::env::set_var("LLAMASTASH_SOCKET", v),
-    None => std::env::remove_var("LLAMASTASH_SOCKET"),
-  }
   match prev_state {
     Some(v) => std::env::set_var("LLAMASTASH_STATE_DIR", v),
     None => std::env::remove_var("LLAMASTASH_STATE_DIR"),
@@ -629,7 +633,7 @@ async fn spawn_daemon_with_model_wide_range(
     }]),
     ..DaemonOptions::rooted_at(state.clone())
   };
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let join = tokio::spawn(async move { run_foreground(opts).await });
   wait_for_socket(&socket).await;
   await_catalog_populated(&socket).await;

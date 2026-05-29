@@ -188,10 +188,6 @@ pub enum DaemonAction {
     /// config file or XDG env vars instead.
     #[arg(long, value_name = "PATH", hide = true)]
     state_dir: Option<PathBuf>,
-    /// Internal hand-off: socket path to bind instead of the
-    /// platform-default runtime socket. See `state-dir` for rationale.
-    #[arg(long, value_name = "PATH", hide = true)]
-    socket_path: Option<PathBuf>,
     /// TCP port the OpenAI-compat proxy listener binds on
     /// `127.0.0.1`. Overrides `proxy.port` from the config file and
     /// the `--ollama-compat`-derived default. Default port is `11435`
@@ -1260,14 +1256,12 @@ mod tests {
       Some(Command::Daemon(DaemonAction::Start {
         foreground,
         state_dir,
-        socket_path,
         proxy_port,
         ollama_compat,
         no_proxy_fallback,
       })) => {
         assert!(!foreground);
         assert!(state_dir.is_none());
-        assert!(socket_path.is_none());
         assert!(proxy_port.is_none());
         assert!(!ollama_compat);
         assert!(!no_proxy_fallback);
@@ -1298,24 +1292,17 @@ mod tests {
       "start",
       "--state-dir",
       "/tmp/llamastash-test-state",
-      "--socket-path",
-      "/tmp/llamastash-test-state/daemon.sock",
     ]);
     match cli_with_paths.command {
       Some(Command::Daemon(DaemonAction::Start {
         foreground,
         state_dir,
-        socket_path,
         proxy_port,
         ollama_compat,
         no_proxy_fallback,
       })) => {
         assert!(!foreground);
         assert_eq!(state_dir, Some(PathBuf::from("/tmp/llamastash-test-state")));
-        assert_eq!(
-          socket_path,
-          Some(PathBuf::from("/tmp/llamastash-test-state/daemon.sock"))
-        );
         assert!(proxy_port.is_none());
         assert!(!ollama_compat);
         assert!(!no_proxy_fallback);
@@ -1328,14 +1315,12 @@ mod tests {
       Some(Command::Daemon(DaemonAction::Start {
         foreground,
         state_dir,
-        socket_path,
         proxy_port,
         ollama_compat,
         no_proxy_fallback,
       })) => {
         assert!(!foreground);
         assert!(state_dir.is_none());
-        assert!(socket_path.is_none());
         assert_eq!(proxy_port, Some(8080));
         assert!(!ollama_compat);
         assert!(!no_proxy_fallback);

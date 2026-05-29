@@ -81,7 +81,7 @@ async fn list_models_returns_seeded_fixtures() {
     discovery: fast_discovery_for(&scan_root),
     ..DaemonOptions::rooted_at(state.clone())
   };
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });
   wait_for_socket(&socket).await;
 
@@ -129,7 +129,7 @@ async fn newly_dropped_gguf_appears_via_list_models_within_a_second() {
     discovery: fast_discovery_for(&scan_root),
     ..DaemonOptions::rooted_at(state.clone())
   };
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });
   wait_for_socket(&socket).await;
 

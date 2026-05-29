@@ -107,15 +107,35 @@ pub async fn handle(args: LogsArgs, cli: &Cli, config: &Config) -> CliResult {
               }
             }
           }
-          Err(ClientError::Connect(_)) | Err(ClientError::Transport(_)) => {
-            // Connect failure = daemon down / runtime.json absent;
-            // Transport failure = TCP reset, server hangup mid-response.
-            // Both mean the daemon is no longer there from the
-            // follower's POV, so collapse to DAEMON_UNREACHABLE so
-            // scripts can branch reliably.
+          Err(
+            ClientError::Connect(_)
+            | ClientError::Transport(_)
+            | ClientError::BadStatus { .. }
+            | ClientError::Timeout(_),
+          ) => {
+            // The daemon went away mid-follow. Connect = the HTTP
+            // server isn't accepting; Transport = TCP reset / server
+            // hangup mid-response; BadStatus = the control plane is
+            // mid-shutdown and returned a non-200; Timeout = it
+            // stopped responding. Collapse them all to
+            // DAEMON_UNREACHABLE so scripts can branch reliably.
             return Err(CliExit::new(
               DAEMON_UNREACHABLE,
               format!("daemon disconnected (launch {})", row.launch_id),
+            ));
+          }
+          Err(ClientError::Remote(err))
+            if err.message.contains("unknown launch_id") =>
+          {
+            // Race during daemon shutdown: the supervisor was torn
+            // down by `stop_all_managed` but the control plane is
+            // still answering. From the follower's POV the launch
+            // has gone away, so surface the same DAEMON_UNREACHABLE
+            // exit code rather than letting the InvalidParams envelope
+            // bubble up as a generic UNKNOWN exit.
+            return Err(CliExit::new(
+              DAEMON_UNREACHABLE,
+              format!("launch {} no longer running", row.launch_id),
             ));
           }
           Err(other) => return Err(CliExit::from_client_error(other)),

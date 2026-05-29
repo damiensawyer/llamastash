@@ -427,7 +427,7 @@ async fn end_to_end_proxy_models_matches_discovery_catalog() {
     },
     ..DaemonOptions::rooted_at(state_dir.clone())
   };
-  let socket = opts.socket_path.clone();
+  let socket = opts.state_dir.clone();
   let proxy_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
   let handle = tokio::spawn(async move { run_foreground(opts).await });
 

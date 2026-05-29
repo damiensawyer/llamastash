@@ -16,18 +16,15 @@ use crate::cli::exit_codes::{CliExit, DAEMON_UNREACHABLE};
 use crate::config::Config;
 use crate::daemon::{start_detached, DaemonOptions, StartOutcome};
 use crate::ipc::{Client, ClientError};
-use crate::util::paths::{runtime_socket_path, state_dir};
+use crate::util::paths::state_dir;
 
 /// Connect to the daemon. Auto-spawns it (via `daemon::start_detached`)
 /// when the socket isn't connectable and `cli.no_spawn` is false.
 /// Returns a `CliExit` shaped to the canonical exit codes so the
 /// caller doesn't have to map errors a second time.
 pub async fn connect_or_spawn(cli: &Cli, config: &Config) -> Result<Client, CliExit> {
-  let socket = runtime_socket_path();
-  // Phase A: the HTTP control-plane client reads `runtime.json` from
-  // the state directory; we keep `socket` around for the existing
-  // friendly error message and for the auto-spawn path which still
-  // builds Unix-socket-aware `DaemonOptions` until Unit 4 lands.
+  // The HTTP control-plane client reads `runtime.json` (URL + bearer
+  // token) from the daemon's state directory.
   let attach_dir = state_dir()
     .ok_or_else(|| CliExit::new(DAEMON_UNREACHABLE, "could not resolve state directory"))?;
   match Client::connect(&attach_dir).await {
@@ -46,8 +43,8 @@ pub async fn connect_or_spawn(cli: &Cli, config: &Config) -> Result<Client, CliE
         return Err(CliExit::new(
           DAEMON_UNREACHABLE,
           format!(
-            "daemon: not running and --no-spawn was passed (socket: {})",
-            socket.display()
+            "daemon: not running and --no-spawn was passed (state dir: {})",
+            attach_dir.display()
           ),
         ));
       }
@@ -190,6 +187,6 @@ fn build_spawn_options(cli: &Cli, config: &Config) -> Result<DaemonOptions, CliE
   // Mirror `daemon start`'s composition (state-dir / socket / discovery
   // roots / binary / port range) so a CLI auto-spawn produces the same
   // daemon a user would have hand-typed.
-  super::daemon::build_options(None, None, None, false, false, cli, config)
+  super::daemon::build_options(None, None, false, false, cli, config)
     .map_err(|e| CliExit::new(DAEMON_UNREACHABLE, format!("daemon: build options: {e}")))
 }

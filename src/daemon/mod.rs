@@ -1,10 +1,11 @@
-//! Daemon process: lockfile, socket bind, signal handling, accept loop.
+//! Daemon process: lockfile, control-plane HTTP listener, signal
+//! handling, supervisor lifecycle.
 //!
 //! `run_foreground(opts)` does the whole lifecycle in the calling
 //! process. `start_detached` re-execs the binary as a child with `setsid`
-//! applied between `fork` and `exec`, then waits for the new daemon's
-//! socket to become connectable before returning. The child is the daemon;
-//! no in-runtime `fork()` is involved, which keeps the tokio runtime safe.
+//! applied between `fork` and `exec`, then waits for the runtime info
+//! file to appear before returning. The child is the daemon; no
+//! in-runtime `fork()` is involved, which keeps the tokio runtime safe.
 
 pub mod auth;
 pub mod control_plane;
@@ -12,26 +13,22 @@ pub mod discovery_task;
 pub mod host_metrics;
 pub mod lockfile;
 pub mod orphans;
-pub mod peercred;
 pub mod ports;
 pub mod probe;
 pub mod registry;
 pub mod resources;
 pub mod runtime_file;
-pub mod server;
 pub mod shutdown;
 pub mod state_store;
 pub mod supervisor;
 
 use std::{
-  fs,
   path::{Path, PathBuf},
   sync::Arc,
   time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{anyhow, Context, Result};
-use tokio::net::UnixListener;
 
 use self::{
   auth::IpcToken,
@@ -49,14 +46,14 @@ use crate::discovery::ModelCatalog;
 use crate::ipc::methods::{LaunchEnv, MethodContext, PersistedState};
 use crate::proxy::{self, server::ProxyStatus};
 
-/// Options for starting the daemon. `state_dir` holds the PID lockfile;
-/// `socket_path` is the Unix-domain socket the server binds to. Both
-/// default to the OS-conventional paths via `util::paths`, but tests and
-/// alternate deployments can override them.
+/// Options for starting the daemon. `state_dir` holds the PID
+/// lockfile and the per-instance `runtime.json` (which carries the
+/// bearer token + control-plane URL clients attach with). Defaults
+/// to the OS-conventional paths via `util::paths`; tests and
+/// alternate deployments override.
 #[derive(Debug, Clone)]
 pub struct DaemonOptions {
   pub state_dir: PathBuf,
-  pub socket_path: PathBuf,
   /// Per-launch log directory. Each `start_model` opens a file
   /// under here so the supervisor's stdout/stderr tee + the
   /// `logs_tail` IPC method have a durable backing store.
@@ -118,11 +115,9 @@ impl DaemonOptions {
   /// `build_options` flow, which threads config-driven overrides
   /// through.
   pub fn rooted_at(root: PathBuf) -> Self {
-    let socket_path = root.join("daemon.sock");
     let log_dir = root.join("logs");
     Self {
       state_dir: root,
-      socket_path,
       log_dir,
       binary: None,
       port_range: PortRange::default(),
@@ -147,12 +142,10 @@ impl DaemonOptions {
   pub fn from_defaults() -> Result<Self> {
     let state_dir = crate::util::paths::state_dir()
       .context("could not resolve a state directory for this platform")?;
-    let socket_path = crate::util::paths::runtime_socket_path();
     let log_dir = crate::util::paths::log_dir()
       .context("could not resolve a cache/log directory for this platform")?;
     Ok(Self {
       state_dir,
-      socket_path,
       log_dir,
       binary: None,
       port_range: PortRange::default(),
@@ -180,8 +173,8 @@ pub enum StartOutcome {
   AlreadyRunning(i32),
 }
 
-/// Run the daemon in the current process. Returns when the accept loop
-/// exits (either via the `shutdown` method, SIGINT, or SIGTERM).
+/// Run the daemon in the current process. Returns when the shutdown
+/// token is triggered (via the `shutdown` method, SIGINT, or SIGTERM).
 pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // 1. PID lockfile.
   let lockfile = match acquire(&opts.state_dir).context("acquiring PID lockfile")? {
@@ -189,25 +182,10 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
     AcquireOutcome::AlreadyRunning { pid, .. } => return Ok(StartOutcome::AlreadyRunning(pid)),
   };
 
-  // 2. Bind the Unix socket. A stale socket from a SIGKILL'd previous run
-  // must be cleared, but only after we hold the lockfile — otherwise we
-  // could race with a legitimate running daemon.
-  if opts.socket_path.exists() {
-    fs::remove_file(&opts.socket_path)
-      .with_context(|| format!("removing stale socket at {}", opts.socket_path.display()))?;
-  }
-  ensure_parent_dir(&opts.socket_path)?;
-  // Bind under a restrictive umask so the socket inode is created
-  // with mode 0o600 from the moment it exists. A bind→chmod sequence
-  // would leave a TOCTOU window where the file is world-accessible
-  // on Linux (peercred is the real auth boundary, but no need to
-  // leave the door visibly open).
-  let listener = with_restrictive_umask(|| {
-    UnixListener::bind(&opts.socket_path)
-      .with_context(|| format!("binding socket at {}", opts.socket_path.display()))
-  })?;
-  apply_socket_permissions(&opts.socket_path)?;
-  log::info!("daemon listening on {}", opts.socket_path.display());
+  // 2. State directory: created lazily by the lockfile / state-store /
+  // runtime-file writers. No socket file to clear — the control plane
+  // binds a TCP listener (§8c) and writes its URL+token into
+  // `runtime.json` instead.
 
   // 3. Shutdown plumbing.
   let token = ShutdownToken::new();
@@ -311,7 +289,6 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
     .with_sampler(sampler)
     .with_state(persisted)
     .with_external(external_combined)
-    .with_socket_path(opts.socket_path.clone())
     .with_proxy_status(std::sync::Arc::clone(&proxy_status_cell));
   if let Some(binary) = opts.binary.clone() {
     if let Err(e) = std::fs::create_dir_all(&opts.log_dir) {
@@ -392,73 +369,68 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
     }
   }
 
-  // 8c. Control-plane HTTP listener (Phase A of the Windows+HTTP-IPC plan).
-  // Binds a separate loopback TCP port from the proxy and the Unix
-  // socket. Auth is bearer-token; the token + URL are written to
-  // `runtime.json` under `state_dir` so attaching CLI / TUI clients
-  // can pick them up. Runs *alongside* the Unix-socket listener
-  // during Phase A — Unit 4 (deletion) lands after the client and
-  // SSE units validate the HTTP path end-to-end on Linux/macOS.
+  // 8c. Control-plane HTTP listener — the daemon's only RPC surface.
+  // Binds a loopback TCP port; auth is bearer-token; the token + URL
+  // are written to `runtime.json` under `state_dir` so attaching CLI
+  // / TUI clients can pick them up. Bind failure is fatal here (the
+  // proxy is best-effort but the control plane *is* the daemon's
+  // primary contract); the error propagates so the caller sees a
+  // clean exit-code-1 instead of a daemon with no RPC surface.
   let control_token = Arc::new(IpcToken::generate());
   let control_addr = control_plane::loopback_addr(opts.control_plane_port);
-  match control_plane::bind(control_addr).await {
+  let (control_listener, control_bound) = match control_plane::bind(control_addr).await {
     BindResult::Bound {
       listener: control_listener,
       addr: control_bound,
-    } => {
-      let ipc_url = format!("http://{control_bound}");
-      log::info!("control plane listening on {ipc_url}");
-      let info = RuntimeInfo {
-        schema_version: 1,
-        ipc_url,
-        ipc_token: control_token.as_str().to_owned(),
-        started_at_unix: SystemTime::now()
-          .duration_since(UNIX_EPOCH)
-          .map(|d| d.as_secs())
-          .unwrap_or_default(),
-        daemon_pid: std::process::id() as i32,
-      };
-      if let Err(e) = runtime_file::save(&opts.state_dir, &info) {
-        log::warn!("control plane: could not persist runtime.json: {e}");
-      }
-      let control_token_for_serve = Arc::clone(&control_token);
-      let control_ctx = ctx.clone();
-      let control_token_signal = token.clone();
-      supervisor::spawn_supervised("control_plane_listener", async move {
-        if let Err(e) = control_plane::serve(
-          control_listener,
-          control_token_for_serve,
-          control_ctx,
-          control_token_signal,
-        )
-        .await
-        {
-          log::warn!("control plane listener task ended with error: {e}");
-        }
-      });
-    }
+    } => (control_listener, control_bound),
     BindResult::AllPortsInUse { last_addr } => {
-      log::warn!(
-        "control plane: ports {}..={} all in use; daemon continues without the HTTP control plane (Unix socket still serves)",
+      return Err(anyhow!(
+        "control plane: ports {}..={} all in use; cannot start daemon",
         opts.control_plane_port,
         last_addr.port()
-      );
+      ));
     }
     BindResult::Failed { addr, error } => {
-      log::warn!(
-        "control plane: failed to bind {addr}: {error}; daemon continues without the HTTP control plane (Unix socket still serves)"
-      );
+      return Err(anyhow!(
+        "control plane: failed to bind {addr}: {error}; cannot start daemon"
+      ));
     }
+  };
+  let ipc_url = format!("http://{control_bound}");
+  log::info!("control plane listening on {ipc_url}");
+  let info = RuntimeInfo {
+    schema_version: 1,
+    ipc_url,
+    ipc_token: control_token.as_str().to_owned(),
+    started_at_unix: SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|d| d.as_secs())
+      .unwrap_or_default(),
+    daemon_pid: std::process::id() as i32,
+  };
+  if let Err(e) = runtime_file::save(&opts.state_dir, &info) {
+    log::warn!("control plane: could not persist runtime.json: {e}");
   }
+  let control_token_for_serve = Arc::clone(&control_token);
+  let control_ctx = ctx.clone();
+  let control_token_signal = token.clone();
+  supervisor::spawn_supervised("control_plane_listener", async move {
+    if let Err(e) = control_plane::serve(
+      control_listener,
+      control_token_for_serve,
+      control_ctx,
+      control_token_signal,
+    )
+    .await
+    {
+      log::warn!("control plane listener task ended with error: {e}");
+    }
+  });
 
-  // Hold a second handle to the dispatcher context so the
-  // post-serve cleanup step (below) can reach the supervisor
-  // registry after `serve` consumes its copy. `MethodContext` is
-  // Arc-backed, so the clone is cheap and shares state.
-  let cleanup_ctx = ctx.clone();
-
-  // 9. Accept loop until shutdown is triggered.
-  let result = server::serve(listener, ctx).await;
+  // 9. Wait for shutdown. The control plane runs as a supervised
+  // background task; the foreground future parks on the shutdown
+  // token so SIGINT/SIGTERM/IPC `shutdown` all unblock the same way.
+  token.wait_until_triggered().await;
 
   // 9b. SIGTERM-then-SIGKILL every supervised `llama-server` before
   // exiting. The supervisor's `pre_exec(setsid)` makes each child a
@@ -467,22 +439,20 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // exits — `daemon stop`, SIGINT, SIGTERM, IPC `shutdown` — we
   // don't want children to leak. The 5 s grace mirrors
   // `default_grace_secs` in the IPC `stop_model` handler.
-  let stopped = crate::ipc::methods::stop_all_managed(&cleanup_ctx, Duration::from_secs(5)).await;
+  let stopped = crate::ipc::methods::stop_all_managed(&ctx, Duration::from_secs(5)).await;
   if !stopped.is_empty() {
     log::info!("shutdown: stopped {} managed launch(es)", stopped.len());
   }
 
-  // 10. Cleanup. Lockfile cleans itself in Drop; the socket file is
-  // removed here. We let the listener drop naturally. `runtime.json`
-  // is also best-effort removed so a fresh daemon never reads a
-  // stale URL/token pair (the lockfile is the authoritative liveness
-  // check, but stale runtime.json would just cost the next client an
-  // extra retry).
-  let _ = fs::remove_file(&opts.socket_path);
+  // 10. Cleanup. Lockfile cleans itself in Drop; `runtime.json` is
+  // best-effort removed so a fresh daemon never reads a stale
+  // URL/token pair (the lockfile is the authoritative liveness check,
+  // but stale runtime.json would just cost the next client an extra
+  // retry).
   runtime_file::remove(&opts.state_dir);
   drop(lockfile);
 
-  result.map(|()| StartOutcome::RanToCompletion)
+  Ok(StartOutcome::RanToCompletion)
 }
 
 /// Best-effort `start_time` lookup for a PID. Used to seed
@@ -546,10 +516,10 @@ fn quarantine_broken_state(state_dir: &Path) {
 /// 1. Spawn `llamastash daemon start` (foreground mode) with `stdin`/
 ///    `stdout`/`stderr` redirected to `/dev/null` and `setsid` applied
 ///    between `fork` and `exec`.
-/// 2. Poll the configured socket path for up to ~3s, attempting a
-///    connection. Success → daemon is ready; return.
-/// 3. If the child has already exited (e.g. AlreadyRunning), reap it and
-///    surface its exit status.
+/// 2. Poll for `runtime.json` (the HTTP control plane's handshake
+///    file) for up to ~3s. Success → daemon is ready; return.
+/// 3. If the child has already exited (e.g. AlreadyRunning), reap it
+///    and surface its exit status.
 #[cfg(unix)]
 pub fn start_detached(opts: DaemonOptions) -> Result<StartOutcome> {
   let exe = std::env::current_exe().context("locating current executable for --detach")?;
@@ -568,11 +538,10 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
     process::{Command, Stdio},
   };
 
-  // Fast path: a live daemon already owns the socket. Don't spawn a
-  // child only to have it bail out — the parent would observe the
-  // existing daemon's socket as "connectable" and falsely report success.
+  // Fast path: a live daemon already owns the lockfile. Don't spawn a
+  // child only to have it bail out.
   if let Some(pid) = existing_daemon_pid(&opts.state_dir) {
-    if std::os::unix::net::UnixStream::connect(&opts.socket_path).is_ok() {
+    if matches!(runtime_file::load(&opts.state_dir), Ok(Some(_))) {
       return Ok(StartOutcome::AlreadyRunning(pid));
     }
   }
@@ -595,13 +564,12 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
     // child IS the daemon; `setsid` (applied below) is what actually
     // backgrounds it from the original shell's perspective.
     .arg("--foreground")
-    // Propagate the caller-supplied paths to the re-exec'd child via
-    // hidden flags. Without this, the child rebuilt `DaemonOptions`
-    // from XDG defaults and silently ignored the parent's choices.
+    // Propagate the caller-supplied state directory to the re-exec'd
+    // child via the hidden flag. Without this, the child rebuilt
+    // `DaemonOptions` from XDG defaults and silently ignored the
+    // parent's choices.
     .arg("--state-dir")
     .arg(&opts.state_dir)
-    .arg("--socket-path")
-    .arg(&opts.socket_path)
     // Propagate the effective proxy port so a `daemon start --detach
     // --proxy-port N` doesn't drop the override on re-exec. We pass
     // the *resolved* port (`effective_port`) so the child binds the
@@ -636,15 +604,9 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
 
   let mut child = cmd.spawn().context("spawning detached daemon")?;
 
-  // Poll for the daemon to become fully attachable. Phase A of the
-  // Windows+HTTP-IPC plan ships two listeners side by side: the
-  // legacy Unix socket binds first (~§2 of `run_foreground`) and
-  // `runtime.json` lands later (~§8c) once the HTTP control plane
-  // resolves its address. Clients attach over HTTP now, so we have
-  // to wait for both — socket-connectable alone returns before the
-  // runtime info file exists, racing the next `Client::connect`.
-  // Bail out early if the child has already exited (most commonly
-  // AlreadyRunning).
+  // Poll for the runtime info file to appear. `runtime_file::save`
+  // happens after the control plane has bound its TCP port, so a
+  // present file means the daemon is ready to accept HTTP requests.
   let deadline = std::time::Instant::now() + Duration::from_secs(3);
   loop {
     if let Some(status) = child.try_wait()? {
@@ -652,13 +614,11 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
         return Ok(StartOutcome::AlreadyRunning(pid));
       }
       return Err(anyhow!(
-        "detached daemon exited before binding socket (exit code: {:?})",
+        "detached daemon exited before binding control plane (exit code: {:?})",
         status.code()
       ));
     }
-    let socket_up = std::os::unix::net::UnixStream::connect(&opts.socket_path).is_ok();
-    let runtime_up = matches!(runtime_file::load(&opts.state_dir), Ok(Some(_)));
-    if socket_up && runtime_up {
+    if matches!(runtime_file::load(&opts.state_dir), Ok(Some(_))) {
       return Ok(StartOutcome::RanToCompletion);
     }
     if std::time::Instant::now() > deadline {
@@ -666,8 +626,8 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
       let _ = child.kill();
       let _ = child.wait();
       return Err(anyhow!(
-        "detached daemon did not become attachable within 3s ({})",
-        opts.socket_path.display()
+        "detached daemon did not bind control plane within 3s (state_dir: {})",
+        opts.state_dir.display()
       ));
     }
     std::thread::sleep(Duration::from_millis(50));
@@ -715,97 +675,8 @@ pub(crate) fn existing_daemon_pid(state_dir: &Path) -> Option<i32> {
   // Lock contended → a daemon owns the pidfile. Read the recorded PID
   // for the friendly "already running" message; ownership is decided by
   // the lock, the PID value is informational.
-  let raw = fs::read_to_string(&pidfile).ok()?;
+  let raw = std::fs::read_to_string(&pidfile).ok()?;
   raw.trim().parse::<i32>().ok().filter(|p| *p > 0)
-}
-
-fn ensure_parent_dir(path: &Path) -> Result<()> {
-  if let Some(parent) = path.parent() {
-    create_dir_secure(parent)
-      .with_context(|| format!("creating parent dir {}", parent.display()))?;
-  }
-  Ok(())
-}
-
-/// `create_dir_all` with mode 0o700 on Unix so freshly-created
-/// per-user runtime directories (e.g. macOS's `$TMPDIR/llamastash-$USER`
-/// fallback) are not world-readable. Linux's `$XDG_RUNTIME_DIR` is
-/// already 0700 by the systemd contract, but the fallback path needs
-/// this to keep parity. We don't downgrade pre-existing directories
-/// — if the user has a more permissive parent, that's their call.
-#[cfg(unix)]
-fn create_dir_secure(path: &Path) -> std::io::Result<()> {
-  use std::os::unix::fs::DirBuilderExt;
-  if path.exists() {
-    return Ok(());
-  }
-  // Walk up to the first existing ancestor; create the chain back
-  // down with mode 0o700.
-  let mut to_create: Vec<&Path> = Vec::new();
-  let mut cur = Some(path);
-  while let Some(p) = cur {
-    if p.exists() {
-      break;
-    }
-    to_create.push(p);
-    cur = p.parent();
-  }
-  to_create.reverse();
-  for p in to_create {
-    std::fs::DirBuilder::new()
-      .mode(0o700)
-      .create(p)
-      .or_else(|e| {
-        // Race with another creator (rare but legal): tolerate.
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-          Ok(())
-        } else {
-          Err(e)
-        }
-      })?;
-  }
-  Ok(())
-}
-
-#[cfg(not(unix))]
-fn create_dir_secure(path: &Path) -> std::io::Result<()> {
-  std::fs::create_dir_all(path)
-}
-
-/// Run `f` with the process umask temporarily set to 0o077 so any
-/// file inode it creates inherits mode bits 0o600 / 0o700. Safe for
-/// the daemon's single-threaded startup; should NOT be called from
-/// arbitrary tokio tasks because umask is process-global.
-#[cfg(unix)]
-fn with_restrictive_umask<T, F: FnOnce() -> Result<T>>(f: F) -> Result<T> {
-  // SAFETY: `umask(2)` is async-signal-safe and operates on a
-  // process-global integer. We're on the single-threaded startup
-  // path before any worker tokio tasks have been spawned.
-  let prev = unsafe { libc::umask(0o077) };
-  let out = f();
-  unsafe { libc::umask(prev) };
-  out
-}
-
-#[cfg(not(unix))]
-fn with_restrictive_umask<T, F: FnOnce() -> Result<T>>(f: F) -> Result<T> {
-  f()
-}
-
-/// Apply mode `0600` to the socket file so other users on the host cannot
-/// even open it. Peercred is the auth boundary that *catches* a bypass;
-/// permissions are the boundary that *prevents* one.
-#[cfg(unix)]
-fn apply_socket_permissions(path: &Path) -> Result<()> {
-  use std::os::unix::fs::PermissionsExt;
-  fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-    .with_context(|| format!("chmod 0600 on {}", path.display()))?;
-  Ok(())
-}
-
-#[cfg(not(unix))]
-fn apply_socket_permissions(_path: &Path) -> Result<()> {
-  Ok(())
 }
 
 // Re-export the symbols downstream callers reach for.
@@ -815,4 +686,4 @@ pub use lockfile::AcquireOutcome as LockfileOutcome;
 pub use lockfile::Lockfile as DaemonLockfile;
 
 /// Default drain timeout exposed for callers (tests, CLI status command).
-pub const SHUTDOWN_DRAIN_TIMEOUT: Duration = server::DRAIN_TIMEOUT;
+pub const SHUTDOWN_DRAIN_TIMEOUT: Duration = control_plane::DRAIN_TIMEOUT;
