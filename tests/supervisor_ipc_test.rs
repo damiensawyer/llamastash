@@ -225,10 +225,17 @@ async fn run_foreground_with_supervisors(
   // we constructed up-top. We currently lack a public seam, so the
   // test exposes one via a small wrapper that mirrors the
   // run_foreground steps but injects the supervisors+gpu on
-  // `MethodContext`.
+  // `MethodContext`. The wrapper also lights up the HTTP control
+  // plane that Unit 1 of the Windows+HTTP-IPC plan added so the new
+  // `Client::connect(state_dir)` works against this fixture daemon.
+  use llamastash::daemon::auth::IpcToken;
+  use llamastash::daemon::control_plane;
+  use llamastash::daemon::runtime_file::{self, RuntimeInfo};
   use llamastash::daemon::{lockfile::acquire, lockfile::AcquireOutcome};
   use llamastash::ipc::methods::MethodContext;
   use std::fs;
+  use std::sync::Arc;
+  use std::time::{SystemTime, UNIX_EPOCH};
 
   // 1. PID lockfile.
   let lock = match acquire(&opts.state_dir)? {
@@ -255,14 +262,45 @@ async fn run_foreground_with_supervisors(
   let _discovery =
     llamastash::daemon::discovery_task::spawn(catalog.clone(), opts.discovery.clone());
   let sampler = llamastash::daemon::host_metrics::spawn(token.clone(), Duration::from_secs(1));
-  let ctx = MethodContext::with_catalog(token, catalog)
+  let ctx = MethodContext::with_catalog(token.clone(), catalog)
     .with_supervisors(supervisors)
     .with_gpu(llamastash::gpu::GpuInfo::CpuOnly)
     .with_sampler(sampler);
+
+  // Bind the HTTP control plane so `Client::connect(state_dir)` can
+  // attach via the new transport. Best-effort on bind failure (mirrors
+  // production's posture in `run_foreground`).
+  let control_token = Arc::new(IpcToken::generate());
+  let control_addr = control_plane::loopback_addr(opts.control_plane_port);
+  if let control_plane::BindResult::Bound {
+    listener: cp_listener,
+    addr: cp_bound,
+  } = control_plane::bind(control_addr).await
+  {
+    let info = RuntimeInfo {
+      schema_version: 1,
+      ipc_url: format!("http://{cp_bound}"),
+      ipc_token: control_token.as_str().to_owned(),
+      started_at_unix: SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default(),
+      daemon_pid: std::process::id() as i32,
+    };
+    let _ = runtime_file::save(&opts.state_dir, &info);
+    let cp_token = Arc::clone(&control_token);
+    let cp_ctx = ctx.clone();
+    let cp_shutdown = token.clone();
+    tokio::spawn(async move {
+      let _ = control_plane::serve(cp_listener, cp_token, cp_ctx, cp_shutdown).await;
+    });
+  }
+
   // Suppress unused-mut warning when opts isn't mutated further.
   let _ = &mut opts;
   let result = llamastash::daemon::server::serve(listener, ctx).await;
   let _ = fs::remove_file(&opts.socket_path);
+  runtime_file::remove(&opts.state_dir);
   drop(lock);
   result.map(|()| llamastash::daemon::StartOutcome::RanToCompletion)
 }

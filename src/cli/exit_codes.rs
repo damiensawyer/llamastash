@@ -176,8 +176,7 @@ mod tests {
 
   #[test]
   fn from_client_error_maps_connect_to_daemon_unreachable() {
-    let io = std::io::Error::from(std::io::ErrorKind::NotFound);
-    let exit = CliExit::from_client_error(ClientError::Connect(io));
+    let exit = CliExit::from_client_error(ClientError::Connect("not found".into()));
     assert_eq!(exit.code, DAEMON_UNREACHABLE);
   }
 
@@ -189,16 +188,13 @@ mod tests {
 
   #[test]
   fn from_client_error_wildcard_maps_to_unknown() {
-    // Catch-all arm: Frame / Encode / Decode / Remote all collapse to
-    // UNKNOWN so callers that don't have method-specific context get
-    // a consistent exit. Pin the contract.
+    // Catch-all arm: Transport / Decode / Remote / Unauthorized /
+    // BadStatus collapse to UNKNOWN so callers without
+    // method-specific context get a consistent exit. Pin the contract.
     use crate::ipc::protocol::{ErrorCode, ErrorObject};
-    use std::io::{Error, ErrorKind};
 
-    let frame_err = ClientError::Frame(crate::ipc::framing::FrameError::Io(Error::from(
-      ErrorKind::UnexpectedEof,
-    )));
-    assert_eq!(CliExit::from_client_error(frame_err).code, UNKNOWN);
+    let transport_err = ClientError::Transport("tcp reset".into());
+    assert_eq!(CliExit::from_client_error(transport_err).code, UNKNOWN);
 
     let decode_err = ClientError::Decode(serde_json::from_str::<()>("{").unwrap_err());
     assert_eq!(CliExit::from_client_error(decode_err).code, UNKNOWN);
@@ -208,5 +204,8 @@ mod tests {
       "synthetic remote".to_string(),
     ));
     assert_eq!(CliExit::from_client_error(remote_err).code, UNKNOWN);
+
+    let unauth_err = ClientError::Unauthorized;
+    assert_eq!(CliExit::from_client_error(unauth_err).code, UNKNOWN);
   }
 }

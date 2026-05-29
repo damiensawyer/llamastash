@@ -269,24 +269,45 @@ fn build_cli(model_dir: &Path, command: Command) -> (Cli, LoadedConfig) {
   (cli, config)
 }
 
-/// Serialises `LLAMASTASH_SOCKET` env-var swap so two parallel tests
-/// don't read each other's daemon. Held across an `.await` so we use
-/// tokio's async-aware `Mutex` (the std `Mutex` would block worker
-/// threads while a dispatch is in flight).
+/// Serialises `LLAMASTASH_SOCKET` + `LLAMASTASH_STATE_DIR` env-var
+/// swap so two parallel tests don't read each other's daemon. Held
+/// across an `.await` so we use tokio's async-aware `Mutex` (the
+/// std `Mutex` would block worker threads while a dispatch is in
+/// flight).
 static SOCKET_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn run_dispatch_at(socket: Option<&Path>, model_dir: &Path, command: Command) -> i32 {
   let (cli, cfg) = build_cli(model_dir, command);
   let _guard = SOCKET_ENV_LOCK.lock().await;
-  let prev = std::env::var_os("LLAMASTASH_SOCKET");
+  let prev_socket = std::env::var_os("LLAMASTASH_SOCKET");
+  let prev_state = std::env::var_os("LLAMASTASH_STATE_DIR");
+  // Phase A of the Windows+HTTP-IPC plan: the CLI attaches via the
+  // HTTP control plane which reads `runtime.json` from the resolved
+  // state dir. Test daemons place their state dir at the parent of
+  // the socket file (`DaemonOptions::rooted_at(temp)` convention), so
+  // mirror that here. Set both env vars — `LLAMASTASH_SOCKET` covers
+  // the still-around Unix-socket auto-spawn path; `LLAMASTASH_STATE_DIR`
+  // covers the new HTTP attach.
   match socket {
-    Some(s) => std::env::set_var("LLAMASTASH_SOCKET", s),
-    None => std::env::remove_var("LLAMASTASH_SOCKET"),
+    Some(s) => {
+      std::env::set_var("LLAMASTASH_SOCKET", s);
+      if let Some(parent) = s.parent() {
+        std::env::set_var("LLAMASTASH_STATE_DIR", parent);
+      }
+    }
+    None => {
+      std::env::remove_var("LLAMASTASH_SOCKET");
+      std::env::remove_var("LLAMASTASH_STATE_DIR");
+    }
   }
   let code = dispatch(cli, cfg).await.expect("dispatch");
-  match prev {
+  match prev_socket {
     Some(v) => std::env::set_var("LLAMASTASH_SOCKET", v),
     None => std::env::remove_var("LLAMASTASH_SOCKET"),
+  }
+  match prev_state {
+    Some(v) => std::env::set_var("LLAMASTASH_STATE_DIR", v),
+    None => std::env::remove_var("LLAMASTASH_STATE_DIR"),
   }
   code
 }

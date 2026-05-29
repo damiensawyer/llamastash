@@ -186,7 +186,16 @@ pub(crate) async fn handle_tui(cli: &Cli, config: &crate::config::Config) -> Cli
     return render_snapshot(cli, config, &mut client).await;
   }
   drop(client);
-  let socket = crate::util::paths::runtime_socket_path();
+  // Phase A of the Windows+HTTP-IPC plan: TUI attaches via the HTTP
+  // control plane which reads bearer token + URL out of
+  // `state_dir/runtime.json`. The legacy parameter is still named
+  // `socket` in `tui::events` for minimum churn; Unit 4 renames it.
+  let socket = crate::util::paths::state_dir().ok_or_else(|| {
+    CliExit::new(
+      exit_codes::DAEMON_UNREACHABLE,
+      "could not resolve state directory",
+    )
+  })?;
   let keymap = resolve_keymap(config);
   // Resolve the same DaemonOptions the auto-spawn path would use,
   // so the TUI's `R:restart daemon` hotkey re-spawns with matching

@@ -24,7 +24,7 @@ use crate::daemon::{
 use crate::discovery::known_caches::{default_set, RootResolution};
 use crate::ipc::{Client, ClientError};
 use crate::launch::binary::{locate as locate_binary, LocateInputs};
-use crate::util::paths::{home_dir, runtime_socket_path};
+use crate::util::paths::{home_dir, state_dir};
 
 /// Top-level dispatch for `daemon <action>`. The full `Cli` and merged
 /// `Config` flow through so `handle_start` can resolve discovery roots
@@ -150,8 +150,8 @@ fn print_already_running(pid: i32) {
 }
 
 async fn handle_stop() -> Result<()> {
-  let socket = runtime_socket_path();
-  match Client::connect(&socket).await {
+  let attach_dir = state_dir().context("could not resolve state directory")?;
+  match Client::connect(&attach_dir).await {
     Ok(mut client) => {
       let _ = client.call("shutdown", None).await?;
       println!(
@@ -311,9 +311,9 @@ pub(crate) fn resolve_scan_roots(
 }
 
 async fn handle_status(json: bool) -> Result<()> {
-  let socket = runtime_socket_path();
-  // Short timeout for status — agents shouldn't sit on a dead socket.
-  match Client::connect(&socket).await {
+  let attach_dir = state_dir().context("could not resolve state directory")?;
+  // Short timeout for status — agents shouldn't sit on a dead daemon.
+  match Client::connect(&attach_dir).await {
     Ok(mut client) => {
       let result = client
         .call_with_timeout("version", None, Duration::from_secs(2))

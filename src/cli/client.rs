@@ -16,7 +16,7 @@ use crate::cli::exit_codes::{CliExit, DAEMON_UNREACHABLE};
 use crate::config::Config;
 use crate::daemon::{start_detached, DaemonOptions, StartOutcome};
 use crate::ipc::{Client, ClientError};
-use crate::util::paths::runtime_socket_path;
+use crate::util::paths::{runtime_socket_path, state_dir};
 
 /// Connect to the daemon. Auto-spawns it (via `daemon::start_detached`)
 /// when the socket isn't connectable and `cli.no_spawn` is false.
@@ -24,7 +24,13 @@ use crate::util::paths::runtime_socket_path;
 /// caller doesn't have to map errors a second time.
 pub async fn connect_or_spawn(cli: &Cli, config: &Config) -> Result<Client, CliExit> {
   let socket = runtime_socket_path();
-  match Client::connect(&socket).await {
+  // Phase A: the HTTP control-plane client reads `runtime.json` from
+  // the state directory; we keep `socket` around for the existing
+  // friendly error message and for the auto-spawn path which still
+  // builds Unix-socket-aware `DaemonOptions` until Unit 4 lands.
+  let attach_dir = state_dir()
+    .ok_or_else(|| CliExit::new(DAEMON_UNREACHABLE, "could not resolve state directory"))?;
+  match Client::connect(&attach_dir).await {
     Ok(client) => {
       // Reconcile against the running daemon: if the user passed
       // `--llama-server` (or any other binary-resolving flag) on
@@ -33,7 +39,7 @@ pub async fn connect_or_spawn(cli: &Cli, config: &Config) -> Result<Client, CliE
       // mismatch and restart the daemon with the new args — but
       // only when no managed launches are running, so we never kill
       // someone else's in-flight model on a stale daemon.
-      reconcile_binary_with_running_daemon(client, cli, config, &socket).await
+      reconcile_binary_with_running_daemon(client, cli, config, &attach_dir).await
     }
     Err(ClientError::Connect(_)) => {
       if cli.no_spawn {
@@ -46,14 +52,14 @@ pub async fn connect_or_spawn(cli: &Cli, config: &Config) -> Result<Client, CliE
         ));
       }
       let opts = build_spawn_options(cli, config)?;
-      let socket_for_poll = opts.socket_path.clone();
+      let attach_for_poll = opts.state_dir.clone();
       match start_detached(opts) {
         Ok(StartOutcome::RanToCompletion) | Ok(StartOutcome::AlreadyRunning(_)) => {
           // Brief settle window: start_detached returns once the
           // socket is connectable, but a second client opening at
           // the same instant occasionally trips an EAGAIN. One
           // retry is enough.
-          await_socket(&socket_for_poll, Duration::from_secs(2)).await
+          await_socket(&attach_for_poll, Duration::from_secs(2)).await
         }
         Err(e) => Err(CliExit::new(
           DAEMON_UNREACHABLE,
@@ -80,7 +86,7 @@ async fn reconcile_binary_with_running_daemon(
   mut client: Client,
   cli: &Cli,
   config: &Config,
-  socket: &std::path::Path,
+  attach_dir: &std::path::Path,
 ) -> Result<Client, CliExit> {
   let Some(cli_binary) = cli.llama_server.as_ref() else {
     return Ok(client);
@@ -139,11 +145,11 @@ async fn reconcile_binary_with_running_daemon(
   // CLI flag flowing through `build_spawn_options`.
   let _ = client.call("shutdown", None).await;
   drop(client);
-  await_socket_gone(socket, Duration::from_secs(3)).await;
+  await_socket_gone(attach_dir, Duration::from_secs(3)).await;
   let opts = build_spawn_options(cli, config)?;
-  let socket_for_poll = opts.socket_path.clone();
+  let attach_for_poll = opts.state_dir.clone();
   match start_detached(opts) {
-    Ok(_) => await_socket(&socket_for_poll, Duration::from_secs(3)).await,
+    Ok(_) => await_socket(&attach_for_poll, Duration::from_secs(3)).await,
     Err(e) => Err(CliExit::new(
       DAEMON_UNREACHABLE,
       format!("daemon: restart for --llama-server failed: {e}"),
@@ -151,24 +157,24 @@ async fn reconcile_binary_with_running_daemon(
   }
 }
 
-/// Poll until the socket file disappears (or `total` elapses).
-/// Used after `shutdown` so the follow-up `start_detached` doesn't
-/// race with the old daemon's socket teardown.
-async fn await_socket_gone(socket: &std::path::Path, total: Duration) {
+/// Poll until the daemon stops responding (or `total` elapses). Used
+/// after `shutdown` so the follow-up `start_detached` doesn't race
+/// with the old daemon's runtime.json teardown.
+async fn await_socket_gone(attach_dir: &std::path::Path, total: Duration) {
   let deadline = std::time::Instant::now() + total;
   while std::time::Instant::now() < deadline {
-    if Client::connect(socket).await.is_err() {
+    if Client::connect(attach_dir).await.is_err() {
       return;
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
   }
 }
 
-async fn await_socket(socket: &std::path::Path, total: Duration) -> Result<Client, CliExit> {
+async fn await_socket(attach_dir: &std::path::Path, total: Duration) -> Result<Client, CliExit> {
   let deadline = std::time::Instant::now() + total;
   let mut last_err: Option<ClientError> = None;
   while std::time::Instant::now() < deadline {
-    match Client::connect(socket).await {
+    match Client::connect(attach_dir).await {
       Ok(c) => return Ok(c),
       Err(e) => last_err = Some(e),
     }
@@ -176,7 +182,7 @@ async fn await_socket(socket: &std::path::Path, total: Duration) -> Result<Clien
   }
   Err(match last_err {
     Some(e) => CliExit::from_client_error(e),
-    None => CliExit::new(DAEMON_UNREACHABLE, "daemon: socket never appeared"),
+    None => CliExit::new(DAEMON_UNREACHABLE, "daemon: never came up"),
   })
 }
 

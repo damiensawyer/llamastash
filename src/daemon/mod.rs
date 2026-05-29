@@ -636,14 +636,18 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
 
   let mut child = cmd.spawn().context("spawning detached daemon")?;
 
-  // Poll for the socket to become connectable. Bail out early if the
-  // child has already exited (most commonly AlreadyRunning).
+  // Poll for the daemon to become fully attachable. Phase A of the
+  // Windows+HTTP-IPC plan ships two listeners side by side: the
+  // legacy Unix socket binds first (~§2 of `run_foreground`) and
+  // `runtime.json` lands later (~§8c) once the HTTP control plane
+  // resolves its address. Clients attach over HTTP now, so we have
+  // to wait for both — socket-connectable alone returns before the
+  // runtime info file exists, racing the next `Client::connect`.
+  // Bail out early if the child has already exited (most commonly
+  // AlreadyRunning).
   let deadline = std::time::Instant::now() + Duration::from_secs(3);
   loop {
     if let Some(status) = child.try_wait()? {
-      // Child exited before socket appeared. If the lockfile exists and
-      // points to a live pid, the child saw an existing daemon; we can
-      // report that cleanly. Otherwise it's an unexpected failure.
       if let Some(pid) = existing_daemon_pid(&opts.state_dir) {
         return Ok(StartOutcome::AlreadyRunning(pid));
       }
@@ -652,7 +656,9 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
         status.code()
       ));
     }
-    if std::os::unix::net::UnixStream::connect(&opts.socket_path).is_ok() {
+    let socket_up = std::os::unix::net::UnixStream::connect(&opts.socket_path).is_ok();
+    let runtime_up = matches!(runtime_file::load(&opts.state_dir), Ok(Some(_)));
+    if socket_up && runtime_up {
       return Ok(StartOutcome::RanToCompletion);
     }
     if std::time::Instant::now() > deadline {
@@ -660,7 +666,7 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
       let _ = child.kill();
       let _ = child.wait();
       return Err(anyhow!(
-        "detached daemon did not bind socket within 3s ({})",
+        "detached daemon did not become attachable within 3s ({})",
         opts.socket_path.display()
       ));
     }
