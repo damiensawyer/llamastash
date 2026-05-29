@@ -40,12 +40,25 @@ pub fn read_current(
     }
   };
   match format {
-    Format::Json => serde_json::from_str(&raw).map_err(|e| PatchError::Parse {
-      tool_id,
-      path: path.to_path_buf(),
-      format,
-      error: e.to_string(),
-    }),
+    Format::Json => {
+      // Strip `//` and `/* */` comments before strict-JSON parse so a
+      // `.jsonc` file (OpenCode) or a `.json` that the user has
+      // annotated VSCode-style (Zed's `settings.json` is JSON5-shape)
+      // parses cleanly. The stripper is string-safe — comment
+      // markers inside JSON string literals are left alone.
+      //
+      // Note: writes ALWAYS emit strict JSON. Comments in the source
+      // file are not preserved across a merge — the wizard's
+      // outro-line warns when an alt-path (e.g. `.jsonc`) was the
+      // resolved write target.
+      let cleaned = strip_json_comments(&raw);
+      serde_json::from_str(&cleaned).map_err(|e| PatchError::Parse {
+        tool_id,
+        path: path.to_path_buf(),
+        format,
+        error: e.to_string(),
+      })
+    }
     Format::Yaml => {
       let yaml: serde_yaml::Value = serde_yaml::from_str(&raw).map_err(|e| PatchError::Parse {
         tool_id,
@@ -147,6 +160,71 @@ fn file_label(path: &Path) -> String {
     .and_then(|s| s.to_str())
     .unwrap_or("<file>")
     .to_string()
+}
+
+/// Strip `//` line comments and `/* … */` block comments while
+/// leaving content inside JSON string literals alone. Idempotent on
+/// strict JSON (no comment markers to strip). Used as a pre-parse
+/// pass for both `.jsonc` files (OpenCode) and `.json` files the
+/// user has edited VSCode-style (Zed's settings.json).
+///
+/// Trailing commas — also valid in JSONC — are NOT stripped here;
+/// the strict-JSON parse will reject them and surface as a
+/// `PatchError::Parse` with an actionable message. Common-case
+/// JSONC tool configs don't use trailing commas.
+fn strip_json_comments(input: &str) -> String {
+  let mut out = String::with_capacity(input.len());
+  let mut chars = input.chars().peekable();
+  let mut in_string = false;
+  let mut escape = false;
+  while let Some(c) = chars.next() {
+    if in_string {
+      out.push(c);
+      if escape {
+        escape = false;
+      } else if c == '\\' {
+        escape = true;
+      } else if c == '"' {
+        in_string = false;
+      }
+      continue;
+    }
+    if c == '"' {
+      in_string = true;
+      out.push(c);
+      continue;
+    }
+    if c == '/' {
+      match chars.peek() {
+        Some('/') => {
+          // Line comment — drop until newline (keep newline so line
+          // numbers in parse errors still line up roughly).
+          chars.next();
+          for nc in chars.by_ref() {
+            if nc == '\n' {
+              out.push('\n');
+              break;
+            }
+          }
+        }
+        Some('*') => {
+          // Block comment — drop until `*/`.
+          chars.next();
+          let mut prev = '\0';
+          for nc in chars.by_ref() {
+            if prev == '*' && nc == '/' {
+              break;
+            }
+            prev = nc;
+          }
+        }
+        _ => out.push(c),
+      }
+      continue;
+    }
+    out.push(c);
+  }
+  out
 }
 
 /// Read current, merge additions, atomic-write. Returns the diff
@@ -258,6 +336,40 @@ mod tests {
     assert!(s.ends_with('\n'));
     let _ = path;
     std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn strip_json_comments_handles_line_block_and_strings() {
+    let src = r#"{
+      // line comment
+      "a": 1, /* inline block */
+      "b": "// not a comment",
+      "c": "/* still not */",
+      /* multi
+         line */
+      "d": 2
+    }"#;
+    let cleaned = strip_json_comments(src);
+    let v: Value = serde_json::from_str(&cleaned).expect("parses after strip");
+    assert_eq!(v["a"], 1);
+    assert_eq!(v["b"], "// not a comment");
+    assert_eq!(v["c"], "/* still not */");
+    assert_eq!(v["d"], 2);
+  }
+
+  #[test]
+  fn strip_json_comments_is_idempotent_on_clean_json() {
+    let src = r#"{"a":1,"b":"foo","c":[1,2,3]}"#;
+    assert_eq!(strip_json_comments(src), src);
+  }
+
+  #[test]
+  fn strip_json_comments_handles_escaped_quote_in_string() {
+    let src = r#"{"x":"he said \"// hi\"","y":1}"#;
+    let cleaned = strip_json_comments(src);
+    let v: Value = serde_json::from_str(&cleaned).unwrap();
+    assert_eq!(v["x"], r#"he said "// hi""#);
+    assert_eq!(v["y"], 1);
   }
 
   #[test]

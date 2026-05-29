@@ -75,14 +75,20 @@ fn proxy_row<'a>(app: &'a App, palette: &'a Palette) -> Line<'a> {
   ])
 }
 
-fn daemon_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a> {
-  // Layout: `daemon  http://127.0.0.1:11436  pid 1234  up 3h12m`.
-  // The control-plane URL is informational (helps debugging when an
-  // agent script wants to know the override URL to set); when there
-  // isn't room for it, the row collapses to `daemon  pid <val>  up
-  // <val>` so the most-used chunks stay readable on narrow terminals.
-  // `pid` and `up` render in the panel's label colour (matching the
-  // row-4/5 label rhythm); the numeric values render in text colour.
+fn daemon_row<'a>(app: &'a App, _budget: usize, palette: &'a Palette) -> Line<'a> {
+  // Layout: `daemon  port 11436  pid 1234  up 3h12m`. The full
+  // control-plane URL is loopback-only and the host half is always
+  // `127.0.0.1`, so the port is the only operator-relevant chunk —
+  // surfacing it directly keeps the row scannable on narrow widths.
+  // `port`, `pid`, and `up` render in the panel's label colour;
+  // numeric values render in text colour.
+  let port_val = app
+    .daemon_info
+    .ipc_url
+    .as_deref()
+    .and_then(parse_port_from_url)
+    .map(|p| p.to_string())
+    .unwrap_or_else(|| "—".into());
   let pid_val = app
     .daemon_info
     .pid
@@ -93,34 +99,26 @@ fn daemon_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a>
     _ => "—".into(),
   };
 
-  // Reserve the trailing `  pid <val>  up <val>` chunk, then give the
-  // URL whatever fits. A pre-Unit-1 daemon (or one not yet replied to
-  // status) leaves `ipc_url = None`, which is the common case until the
-  // first refresh tick lands.
-  let trailing_visual_w = "  pid ".width() + pid_val.width() + "  up ".width() + uptime_val.width();
-  const MIN_URL_BUDGET: usize = 12;
-  let url_display = app.daemon_info.ipc_url.as_deref().and_then(|url| {
-    let url_budget = budget.saturating_sub(trailing_visual_w);
-    if url_budget < MIN_URL_BUDGET {
-      None
-    } else {
-      Some(ellipsise(url, url_budget))
-    }
-  });
+  Line::from(vec![
+    Span::styled(LABEL_DAEMON, palette.label_style()),
+    Span::styled("port ", palette.label_style()),
+    Span::styled(port_val, palette.text_style()),
+    Span::styled("  pid ", palette.label_style()),
+    Span::styled(pid_val, palette.text_style()),
+    Span::styled("  up ", palette.label_style()),
+    Span::styled(uptime_val, palette.text_style()),
+  ])
+}
 
-  let mut spans: Vec<Span<'a>> = Vec::with_capacity(6);
-  spans.push(Span::styled(LABEL_DAEMON, palette.label_style()));
-  let pid_label = if let Some(u) = url_display {
-    spans.push(Span::styled(u, palette.text_style()));
-    "  pid "
-  } else {
-    "pid "
-  };
-  spans.push(Span::styled(pid_label, palette.label_style()));
-  spans.push(Span::styled(pid_val, palette.text_style()));
-  spans.push(Span::styled("  up ", palette.label_style()));
-  spans.push(Span::styled(uptime_val, palette.text_style()));
-  Line::from(spans)
+/// Extract the port from an `http://host:port` URL. Returns `None`
+/// when the URL is malformed or no port is present — the caller
+/// renders `—` in that case rather than guessing.
+fn parse_port_from_url(url: &str) -> Option<u16> {
+  let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+  let authority = after_scheme.split('/').next().unwrap_or("");
+  authority
+    .rsplit_once(':')
+    .and_then(|(_, port)| port.parse::<u16>().ok())
 }
 
 fn server_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a> {
@@ -665,11 +663,11 @@ mod tests {
   }
 
   #[test]
-  fn daemon_row_renders_ipc_url_alongside_pid_when_available() {
-    // After wiring `daemon.ipc_url` through the IPC contract, the
-    // row leads with the HTTP control-plane URL so operators can see
-    // where the IPC channel is bound without running a separate
-    // command (useful when scripting against `LLAMASTASH_IPC_URL`).
+  fn daemon_row_renders_port_chunk_when_ipc_url_present() {
+    // The row distils `ipc_url` down to its port — the loopback host
+    // is constant (`127.0.0.1`) so showing it on every render wastes
+    // panel real estate that narrow terminals need for the pid/up
+    // chunks.
     let mut app = App::new(AppOptions::default());
     app.daemon_info = DaemonInfo {
       pid: Some(4242),
@@ -679,13 +677,56 @@ mod tests {
     let rows = render_lines(&app);
     let daemon_row = rows.iter().find(|r| r.contains("daemon")).unwrap();
     assert!(
-      daemon_row.contains("127.0.0.1:11436"),
-      "expected control-plane URL, got: {daemon_row:?}"
+      daemon_row.contains("port 11436"),
+      "expected `port 11436` chunk, got: {daemon_row:?}"
+    );
+    assert!(
+      !daemon_row.contains("127.0.0.1"),
+      "host half should not bleed into the row: {daemon_row:?}"
     );
     assert!(
       daemon_row.contains("pid 4242"),
-      "pid must remain on the row alongside the URL: {daemon_row:?}"
+      "pid must remain on the row alongside the port: {daemon_row:?}"
     );
+  }
+
+  #[test]
+  fn daemon_row_renders_em_dash_port_when_ipc_url_missing() {
+    // A pre-Phase-A daemon (or a status response that hasn't landed
+    // yet) leaves `ipc_url = None`. The row must still render a
+    // placeholder rather than collapsing the `port` chunk away — the
+    // reader needs the same five fixed rhythms to keep their eye on
+    // pid + uptime.
+    let mut app = App::new(AppOptions::default());
+    app.daemon_connected = true;
+    app.daemon_info = DaemonInfo {
+      pid: Some(4242),
+      uptime_seconds: Some(60),
+      ..Default::default()
+    };
+    let rows = render_lines(&app);
+    let daemon_row = rows.iter().find(|r| r.contains("daemon")).unwrap();
+    assert!(
+      daemon_row.contains("port —"),
+      "expected `port —` placeholder, got: {daemon_row:?}"
+    );
+  }
+
+  #[test]
+  fn parse_port_from_url_handles_well_formed_urls() {
+    assert_eq!(parse_port_from_url("http://127.0.0.1:11436"), Some(11436));
+    assert_eq!(parse_port_from_url("http://127.0.0.1:11436/"), Some(11436));
+    assert_eq!(parse_port_from_url("http://localhost:8080/rpc"), Some(8080));
+  }
+
+  #[test]
+  fn parse_port_from_url_returns_none_when_port_absent_or_bad() {
+    // No `:port` segment — caller renders `—`.
+    assert_eq!(parse_port_from_url("http://127.0.0.1"), None);
+    // Non-numeric port.
+    assert_eq!(parse_port_from_url("http://127.0.0.1:abc"), None);
+    // Out-of-range (u16 overflow).
+    assert_eq!(parse_port_from_url("http://127.0.0.1:99999"), None);
   }
 
   #[test]

@@ -27,7 +27,7 @@ impl ToolPatcher for EnvSh {
     "env-sh"
   }
   fn display_name(&self) -> &'static str {
-    "Shell env (~/.config/llamastash/env.sh)"
+    "Shell env"
   }
   fn default_path(&self) -> Option<PathBuf> {
     crate::util::paths::config_dir().map(|d| d.join("env.sh"))

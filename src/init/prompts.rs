@@ -246,6 +246,32 @@ pub fn outro(summary: &InitSummary) {
       cfg.path.display()
     ));
   }
+  if let Some(int) = &summary.integrations {
+    if !int.applied.is_empty() {
+      body.push_str("\nintegrations:");
+      for tool in &int.applied {
+        body.push_str(&format!(
+          "\n  • {} → {}",
+          tool.display_name,
+          tool.path.display()
+        ));
+      }
+      // env.sh writer dropped a sourceable script — surface the
+      // one-liner the user adds to their shell rc.
+      if let Some(env) = int.applied.iter().find(|t| t.id == "env-sh") {
+        body.push_str(&format!(
+          "\n  ▸ run: source {}  (add this line to your shell rc)",
+          env.path.display()
+        ));
+      }
+    }
+    if !int.failed.is_empty() {
+      body.push_str("\nintegrations failed:");
+      for t in &int.failed {
+        body.push_str(&format!("\n  ⚠ {}: {}", t.id, t.error));
+      }
+    }
+  }
   let _ = cliclack::note("init summary", body);
   let _ = cliclack::outro(
     "Next: run `llamastash` to enter the TUI, or `llamastash list` to see discovered models.",

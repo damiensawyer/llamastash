@@ -66,10 +66,20 @@ pub trait ToolPatcher: Send + Sync {
   fn id(&self) -> &'static str;
   /// Human-readable label for the picker.
   fn display_name(&self) -> &'static str;
-  /// Default on-disk path. `None` when the home directory can't be
-  /// resolved (e.g. headless CI without `$HOME`); the caller
-  /// surfaces that as [`PatchError::NoHome`].
+  /// Canonical on-disk path for a fresh install. `None` when the
+  /// home directory can't be resolved (headless CI without `$HOME`);
+  /// the caller surfaces that as [`PatchError::NoHome`].
   fn default_path(&self) -> Option<PathBuf>;
+  /// Additional paths to check for an *existing* config before
+  /// falling back to [`default_path`]. Returned in priority order:
+  /// the first path that actually exists wins. Default impl is
+  /// empty — tools that accept multiple filename variants (OpenCode's
+  /// `.jsonc` / `.json`, Continue's `.yaml` / `.yml`) override this
+  /// to enumerate them, so re-running `init` patches the user's
+  /// existing file rather than creating a parallel one.
+  fn alt_paths(&self) -> Vec<PathBuf> {
+    Vec::new()
+  }
   fn format(&self) -> Format;
   /// Build the additions blob to merge into the existing file. For
   /// [`Format::Raw`] patchers this is ignored (the patcher
@@ -215,9 +225,18 @@ fn resolve_path(
   if let Some(p) = override_path {
     return Ok(p);
   }
-  patcher.default_path().ok_or(PatchError::NoHome {
+  let default = patcher.default_path().ok_or(PatchError::NoHome {
     tool_id: patcher.id(),
-  })
+  })?;
+  // Prefer an existing alt path (e.g. opencode.jsonc when the user
+  // edits theirs with comments) over creating a parallel canonical
+  // file. Falls back to the default for fresh installs.
+  for alt in patcher.alt_paths() {
+    if alt.exists() {
+      return Ok(alt);
+    }
+  }
+  Ok(default)
 }
 
 /// Returns every patcher the wizard knows about. Order is the
@@ -334,5 +353,73 @@ mod tests {
         tool_id: "stub-json"
       }
     ));
+  }
+
+  /// Patcher that exposes a default + one alt path. The alt is
+  /// checked for existence first; the default is the fresh-install
+  /// fallback.
+  struct WithAlt {
+    default: PathBuf,
+    alt: PathBuf,
+  }
+
+  impl ToolPatcher for WithAlt {
+    fn id(&self) -> &'static str {
+      "with-alt"
+    }
+    fn display_name(&self) -> &'static str {
+      "WithAlt"
+    }
+    fn default_path(&self) -> Option<PathBuf> {
+      Some(self.default.clone())
+    }
+    fn alt_paths(&self) -> Vec<PathBuf> {
+      vec![self.alt.clone()]
+    }
+    fn format(&self) -> Format {
+      Format::Json
+    }
+    fn build_additions(&self, _ctx: &PatchContext) -> serde_json::Value {
+      serde_json::json!({ "k": "v" })
+    }
+  }
+
+  #[test]
+  fn resolve_path_prefers_existing_alt_over_default() {
+    let dir = crate::util::test_temp::unique_temp_dir("resolve-alt");
+    let patcher = WithAlt {
+      default: dir.join("default.json"),
+      alt: dir.join("alt.jsonc"),
+    };
+    std::fs::write(&patcher.alt, "{}").unwrap();
+    let resolved = resolve_path(&patcher, None).unwrap();
+    assert_eq!(resolved, patcher.alt);
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn resolve_path_falls_back_to_default_when_no_alt_exists() {
+    let dir = crate::util::test_temp::unique_temp_dir("resolve-default");
+    let patcher = WithAlt {
+      default: dir.join("default.json"),
+      alt: dir.join("alt.jsonc"),
+    };
+    let resolved = resolve_path(&patcher, None).unwrap();
+    assert_eq!(resolved, patcher.default);
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn resolve_path_override_wins_over_alt_and_default() {
+    let dir = crate::util::test_temp::unique_temp_dir("resolve-override");
+    let patcher = WithAlt {
+      default: dir.join("default.json"),
+      alt: dir.join("alt.jsonc"),
+    };
+    std::fs::write(&patcher.alt, "{}").unwrap();
+    let explicit = dir.join("explicit.json");
+    let resolved = resolve_path(&patcher, Some(explicit.clone())).unwrap();
+    assert_eq!(resolved, explicit);
+    std::fs::remove_dir_all(&dir).ok();
   }
 }

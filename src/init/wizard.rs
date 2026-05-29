@@ -1128,6 +1128,29 @@ fn canonical_value_bytes(v: &serde_yaml::Value) -> Vec<u8> {
   s.trim_end().as_bytes().to_vec()
 }
 
+/// Strip the `-NNNNN-of-NNNNN` multi-shard suffix from a GGUF
+/// file stem (e.g. `Qwen-...-Q5_K_M-00001-of-00002` →
+/// `Qwen-...-Q5_K_M`). Pattern is "-" + 5 digits + "-of-" + 5 digits
+/// at the end; the indices are always zero-padded to 5 in llama.cpp
+/// split output, so the length is fixed at 15 bytes.
+fn strip_shard_suffix(stem: &str) -> &str {
+  let bytes = stem.as_bytes();
+  let n = bytes.len();
+  if n < 15 {
+    return stem;
+  }
+  let tail = &bytes[n - 15..];
+  let looks_like_suffix = tail[0] == b'-'
+    && tail[1..6].iter().all(|c| c.is_ascii_digit())
+    && &tail[6..10] == b"-of-"
+    && tail[10..15].iter().all(|c| c.is_ascii_digit());
+  if looks_like_suffix {
+    &stem[..n - 15]
+  } else {
+    stem
+  }
+}
+
 /// Step 5 — external AI tool config patchers.
 ///
 /// Resolution priority for which patchers run:
@@ -1156,11 +1179,21 @@ async fn run_integrations_step(
   let proxy_port = config.proxy.effective_port();
   let proxy_base_url = format!("http://127.0.0.1:{proxy_port}/v1");
   let api_key = "llamastash".to_string();
+  // Find the GGUF in the downloaded file set — `.gitattributes` /
+  // `README.md` / etc. are also present and would otherwise win
+  // `files.first()`. Multi-shard GGUFs (`foo-00001-of-00002.gguf`)
+  // strip the index suffix so the model id we hand to tools matches
+  // the catalog row's name rather than naming shard 1 specifically.
   let model_id = model_summary.and_then(|m| {
     m.files
-      .first()
+      .iter()
+      .find(|f| {
+        f.extension()
+          .and_then(|e| e.to_str())
+          .is_some_and(|e| e.eq_ignore_ascii_case("gguf"))
+      })
       .and_then(|f| f.file_stem())
-      .map(|s| s.to_string_lossy().into_owned())
+      .map(|s| strip_shard_suffix(&s.to_string_lossy()).to_string())
   });
   let ctx = crate::init::external::PatchContext {
     proxy_base_url,
@@ -1452,6 +1485,31 @@ mod tests {
   fn init_date_is_iso8601() {
     let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
     assert_eq!(crate::util::datetime::iso8601(t), "2023-11-14T22:13:20Z");
+  }
+
+  #[test]
+  fn strip_shard_suffix_removes_5_digit_of_5_digit_tail() {
+    assert_eq!(
+      strip_shard_suffix("Qwen3-Next-80B-A3B-Instruct-Q5_K_M-00001-of-00002"),
+      "Qwen3-Next-80B-A3B-Instruct-Q5_K_M"
+    );
+    assert_eq!(strip_shard_suffix("model-00007-of-00012"), "model");
+  }
+
+  #[test]
+  fn strip_shard_suffix_leaves_unsharded_names_alone() {
+    assert_eq!(
+      strip_shard_suffix("nomic-embed-text-v1.5"),
+      "nomic-embed-text-v1.5"
+    );
+    assert_eq!(strip_shard_suffix("foo"), "foo");
+    // Short strings can't match the 15-char pattern.
+    assert_eq!(strip_shard_suffix(""), "");
+    // Wrong-shaped tail must not match.
+    assert_eq!(
+      strip_shard_suffix("not-quite-1of2-here"),
+      "not-quite-1of2-here"
+    );
   }
 
   #[test]

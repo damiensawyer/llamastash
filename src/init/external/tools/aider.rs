@@ -27,6 +27,14 @@ impl ToolPatcher for Aider {
   fn default_path(&self) -> Option<PathBuf> {
     crate::util::paths::home_dir().map(|h| h.join(".aider.conf.yml"))
   }
+  fn alt_paths(&self) -> Vec<PathBuf> {
+    // `.yaml` is sometimes used instead of `.yml` — Aider reads both
+    // when searching the home dir per its docs. Detect-and-patch
+    // beats creating a parallel `.yml`.
+    crate::util::paths::home_dir()
+      .map(|h| vec![h.join(".aider.conf.yaml")])
+      .unwrap_or_default()
+  }
   fn format(&self) -> Format {
     Format::Yaml
   }

@@ -31,6 +31,15 @@ impl ToolPatcher for ContinueDev {
   fn default_path(&self) -> Option<PathBuf> {
     crate::util::paths::home_dir().map(|h| h.join(".continue").join("config.yaml"))
   }
+  fn alt_paths(&self) -> Vec<PathBuf> {
+    // Some users name their YAML `.yml`; check that variant before
+    // creating a parallel `.yaml`. We deliberately do NOT detect the
+    // deprecated `config.json` here — Continue is migrating off it,
+    // and writing to it would silently keep users on the old format.
+    crate::util::paths::home_dir()
+      .map(|h| vec![h.join(".continue").join("config.yml")])
+      .unwrap_or_default()
+  }
   fn format(&self) -> Format {
     Format::Yaml
   }

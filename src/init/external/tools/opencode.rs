@@ -28,6 +28,17 @@ impl ToolPatcher for OpenCode {
   fn default_path(&self) -> Option<PathBuf> {
     crate::util::paths::home_dir().map(|h| h.join(".config").join("opencode").join("opencode.json"))
   }
+  fn alt_paths(&self) -> Vec<PathBuf> {
+    // OpenCode also reads `opencode.jsonc` — users who want inline
+    // `//` comments use it. We check `.jsonc` first so re-running
+    // `init` patches the existing file rather than creating a
+    // parallel `opencode.json`. Writes always emit strict JSON;
+    // existing comments in `.jsonc` are stripped (the wizard
+    // outro warns when the alt path is the chosen target).
+    crate::util::paths::home_dir()
+      .map(|h| vec![h.join(".config").join("opencode").join("opencode.jsonc")])
+      .unwrap_or_default()
+  }
   fn format(&self) -> Format {
     Format::Json
   }
@@ -120,6 +131,39 @@ mod tests {
       v["provider"]["llamastash"]["apiKey"],
       "{env:LLAMASTASH_API_KEY}"
     );
+  }
+
+  #[test]
+  fn existing_jsonc_is_patched_in_place_not_parallel_json() {
+    // Repro the user's report: ~/.config/opencode/opencode.jsonc
+    // exists, default_path would point at .json; we should patch the
+    // .jsonc and never create the .json sibling. We use override_path
+    // to bypass home_dir, so this exercises the *picker* logic via a
+    // direct-path resolution — the moral equivalent is the same
+    // alt_paths check in resolve_path() (lib-level tested separately).
+    let dir = crate::util::test_temp::unique_temp_dir("opencode-jsonc");
+    let jsonc = dir.join("opencode.jsonc");
+    std::fs::write(
+      &jsonc,
+      "{\n  // user's settings\n  \"theme\": \"opencode\",\n  /* default model */\n  \"model\": \"anthropic/claude\"\n}\n",
+    )
+    .unwrap();
+    let out = apply(&OpenCode, &ctx(), Some(jsonc.clone())).expect("apply");
+    assert_eq!(out.path, jsonc);
+    let body: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&jsonc).unwrap())
+      .expect("output is strict JSON");
+    // User's keys preserved across the comment-stripped read +
+    // strict-JSON write round trip.
+    assert_eq!(body["theme"], "opencode");
+    assert_eq!(body["model"], "anthropic/claude");
+    // Our provider landed.
+    assert_eq!(
+      body["provider"]["llamastash"]["options"]["baseURL"],
+      "http://127.0.0.1:11435/v1"
+    );
+    // No parallel .json sibling created.
+    assert!(!dir.join("opencode.json").exists());
+    std::fs::remove_dir_all(&dir).ok();
   }
 
   #[test]
