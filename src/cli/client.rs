@@ -14,9 +14,40 @@ use anyhow::Result;
 use crate::cli::cli_args::Cli;
 use crate::cli::exit_codes::{CliExit, DAEMON_UNREACHABLE};
 use crate::config::Config;
-use crate::daemon::{start_detached, DaemonOptions, StartOutcome};
+use crate::daemon::{
+  existing_daemon_pid, runtime_file, start_detached, DaemonOptions, StartOutcome,
+};
 use crate::ipc::{Client, ClientError};
 use crate::util::paths::state_dir;
+
+/// Detect a stale daemon: the PID lockfile is held by a live process,
+/// but `runtime.json` is missing (or unreadable). Means a daemon is
+/// running but didn't publish its HTTP control-plane URL+token — a
+/// pre-Phase-A binary, a crash between lock-acquire and runtime-file
+/// save, or a manual `rm`. Auto-spawning would just fail the second
+/// time, so callers should surface an actionable error instead.
+///
+/// Returns the PID of the stale daemon, or `None` when no daemon owns
+/// the lockfile.
+pub(crate) fn detect_stale_daemon(state_dir: &std::path::Path) -> Option<i32> {
+  let pid = existing_daemon_pid(state_dir)?;
+  match runtime_file::load(state_dir) {
+    Ok(Some(_)) => None,
+    Ok(None) | Err(_) => Some(pid),
+  }
+}
+
+/// Error message rendered when `detect_stale_daemon` fires. Centralised
+/// so the wording stays consistent between `connect_or_spawn`, the
+/// post-spawn polling fallback, and any future call sites.
+fn stale_daemon_message(pid: i32, state_dir: &std::path::Path) -> String {
+  format!(
+    "daemon (pid {pid}) is running but didn't publish runtime.json under {} — \
+     likely a stale process from an older version. Run `llamastash daemon stop --force` \
+     (or `kill {pid}`) and retry.",
+    state_dir.display()
+  )
+}
 
 /// Connect to the daemon. Auto-spawns it (via `daemon::start_detached`)
 /// when the socket isn't connectable and `cli.no_spawn` is false.
@@ -39,6 +70,17 @@ pub async fn connect_or_spawn(cli: &Cli, config: &Config) -> Result<Client, CliE
       reconcile_binary_with_running_daemon(client, cli, config, &attach_dir).await
     }
     Err(ClientError::Connect(_)) => {
+      // Stale-daemon pre-flight: a live process owns `daemon.pid` but
+      // didn't publish `runtime.json`. `start_detached`'s fast path
+      // would silently fall through to `AlreadyRunning(pid)` and then
+      // `await_socket` would time out with the same cryptic Connect
+      // error. Surface an actionable hint instead.
+      if let Some(pid) = detect_stale_daemon(&attach_dir) {
+        return Err(CliExit::new(
+          DAEMON_UNREACHABLE,
+          stale_daemon_message(pid, &attach_dir),
+        ));
+      }
       if cli.no_spawn {
         return Err(CliExit::new(
           DAEMON_UNREACHABLE,
@@ -52,10 +94,10 @@ pub async fn connect_or_spawn(cli: &Cli, config: &Config) -> Result<Client, CliE
       let attach_for_poll = opts.state_dir.clone();
       match start_detached(opts) {
         Ok(StartOutcome::RanToCompletion) | Ok(StartOutcome::AlreadyRunning(_)) => {
-          // Brief settle window: start_detached returns once the
-          // socket is connectable, but a second client opening at
-          // the same instant occasionally trips an EAGAIN. One
-          // retry is enough.
+          // Brief settle window: start_detached returns once
+          // runtime.json appears, but a second client opening at the
+          // same instant occasionally trips an EAGAIN. One retry is
+          // enough.
           await_socket(&attach_for_poll, Duration::from_secs(2)).await
         }
         Err(e) => Err(CliExit::new(
@@ -177,6 +219,17 @@ async fn await_socket(attach_dir: &std::path::Path, total: Duration) -> Result<C
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
   }
+  // Defensive: if we got here via `start_detached` and a stale daemon
+  // is hoarding the lockfile, surface the actionable message instead of
+  // the raw Connect error. `connect_or_spawn` already screens this
+  // before spawning, but the same state can develop mid-poll on a
+  // pathologically slow lock release.
+  if let Some(pid) = detect_stale_daemon(attach_dir) {
+    return Err(CliExit::new(
+      DAEMON_UNREACHABLE,
+      stale_daemon_message(pid, attach_dir),
+    ));
+  }
   Err(match last_err {
     Some(e) => CliExit::from_client_error(e),
     None => CliExit::new(DAEMON_UNREACHABLE, "daemon: never came up"),
@@ -189,4 +242,43 @@ fn build_spawn_options(cli: &Cli, config: &Config) -> Result<DaemonOptions, CliE
   // daemon a user would have hand-typed.
   super::daemon::build_options(None, None, false, false, cli, config)
     .map_err(|e| CliExit::new(DAEMON_UNREACHABLE, format!("daemon: build options: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::time::{SystemTime, UNIX_EPOCH};
+
+  fn temp_state_dir(label: &str) -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .expect("clock")
+      .as_nanos();
+    let p = std::env::temp_dir().join(format!(
+      "llamastash-stale-detect-{label}-{}-{nanos}",
+      std::process::id()
+    ));
+    std::fs::create_dir_all(&p).expect("temp");
+    p
+  }
+
+  #[test]
+  fn detect_stale_daemon_returns_none_on_empty_state_dir() {
+    // No `daemon.pid` and no `runtime.json` → no daemon at all.
+    // Auto-spawn should run; we must NOT misclassify this as stale.
+    let dir = temp_state_dir("clean");
+    assert!(detect_stale_daemon(&dir).is_none());
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn detect_stale_daemon_returns_none_when_lockfile_unowned() {
+    // A leftover `daemon.pid` file from a crashed daemon doesn't hold
+    // a `flock`, so `existing_daemon_pid` returns None — no live
+    // process to blame. The error should NOT mention a stale pid.
+    let dir = temp_state_dir("unowned");
+    std::fs::write(dir.join("daemon.pid"), b"4242\n").expect("write");
+    assert!(detect_stale_daemon(&dir).is_none());
+    std::fs::remove_dir_all(&dir).ok();
+  }
 }

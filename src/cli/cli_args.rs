@@ -216,7 +216,17 @@ pub enum DaemonAction {
     no_proxy_fallback: bool,
   },
   /// Stop the running daemon. Running models keep running.
-  Stop,
+  Stop {
+    /// Bypass the IPC `shutdown` call and signal the daemon by PID
+    /// instead. Useful when `runtime.json` is missing (e.g. a stale
+    /// process from an older version) so the IPC channel can't
+    /// negotiate a graceful shutdown. Walks: read `daemon.pid`, send
+    /// `SIGTERM`, wait briefly for exit. Falls back automatically
+    /// when the regular path detects a stale daemon, so the flag is
+    /// mostly an escape hatch for scripts.
+    #[arg(long, short = 'f')]
+    force: bool,
+  },
   /// Print daemon PID, uptime, and connected-client count.
   Status {
     /// Emit the raw `version` IPC response as pretty-printed JSON
@@ -1369,7 +1379,17 @@ mod tests {
     let cli_stop = parse(&["daemon", "stop"]);
     assert!(matches!(
       cli_stop.command,
-      Some(Command::Daemon(DaemonAction::Stop))
+      Some(Command::Daemon(DaemonAction::Stop { force: false }))
+    ));
+    let cli_stop_force = parse(&["daemon", "stop", "--force"]);
+    assert!(matches!(
+      cli_stop_force.command,
+      Some(Command::Daemon(DaemonAction::Stop { force: true }))
+    ));
+    let cli_stop_force_short = parse(&["daemon", "stop", "-f"]);
+    assert!(matches!(
+      cli_stop_force_short.command,
+      Some(Command::Daemon(DaemonAction::Stop { force: true }))
     ));
 
     let cli_status = parse(&["daemon", "status"]);

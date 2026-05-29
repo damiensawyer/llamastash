@@ -49,7 +49,7 @@ pub async fn handle(action: DaemonAction, cli: &Cli, config: &Config) -> Result<
       )
       .await
     }
-    DaemonAction::Stop => handle_stop().await,
+    DaemonAction::Stop { force } => handle_stop(force).await,
     DaemonAction::Status { json } => handle_status(json).await,
   }
 }
@@ -145,23 +145,87 @@ fn print_already_running(pid: i32) {
   );
 }
 
-async fn handle_stop() -> Result<()> {
+async fn handle_stop(force: bool) -> Result<()> {
   let attach_dir = state_dir().context("could not resolve state directory")?;
-  match Client::connect(&attach_dir).await {
-    Ok(mut client) => {
-      let _ = client.call("shutdown", None).await?;
-      println!(
-        "{}",
-        crate::cli::colors::success("daemon: shutdown requested")
-      );
-      Ok(())
+  if !force {
+    match Client::connect(&attach_dir).await {
+      Ok(mut client) => {
+        let _ = client.call("shutdown", None).await?;
+        println!(
+          "{}",
+          crate::cli::colors::success("daemon: shutdown requested")
+        );
+        return Ok(());
+      }
+      // No IPC channel — either the daemon is genuinely down, or it's
+      // a stale process that didn't publish runtime.json. The
+      // `existing_daemon_pid` check below distinguishes the two.
+      Err(ClientError::Connect(_)) => {}
+      Err(other) => return Err(other).context("daemon stop"),
     }
-    Err(ClientError::Connect(_)) => {
+  }
+  match existing_daemon_pid(&attach_dir) {
+    None => {
       println!("{}", crate::cli::colors::dim("daemon: not running"));
       Ok(())
     }
-    Err(other) => Err(other).context("daemon stop"),
+    Some(pid) => force_stop_via_pid(pid, &attach_dir),
   }
+}
+
+/// Best-effort PID-based shutdown. Used when the IPC channel is
+/// unusable (no `runtime.json`) or when the user passed `--force`.
+/// Sends `SIGTERM`, waits up to ~3s for the lockfile to release, and
+/// surfaces a clear next-step (`SIGKILL`) if the daemon ignores the
+/// signal.
+#[cfg(unix)]
+fn force_stop_via_pid(pid: i32, attach_dir: &std::path::Path) -> Result<()> {
+  use std::time::{Duration, Instant};
+  // SAFETY: `libc::kill` is async-signal-safe and operates on a PID
+  // we just read from the lockfile (validated via flock). No memory
+  // is touched.
+  let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
+  if ret != 0 {
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+      // Process already gone — the lock will clear shortly. Treat as
+      // success after a brief settle window so callers can re-run
+      // immediately without seeing "already running".
+      println!(
+        "{}",
+        crate::cli::colors::dim(&format!("daemon: pid {pid} already exited"))
+      );
+      return Ok(());
+    }
+    return Err(anyhow::anyhow!(
+      "daemon stop --force: kill(pid {pid}, SIGTERM) failed: {err}"
+    ));
+  }
+  let deadline = Instant::now() + Duration::from_secs(3);
+  while Instant::now() < deadline {
+    if existing_daemon_pid(attach_dir).is_none() {
+      println!(
+        "{}",
+        crate::cli::colors::success(&format!("daemon: stopped (pid {pid})"))
+      );
+      return Ok(());
+    }
+    std::thread::sleep(Duration::from_millis(50));
+  }
+  Err(anyhow::anyhow!(
+    "daemon stop --force: pid {pid} did not exit within 3s after SIGTERM; \
+     try `kill -KILL {pid}` and check the daemon logs"
+  ))
+}
+
+#[cfg(not(unix))]
+fn force_stop_via_pid(_pid: i32, _attach_dir: &std::path::Path) -> Result<()> {
+  // Non-Unix targets will land in Phase B/C with their own process
+  // control. For now, refuse explicitly so the error doesn't get
+  // misread as "daemon stopped".
+  Err(anyhow::anyhow!(
+    "daemon stop --force is not yet supported on this platform"
+  ))
 }
 
 /// Compose [`DaemonOptions`] from the parsed CLI overrides. Hidden
@@ -324,12 +388,32 @@ async fn handle_status(json: bool) -> Result<()> {
       Ok(())
     }
     Err(ClientError::Connect(_)) => {
+      // A live process owning `daemon.pid` but no `runtime.json` is a
+      // stale daemon from an older binary (or a crash between
+      // lock-acquire and runtime-file save). Report it distinctly so
+      // an operator knows to run `daemon stop --force` instead of
+      // assuming the daemon is genuinely down.
+      let stale_pid = existing_daemon_pid(&attach_dir);
       if json {
-        // Surface a stable "not running" envelope in --json mode so
-        // agents see a parseable object instead of a colored dim line.
-        println!("{}", serde_json::json!({"daemon": "not_running"}));
+        let envelope = match stale_pid {
+          Some(pid) => serde_json::json!({"daemon": "stale", "pid": pid}),
+          None => serde_json::json!({"daemon": "not_running"}),
+        };
+        println!("{envelope}");
       } else {
-        println!("{}", crate::cli::colors::dim("daemon: not running"));
+        match stale_pid {
+          Some(pid) => {
+            println!(
+              "{}",
+              crate::cli::colors::dim(&format!(
+                "daemon: stale (pid {pid}) — run `llamastash daemon stop --force` to recover"
+              ))
+            );
+          }
+          None => {
+            println!("{}", crate::cli::colors::dim("daemon: not running"));
+          }
+        }
       }
       Ok(())
     }
