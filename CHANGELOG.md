@@ -6,6 +6,24 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Added
 
+- **`init` patches AI dev tool configs.** A new integrations step
+  presents a cliclack multiselect over five supported tools —
+  **OpenCode** (`~/.config/opencode/opencode.json`), **Aider**
+  (`~/.aider.conf.yml`), **Continue.dev** (`~/.continue/config.yaml`),
+  **Zed** (`~/.config/zed/settings.json` →
+  `language_models.openai_compatible.LlamaStash`), **pi.dev**
+  (`~/.pi/agent/models.json`) — plus a sourceable
+  `~/.config/llamastash/env.sh` that exports `OPENAI_BASE_URL` /
+  `OPENAI_API_BASE` / `OPENAI_API_KEY` / `LLAMASTASH_API_KEY`.
+  Non-interactive opt-in: `init --integrations
+  opencode,aider,env-sh`. Per-tool merge keeps user-authored keys
+  outside our blocks; Continue.dev's top-level `models[]` is spliced
+  by `name` so re-running init never wipes the user's other models.
+  API keys are written as env-var references (`{env:LLAMASTASH_API_KEY}`,
+  `$LLAMASTASH_API_KEY`) — the literal stub never lands on disk. The
+  same redaction allowlist that protects `config.yaml` writes
+  (`token`, `secret`, `password`, `key`, `credential`) applies to all
+  integration diffs.
 - **Interactive picker for `start` / `stop`.** `llamastash start` with
   no positional argument opens a cliclack picker over the catalog;
   `llamastash stop` with no argument opens a picker over running

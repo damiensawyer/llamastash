@@ -323,3 +323,45 @@ fn init_revision_whitespace_rejected() {
     "whitespace inside --revision must be rejected"
   );
 }
+
+#[test]
+fn init_integrations_comma_separated_list_parses() {
+  match parse(&["init", "--integrations", "opencode,aider,zed"]).command {
+    Some(Command::Init(args)) => assert_eq!(
+      args.integrations,
+      vec![
+        "opencode".to_string(),
+        "aider".to_string(),
+        "zed".to_string()
+      ]
+    ),
+    other => panic!("expected init, got {other:?}"),
+  }
+}
+
+#[test]
+fn init_integrations_repeatable_flag() {
+  match parse(&[
+    "init",
+    "--integrations",
+    "opencode",
+    "--integrations",
+    "env-sh",
+  ])
+  .command
+  {
+    Some(Command::Init(args)) => assert_eq!(
+      args.integrations,
+      vec!["opencode".to_string(), "env-sh".to_string()]
+    ),
+    other => panic!("expected init, got {other:?}"),
+  }
+}
+
+#[test]
+fn init_only_integrations_parses_as_step() {
+  match parse(&["init", "--only", "integrations"]).command {
+    Some(Command::Init(args)) => assert_eq!(args.only, vec![InitStep::Integrations]),
+    other => panic!("expected init, got {other:?}"),
+  }
+}

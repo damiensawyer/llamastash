@@ -616,6 +616,44 @@ pub async fn confirm_tui_handoff(args: &InitArgs) -> Result<bool, CliExit> {
   Ok(confirmed)
 }
 
+/// cliclack multiselect over the registered external-tool patchers.
+/// Returns the picked patcher ids (caller resolves them back via
+/// [`crate::init::external::patcher_by_id`]). Non-TTY skips the
+/// picker and returns an empty list — the wizard's `--integrations`
+/// flag is the non-interactive opt-in.
+pub async fn pick_integrations() -> Result<Vec<String>, CliExit> {
+  if !stdout_is_terminal() {
+    return Ok(Vec::new());
+  }
+  let items: Vec<(String, &'static str, String)> = crate::init::external::all_patchers()
+    .iter()
+    .map(|p| {
+      let hint = p
+        .default_path()
+        .map(|pp| pp.display().to_string())
+        .unwrap_or_else(|| "<no home>".into());
+      (p.id().to_string(), p.display_name(), hint)
+    })
+    .collect();
+  if items.is_empty() {
+    return Ok(Vec::new());
+  }
+  let picked: Vec<String> = tokio::task::spawn_blocking(move || {
+    let mut select = cliclack::multiselect::<String>(
+      "Patch AI tool configs to point at llamastash? (space to toggle)",
+    )
+    .required(false);
+    for (id, label, hint) in &items {
+      select = select.item(id.clone(), *label, hint.clone());
+    }
+    select.interact()
+  })
+  .await
+  .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: prompt join failed: {e}")))?
+  .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: integrations prompt: {e}")))?;
+  Ok(picked)
+}
+
 fn install_override_to_choice(
   override_value: InstallOverride,
   existing: &BinaryPresence,
@@ -757,6 +795,7 @@ mod tests {
       config_choice: None,
       revision: None,
       no_tui: true,
+      integrations: Vec::new(),
     }
   }
 

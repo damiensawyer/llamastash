@@ -12,18 +12,22 @@
 //! The actual atomic rename + 0600 mode + symlink/parent-mode refusal
 //! all live in Unit 2's primitive — this module never touches the
 //! filesystem itself.
+//!
+//! Redaction allowlist, diff rendering, and the [`RedactedDiffEntry`]
+//! type live in [`crate::util::config_patch`] so the external-tool
+//! patchers (`init::external::*`) inherit the same policy.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::config::writer::{
-  diff, merge, merge_and_write, read_or_default, DiffEntry, DiffKind, WriteError, WriteOutcome,
+  diff, merge, merge_and_write, read_or_default, DiffEntry, WriteError, WriteOutcome,
 };
 
-/// Substrings that mark a YAML path as secret-bearing. Case-insensitive
-/// match against the dotted path; a hit redacts the rendered value.
-pub const SECRET_PATH_TOKENS: &[&str] = &["token", "secret", "password", "key", "credential"];
+pub use crate::util::config_patch::{
+  path_is_secret, redact_diff, render_human, RedactedDiffEntry, SECRET_PATH_TOKENS,
+};
 
 /// Render result returned to the wizard. `diff_human` is what the
 /// interactive flow prints; `diff_json` is what `init --json` emits
@@ -36,13 +40,6 @@ pub struct WriteResult {
   pub managed_keys: Vec<String>,
   pub diff_human: String,
   pub diff_json: Vec<RedactedDiffEntry>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RedactedDiffEntry {
-  pub path: String,
-  pub kind: &'static str,
-  pub value_yaml: String,
 }
 
 /// How the wrapper handles the diff preview. There is currently no
@@ -73,51 +70,6 @@ pub fn managed_keys_from_diff(diff: &[DiffEntry]) -> Vec<String> {
     .collect::<std::collections::BTreeSet<_>>()
     .into_iter()
     .collect()
-}
-
-/// Apply the redaction allowlist to a diff. Returns the JSON-emission
-/// shape; the human renderer goes through the same path so a token
-/// can't leak through one channel.
-pub fn redact_diff(diff: &[DiffEntry]) -> Vec<RedactedDiffEntry> {
-  diff
-    .iter()
-    .map(|d| RedactedDiffEntry {
-      path: d.path.clone(),
-      kind: match d.kind {
-        DiffKind::Added => "added",
-        DiffKind::Changed => "changed",
-      },
-      value_yaml: if path_is_secret(&d.path) {
-        "<redacted>".to_string()
-      } else {
-        d.value_yaml.clone()
-      },
-    })
-    .collect()
-}
-
-fn path_is_secret(path: &str) -> bool {
-  let lower = path.to_ascii_lowercase();
-  SECRET_PATH_TOKENS.iter().any(|t| lower.contains(t))
-}
-
-/// Render the redacted diff as a `+ key: value` text block suitable
-/// for stderr preview. Stable shape — Unit 10's verbose output and the
-/// future `init --diff-only` use this directly.
-pub fn render_human(diff: &[RedactedDiffEntry]) -> String {
-  if diff.is_empty() {
-    return "  (no changes)\n".to_string();
-  }
-  let mut out = String::new();
-  for row in diff {
-    let marker = match row.kind {
-      "added" => "+",
-      "changed" => "~",
-      _ => " ",
-    };
-    out.push_str(&format!("  {marker} {}: {}\n", row.path, row.value_yaml));
-  }
-  out
 }
 
 /// Diff render produced by [`dry_run_diff`]. No bytes touched on
@@ -187,56 +139,6 @@ mod tests {
   }
 
   #[test]
-  fn secret_paths_get_redacted_value_only() {
-    let diff = vec![
-      entry("hf_token", DiffKind::Added, "hf_xxxxxxxxxxxxxxxxxx"),
-      entry("port_range.start", DiffKind::Changed, "41100"),
-      entry("api_secret", DiffKind::Added, "shhh"),
-      entry("user.password", DiffKind::Added, "letmein"),
-      entry("custom_credential_token", DiffKind::Added, "abc"),
-    ];
-    let redacted = redact_diff(&diff);
-    let by_path = |p: &str| {
-      redacted
-        .iter()
-        .find(|r| r.path == p)
-        .expect("path present")
-        .clone()
-    };
-    assert_eq!(by_path("hf_token").value_yaml, "<redacted>");
-    assert_eq!(by_path("api_secret").value_yaml, "<redacted>");
-    assert_eq!(by_path("user.password").value_yaml, "<redacted>");
-    assert_eq!(by_path("custom_credential_token").value_yaml, "<redacted>");
-    // Non-secret path keeps its value.
-    assert_eq!(by_path("port_range.start").value_yaml, "41100");
-  }
-
-  #[test]
-  fn render_human_uses_added_and_changed_markers() {
-    let diff = vec![
-      RedactedDiffEntry {
-        path: "llama_server_path".into(),
-        kind: "added",
-        value_yaml: "/opt/llama-server".into(),
-      },
-      RedactedDiffEntry {
-        path: "port_range.start".into(),
-        kind: "changed",
-        value_yaml: "50000".into(),
-      },
-    ];
-    let s = render_human(&diff);
-    assert!(s.contains("+ llama_server_path"));
-    assert!(s.contains("~ port_range.start"));
-  }
-
-  #[test]
-  fn render_human_handles_empty_diff() {
-    let s = render_human(&[]);
-    assert!(s.contains("(no changes)"));
-  }
-
-  #[test]
   fn managed_keys_from_diff_deduplicates() {
     let diff = vec![
       entry("a", DiffKind::Added, "x"),
@@ -245,13 +147,6 @@ mod tests {
     ];
     let keys = managed_keys_from_diff(&diff);
     assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
-  }
-
-  #[test]
-  fn path_is_secret_is_case_insensitive() {
-    assert!(path_is_secret("HF_Token"));
-    assert!(path_is_secret("user.Credential"));
-    assert!(!path_is_secret("port_range.start"));
   }
 
   #[test]

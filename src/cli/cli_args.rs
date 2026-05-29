@@ -508,6 +508,21 @@ pub struct InitArgs {
   /// TUI launches without prompting. This flag bypasses both.
   #[arg(long, action = ArgAction::SetTrue)]
   pub no_tui: bool,
+
+  /// Pre-answer the integrations picker. Comma-separated tool ids:
+  /// `opencode`, `aider`, `continue`, `zed`, `pi`, `env-sh`. Use
+  /// `none` to skip the step entirely (equivalent to
+  /// `--skip integrations`). Without this flag and without
+  /// `--recommended` / `--json`, the interactive multiselect runs;
+  /// the latter two suppress the picker — pass `--integrations` to
+  /// opt in non-interactively.
+  #[arg(
+    long,
+    value_name = "TOOLS",
+    value_delimiter = ',',
+    action = ArgAction::Append,
+  )]
+  pub integrations: Vec<String>,
 }
 
 /// Reject empty `--revision` values up-front so a downstream hf-hub
@@ -644,7 +659,7 @@ pub struct DoctorArgs {
 }
 
 /// One of the wizard's optional steps. Detection (step 1) and handoff
-/// (step 6) always run; the three middle steps are the units of
+/// (step 6) always run; the four middle steps are the units of
 /// `--only`/`--skip` scoping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lower")]
@@ -655,6 +670,10 @@ pub enum InitStep {
   Models,
   /// Write `config.yaml` (step 4).
   Config,
+  /// Patch supported AI dev tools (OpenCode, Aider, Continue, Zed,
+  /// pi.dev) and emit `~/.config/llamastash/env.sh`. Off in
+  /// `--recommended` / `--json` unless `--integrations` is supplied.
+  Integrations,
 }
 
 /// Convert the `recommend` subcommand's args into the equivalent
@@ -678,6 +697,7 @@ pub fn recommend_to_init_args(args: RecommendArgs) -> InitArgs {
     config_choice: None,
     revision: args.revision,
     no_tui: true,
+    integrations: Vec::new(),
   }
 }
 
@@ -850,6 +870,7 @@ mod tests {
         InitStep::Server => "server",
         InitStep::Models => "models",
         InitStep::Config => "config",
+        InitStep::Integrations => "integrations",
       })
       .collect()
   }

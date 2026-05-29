@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 
 use serde_yaml::Value;
 
+pub use crate::util::config_patch::{DiffEntry, DiffKind};
+
 /// Outcome of a successful merge-and-write. `diff` is the set of keys
 /// whose serialised value changed (added or modified); `written_bytes`
 /// is the size of the new file. Unit 11 renders `diff` to the user.
@@ -32,24 +34,6 @@ use serde_yaml::Value;
 pub struct WriteOutcome {
   pub diff: Vec<DiffEntry>,
   pub written_bytes: u64,
-}
-
-/// One row of the merge's structural diff. `kind` distinguishes
-/// "added the key entirely" from "value changed".
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiffEntry {
-  pub path: String,
-  pub kind: DiffKind,
-  /// YAML serialisation of the value as it now appears in the merged
-  /// file. Unit 11 redacts this before rendering when the path matches
-  /// the secret-key allowlist.
-  pub value_yaml: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiffKind {
-  Added,
-  Changed,
 }
 
 #[derive(Debug, thiserror::Error)]

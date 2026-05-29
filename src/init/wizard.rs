@@ -44,6 +44,7 @@ pub struct StepPlan {
   pub server: bool,
   pub models: bool,
   pub config: bool,
+  pub integrations: bool,
 }
 
 impl StepPlan {
@@ -56,6 +57,7 @@ impl StepPlan {
         server: on(InitStep::Server),
         models: on(InitStep::Models),
         config: on(InitStep::Config),
+        integrations: on(InitStep::Integrations),
       };
     }
     if !skip.is_empty() {
@@ -64,12 +66,14 @@ impl StepPlan {
         server: !off(InitStep::Server),
         models: !off(InitStep::Models),
         config: !off(InitStep::Config),
+        integrations: !off(InitStep::Integrations),
       };
     }
     Self {
       server: true,
       models: true,
       config: true,
+      integrations: true,
     }
   }
 }
@@ -110,6 +114,11 @@ pub struct InitSummary {
   pub install: Option<InstallSummary>,
   pub model: Option<ModelSummary>,
   pub config: Option<ConfigSummary>,
+  /// External AI dev tool config patchers the integrations step
+  /// applied. `None` when the step was skipped or the user picked
+  /// nothing in the multiselect.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub integrations: Option<IntegrationsSummary>,
   pub smoke: Option<SmokeSummary>,
   pub hardware: HardwareSummary,
   pub offline: bool,
@@ -141,6 +150,7 @@ impl Default for InitSummary {
       install: None,
       model: None,
       config: None,
+      integrations: None,
       smoke: None,
       hardware: HardwareSummary::default(),
       offline: false,
@@ -184,6 +194,35 @@ pub struct ConfigSummary {
 pub struct SmokeSummary {
   pub ok: bool,
   pub note: String,
+}
+
+/// Per-tool result row from the integrations step. `path` is where
+/// the patch landed; `diff_json` is the redacted view of what
+/// changed (same redaction pass as the config writer).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AppliedTool {
+  pub id: String,
+  pub display_name: String,
+  pub path: PathBuf,
+  pub written_bytes: u64,
+  pub diff_json: Vec<crate::util::config_patch::RedactedDiffEntry>,
+}
+
+/// `init --json` shape for the integrations step. `applied` is the
+/// tools that ran cleanly; `failed` is the ones that errored
+/// non-fatally (e.g. a path the user can't write to) — the wizard
+/// surfaces these as warnings without aborting.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct IntegrationsSummary {
+  pub applied: Vec<AppliedTool>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub failed: Vec<FailedTool>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FailedTool {
+  pub id: String,
+  pub error: String,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -354,13 +393,33 @@ pub async fn run(args: InitArgs, cli: &Cli, config: &Config) -> CliResult {
     summary.steps_skipped.push("config");
   }
 
+  // Step 5: integrations. Patch supported AI dev tool configs (and
+  // emit env.sh) so external clients pick llamastash up automatically.
+  // Picker runs interactively when no --integrations override; --json
+  // / --recommended skip the picker (we won't silently mutate external
+  // tool configs without an explicit opt-in).
+  if plan.integrations {
+    match run_integrations_step(&args, config, summary.model.as_ref()).await {
+      Ok(Some(s)) => {
+        summary.steps_ran.push("integrations");
+        summary.integrations = Some(s);
+      }
+      Ok(None) => {
+        summary.steps_skipped.push("integrations");
+      }
+      Err(e) => return Err(e),
+    }
+  } else {
+    summary.steps_skipped.push("integrations");
+  }
+
   // Persist init_snapshot.json. Best-effort: a write failure logs but
   // doesn't abort the run (doctor will rebuild from re-detection).
   if let Err(e) = persist_init_snapshot(&hardware, install.as_ref(), &summary) {
     log::warn!("init: failed to persist init_snapshot.json: {e}");
   }
 
-  // Step 5: smoke launch (Unit 12). Phase 1 + --version probe runs
+  // Step 6: smoke launch (Unit 12). Phase 1 + --version probe runs
   // whenever both an install and a downloaded model are present;
   // otherwise we emit an honest "skipped" note.
   let smoke = run_smoke_step(
@@ -527,6 +586,12 @@ fn warn_on_ignored_step_overrides(args: &InitArgs, plan: &StepPlan) {
     eprintln!(
       "{}",
       colors::warning("--config-step ignored because the config step is skipped")
+    );
+  }
+  if !args.integrations.is_empty() && !plan.integrations {
+    eprintln!(
+      "{}",
+      colors::warning("--integrations ignored because the integrations step is skipped")
     );
   }
 }
@@ -1061,6 +1126,119 @@ async fn run_config_step(
 fn canonical_value_bytes(v: &serde_yaml::Value) -> Vec<u8> {
   let s = serde_yaml::to_string(v).unwrap_or_default();
   s.trim_end().as_bytes().to_vec()
+}
+
+/// Step 5 — external AI tool config patchers.
+///
+/// Resolution priority for which patchers run:
+/// 1. `--integrations <ids>` (comma-separated) — applies exactly the
+///    listed tools. `--integrations none` resolves to "step
+///    considered, no patchers applied" so the step shows as ran with
+///    an empty `applied` list.
+/// 2. `--recommended` / `--json` / non-TTY — skip entirely. We never
+///    silently mutate the user's external tool configs without an
+///    explicit opt-in.
+/// 3. Interactive TTY — multiselect picker
+///    ([`prompts::pick_integrations`]). Returning an empty selection
+///    also resolves to "skipped".
+///
+/// Failures applying a single patcher are non-fatal — they land in
+/// `IntegrationsSummary.failed` so `init --json` exposes them, but
+/// the wizard continues with subsequent steps. Init's job is to ship
+/// a working llamastash; an external tool's config write failing
+/// shouldn't roll back the install + model + config writes that
+/// already succeeded.
+async fn run_integrations_step(
+  args: &InitArgs,
+  config: &Config,
+  model_summary: Option<&ModelSummary>,
+) -> Result<Option<IntegrationsSummary>, CliExit> {
+  let proxy_port = config.proxy.effective_port();
+  let proxy_base_url = format!("http://127.0.0.1:{proxy_port}/v1");
+  let api_key = "llamastash".to_string();
+  let model_id = model_summary.and_then(|m| {
+    m.files
+      .first()
+      .and_then(|f| f.file_stem())
+      .map(|s| s.to_string_lossy().into_owned())
+  });
+  let ctx = crate::init::external::PatchContext {
+    proxy_base_url,
+    api_key,
+    model_id,
+  };
+
+  let chosen_ids: Vec<String> = if !args.integrations.is_empty() {
+    let normalised: Vec<String> = args
+      .integrations
+      .iter()
+      .flat_map(|s| s.split(','))
+      .map(|s| s.trim().to_string())
+      .filter(|s| !s.is_empty())
+      .collect();
+    if normalised.iter().any(|s| s == "none") {
+      // Explicit opt-out — step ran, no patchers applied.
+      return Ok(Some(IntegrationsSummary::default()));
+    }
+    // Validate ids up-front so a typo fails loudly rather than
+    // silently picking a subset.
+    let known: std::collections::HashSet<String> = crate::init::external::all_patchers()
+      .iter()
+      .map(|p| p.id().to_string())
+      .collect();
+    for id in &normalised {
+      if !known.contains(id) {
+        return Err(CliExit::new(
+          INIT_ABORTED,
+          format!(
+            "init: --integrations: unknown tool id `{id}` (known: opencode,aider,continue,zed,pi,env-sh,none)"
+          ),
+        ));
+      }
+    }
+    normalised
+  } else if args.json || prompts::is_recommended(args) {
+    return Ok(None);
+  } else {
+    let picked = prompts::pick_integrations().await?;
+    if picked.is_empty() {
+      return Ok(None);
+    }
+    picked
+  };
+
+  let mut summary = IntegrationsSummary::default();
+  for id in chosen_ids {
+    let Some(patcher) = crate::init::external::patcher_by_id(&id) else {
+      summary.failed.push(FailedTool {
+        id,
+        error: "unknown tool id".into(),
+      });
+      continue;
+    };
+    match crate::init::external::apply(patcher.as_ref(), &ctx, None) {
+      Ok(out) => summary.applied.push(AppliedTool {
+        id: out.tool_id.to_string(),
+        display_name: out.display_name.to_string(),
+        path: out.path,
+        written_bytes: out.written_bytes,
+        diff_json: out.diff_json,
+      }),
+      Err(e) => {
+        if !args.json {
+          eprintln!(
+            "{}",
+            colors::warning(&format!("{}: skipped ({e})", patcher.display_name()))
+          );
+        }
+        summary.failed.push(FailedTool {
+          id: patcher.id().to_string(),
+          error: e.to_string(),
+        });
+      }
+    }
+  }
+  Ok(Some(summary))
 }
 
 /// What `run_config_step` composes for the writer. Skipping empty

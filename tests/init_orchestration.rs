@@ -166,14 +166,22 @@ async fn llamastash_offline_true_env_triggers_offline_only_models_refusal() {
 /// `cli_init_parse.rs`.)
 #[test]
 fn step_plan_only_and_skip_resolve_to_same_set() {
-  let only = wizard::StepPlan::resolve(&[InitStep::Server, InitStep::Models], &[]);
+  // `--only A,B,D` (Server, Models, Integrations) should resolve to
+  // the same plan as `--skip C` (Config) because the wizard has four
+  // togglable steps total: Server, Models, Config, Integrations.
+  let only = wizard::StepPlan::resolve(
+    &[InitStep::Server, InitStep::Models, InitStep::Integrations],
+    &[],
+  );
   let skip = wizard::StepPlan::resolve(&[], &[InitStep::Config]);
   assert!(only.server);
   assert!(only.models);
   assert!(!only.config);
+  assert!(only.integrations);
   assert!(skip.server);
   assert!(skip.models);
   assert!(!skip.config);
+  assert!(skip.integrations);
   assert_eq!(only, skip);
 }
 

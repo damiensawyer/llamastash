@@ -11,6 +11,7 @@ pub mod config_writer;
 pub mod detection;
 pub mod doctor;
 pub mod download;
+pub mod external;
 pub mod fetch;
 pub mod fetch_policy;
 pub mod hf_api;
