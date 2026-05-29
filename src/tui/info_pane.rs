@@ -19,7 +19,6 @@ use crate::tui::app::App;
 use crate::util::paths::model_display_name;
 
 const LABEL_WIDTH: usize = 8;
-const LABEL_DAEMON: &str = "daemon  ";
 const LABEL_SERVER: &str = "server  ";
 const LABEL_MODELS: &str = "models  ";
 const LABEL_RUNNING: &str = "running ";
@@ -76,12 +75,13 @@ fn proxy_row<'a>(app: &'a App, palette: &'a Palette) -> Line<'a> {
 }
 
 fn daemon_row<'a>(app: &'a App, _budget: usize, palette: &'a Palette) -> Line<'a> {
-  // Layout: `daemon  port 11436  pid 1234  up 3h12m`. The full
-  // control-plane URL is loopback-only and the host half is always
-  // `127.0.0.1`, so the port is the only operator-relevant chunk —
-  // surfacing it directly keeps the row scannable on narrow widths.
-  // `port`, `pid`, and `up` render in the panel's label colour;
-  // numeric values render in text colour.
+  // Layout: `port 11436  pid 1234  up 3h12m`. The panel title is
+  // already "Daemon", so a leading `daemon  ` label would just
+  // repeat it. The full control-plane URL is loopback-only and the
+  // host half is always `127.0.0.1`, so we surface the port (the
+  // only operator-relevant chunk) directly. `port`, `pid`, and `up`
+  // render in the panel's label colour; numeric values render in
+  // text colour.
   let port_val = app
     .daemon_info
     .ipc_url
@@ -100,7 +100,6 @@ fn daemon_row<'a>(app: &'a App, _budget: usize, palette: &'a Palette) -> Line<'a
   };
 
   Line::from(vec![
-    Span::styled(LABEL_DAEMON, palette.label_style()),
     Span::styled("port ", palette.label_style()),
     Span::styled(port_val, palette.text_style()),
     Span::styled("  pid ", palette.label_style()),
@@ -497,7 +496,7 @@ mod tests {
     let rows = render_lines(&app);
     // The uptime chunk should read `up —`, not `up 2m`, because the
     // connection went down — the cached value is stale.
-    let daemon_row = rows.iter().find(|r| r.contains("daemon")).unwrap();
+    let daemon_row = rows.iter().find(|r| r.contains("port ")).unwrap();
     assert!(
       daemon_row.contains("up —"),
       "expected `up —` chunk when daemon disconnected, got: {daemon_row:?}"
@@ -514,7 +513,7 @@ mod tests {
       ..Default::default()
     };
     let rows = render_lines(&app);
-    let daemon_row = rows.iter().find(|r| r.contains("daemon")).unwrap();
+    let daemon_row = rows.iter().find(|r| r.contains("port ")).unwrap();
     assert!(
       daemon_row.contains("up 3h12m"),
       "expected `up 3h12m` chunk, got: {daemon_row:?}"
@@ -655,7 +654,7 @@ mod tests {
       ..Default::default()
     };
     let rows = render_lines(&app);
-    let daemon_row = rows.iter().find(|r| r.contains("daemon")).unwrap();
+    let daemon_row = rows.iter().find(|r| r.contains("port ")).unwrap();
     assert!(
       daemon_row.contains("pid 1234"),
       "expected `pid 1234`, got: {daemon_row:?}"
@@ -675,7 +674,7 @@ mod tests {
       ..Default::default()
     };
     let rows = render_lines(&app);
-    let daemon_row = rows.iter().find(|r| r.contains("daemon")).unwrap();
+    let daemon_row = rows.iter().find(|r| r.contains("port ")).unwrap();
     assert!(
       daemon_row.contains("port 11436"),
       "expected `port 11436` chunk, got: {daemon_row:?}"
@@ -705,7 +704,7 @@ mod tests {
       ..Default::default()
     };
     let rows = render_lines(&app);
-    let daemon_row = rows.iter().find(|r| r.contains("daemon")).unwrap();
+    let daemon_row = rows.iter().find(|r| r.contains("port ")).unwrap();
     assert!(
       daemon_row.contains("port —"),
       "expected `port —` placeholder, got: {daemon_row:?}"
