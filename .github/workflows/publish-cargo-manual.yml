@@ -1,0 +1,119 @@
+name: publish-cargo-manual
+
+# Manual recovery workflow for the publish-cargo step in release.yml.
+#
+# Use when release.yml's publish-cargo job failed but other downstream steps
+# (homebrew tap, install.sh mirror, AUR push) already succeeded — re-running
+# release.yml would re-do all of those, which is wasteful and noisy. This
+# workflow re-does ONLY the crates.io publish.
+#
+# Inputs:
+#   release-tag — existing GH Release tag whose source tree is to be
+#                 published (e.g. v0.0.1). The job checks out THE TAG
+#                 (not main) because cargo publish's artefact is the
+#                 entire source tree, not a templated file -- shipping
+#                 main here would publish whatever Cargo.toml says on
+#                 main, which is almost never what the operator wants.
+#
+# The job is idempotent: if the version is already on crates.io the publish
+# is treated as success (mirrors release.yml's behaviour).
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: "Existing GH Release tag to publish (e.g. v0.0.1)"
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-cargo-manual-${{ inputs.release-tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish-cargo:
+    name: publish to crates.io (manual)
+    runs-on: ubuntu-latest
+    steps:
+      - name: validate inputs (tag shape + release exists)
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'; then
+            echo "::error::invalid release-tag: $RELEASE_TAG (expected vX.Y.Z or vX.Y.Z-suffix)"
+            exit 1
+          fi
+          if ! gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::no GH Release exists for tag $RELEASE_TAG in ${{ github.repository }}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release-tag }}
+
+      - name: cross-check Cargo.toml matches the tag
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Mirrors prepare-release's check in release.yml. The published
+          # crate version is whatever Cargo.toml says, NOT the tag string,
+          # so a mismatch would silently ship the wrong version.
+          version="${RELEASE_TAG#v}"
+          cargo_version=$(awk -F\" '/^version[[:space:]]*=/ {print $2; exit}' Cargo.toml)
+          # Stable + prerelease both compare exactly: the tag and Cargo.toml
+          # should agree byte-for-byte at the version line.
+          if [ "$cargo_version" != "$version" ]; then
+            echo "::error::Cargo.toml version ($cargo_version) does not match tag ($version)."
+            echo "::error::Refusing to publish — re-check out the right tag or bump Cargo.toml first."
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable, 2026-05
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+
+      - name: cargo publish (retry on transient crates.io errors, idempotent on already-published)
+        env:
+          # Pass via env, never via --token argv, so the token never appears
+          # in the process table or any future `set -x` log.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::CRATES_IO_TOKEN secret is unset"
+            exit 1
+          fi
+          # Write the stderr sidecar OUTSIDE the checkout — cargo publish's
+          # dirty-tree check would otherwise reject the run with
+          # "1 files in the working directory contain changes ... publish.err".
+          err_log="${RUNNER_TEMP:-/tmp}/cargo-publish.err"
+          for attempt in 1 2 3; do
+            if cargo publish --locked 2> "$err_log"; then
+              echo "cargo publish succeeded on attempt ${attempt}"
+              exit 0
+            fi
+            cat "$err_log" >&2
+            # Treat "already uploaded" / "already exists" as success — happens
+            # on a re-run after a workflow-level retry, or when this manual
+            # workflow is invoked against an already-published tag.
+            if grep -qiE 'already uploaded|already exists' "$err_log"; then
+              echo "crates.io reports this version is already published; treating as success"
+              exit 0
+            fi
+            echo "cargo publish attempt ${attempt} failed; sleeping $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::cargo publish failed 3 times; investigate crates.io status"
+          exit 1
