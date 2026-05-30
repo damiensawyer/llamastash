@@ -47,15 +47,27 @@ pub async fn dispatch(mut cli: Cli, config: LoadedConfig) -> Result<i32> {
   // `colors::init`; downstream sites use `colors::*` helpers and
   // never re-derive whether colors are enabled.
   colors::init(cli.no_colors);
+  let command = cli.command.take();
   if let Some(warning) = &config.warning {
-    log::warn!("{warning}");
+    // A present-but-unparseable config (bad YAML, an unknown `[proxy]` key,
+    // a bad value) is a usage error — per the config contract a typo is
+    // rejected loudly, never silently papered over with defaults. `init`
+    // (rewrites the file) and `doctor` (diagnoses setup) are exempt so the
+    // user can always repair a broken config.
+    let repair = matches!(command, Some(Command::Init(_)) | Some(Command::Doctor(_)));
+    if repair {
+      log::warn!("{warning}");
+    } else {
+      eprintln!("config error: {warning}");
+      log::error!("config error: {warning}");
+      return Ok(exit_codes::USAGE);
+    }
   }
   // Sticky `--llama-server`: when the user passes the flag explicitly,
   // write the resolved path back into the YAML config so next launch
   // picks it up without re-typing. Best-effort — a failed write logs
   // a warning and the command proceeds normally.
   persist_llama_server_override(&cli, &config.config);
-  let command = cli.command.take();
   let resolved_config = &config.config;
   let outcome: CliResult = match command {
     None => handle_tui(&cli, resolved_config).await,

@@ -6,6 +6,13 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Fixed
 
+- **A malformed config is rejected loudly, not silently defaulted.** A bad
+  value or an unknown key inside a `deny_unknown_fields` block (e.g. a typo
+  under `[proxy]`) used to log one buried `WARN` and boot on defaults —
+  discarding the *entire* config while `daemon start` reported success. The
+  CLI now prints `config error: …` to stderr and exits `64`; `init` and
+  `doctor` stay exempt so a broken file can be repaired. A missing config
+  file is still fine.
 - **`LLAMASTASH_OFFLINE=1` no longer aborts every command.** The env var
   was bound to a boolean flag clap strict-parsed as `true`/`false`, so the
   documented `=1` (and `=0`, and an empty value) failed with

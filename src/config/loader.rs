@@ -7,7 +7,6 @@ use std::{
   path::{Path, PathBuf},
 };
 
-use log::warn;
 use serde::{Deserialize, Serialize};
 
 use crate::theme::{CustomThemeConfig, ThemeName};
@@ -346,7 +345,7 @@ fn parse_config(contents: &str, path: &Path) -> LoadedConfig {
     Err(error) => LoadedConfig {
       config: Config::default(),
       warning: Some(format!(
-        "failed to parse config file {}: {}. Using defaults.",
+        "failed to parse config file {}: {}",
         path.display(),
         error
       )),
@@ -355,8 +354,9 @@ fn parse_config(contents: &str, path: &Path) -> LoadedConfig {
 }
 
 /// Load a YAML config from `path`. Missing files yield defaults with no
-/// warning. Read or parse errors yield defaults with a warning so the caller
-/// can surface them without aborting startup.
+/// warning. Read or parse errors yield defaults plus a warning describing the
+/// problem; the caller decides whether to surface-and-proceed or reject (the
+/// CLI dispatcher rejects a malformed config for all but `init` / `doctor`).
 ///
 /// Two adversarial mitigations sit between the path and the YAML parser:
 /// 1. `fs::metadata` rejects anything that isn't a regular file — a config
@@ -372,7 +372,7 @@ pub fn load_config_from_path(path: &Path) -> LoadedConfig {
         return LoadedConfig {
           config: Config::default(),
           warning: Some(format!(
-            "config path {} is not a regular file (named pipe, device, or directory). Using defaults.",
+            "config path {} is not a regular file (named pipe, device, or directory)",
             path.display()
           )),
         };
@@ -381,7 +381,7 @@ pub fn load_config_from_path(path: &Path) -> LoadedConfig {
         return LoadedConfig {
           config: Config::default(),
           warning: Some(format!(
-            "config file {} is {} bytes; exceeds the {}-byte cap. Using defaults.",
+            "config file {} is {} bytes; exceeds the {}-byte cap",
             path.display(),
             meta.len(),
             MAX_CONFIG_BYTES
@@ -396,7 +396,7 @@ pub fn load_config_from_path(path: &Path) -> LoadedConfig {
       return LoadedConfig {
         config: Config::default(),
         warning: Some(format!(
-          "failed to stat config file {}: {}. Using defaults.",
+          "failed to stat config file {}: {}",
           path.display(),
           error
         )),
@@ -409,7 +409,7 @@ pub fn load_config_from_path(path: &Path) -> LoadedConfig {
     Err(error) => LoadedConfig {
       config: Config::default(),
       warning: Some(format!(
-        "failed to read config file {}: {}. Using defaults.",
+        "failed to read config file {}: {}",
         path.display(),
         error
       )),
@@ -418,16 +418,12 @@ pub fn load_config_from_path(path: &Path) -> LoadedConfig {
 }
 
 /// Load the user's config, honoring the `--config` CLI override if supplied.
-/// Warnings are forwarded to the `warn!` log macro in addition to being
-/// returned.
+/// A non-`None` `warning` describes a present-but-malformed file; the caller
+/// (the CLI dispatcher) decides whether to reject or surface-and-proceed.
 pub fn load_config(cli_override: Option<PathBuf>) -> LoadedConfig {
-  let loaded = config_path(cli_override)
+  config_path(cli_override)
     .map(|path| load_config_from_path(&path))
-    .unwrap_or_default();
-  if let Some(warning) = &loaded.warning {
-    warn!("{warning}");
-  }
-  loaded
+    .unwrap_or_default()
 }
 
 /// Validate that we have *some* place to look for models. If scanning is
