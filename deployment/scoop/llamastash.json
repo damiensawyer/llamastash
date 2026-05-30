@@ -1,0 +1,35 @@
+{
+  "$schema": "https://raw.githubusercontent.com/ScoopInstaller/Scoop/master/schema.json",
+  "version": "0.0.2",
+  "description": "A fast, keyboard-driven TUI for running local models via llama.cpp",
+  "homepage": "https://github.com/llamastash/llamastash",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/llamastash/llamastash/releases/download/v0.0.2/llamastash-0.0.2-x86_64-pc-windows-msvc.zip",
+      "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "extract_dir": "llamastash-0.0.2-x86_64-pc-windows-msvc"
+    }
+  },
+  "bin": "llamastash.exe",
+  "checkver": {
+    "github": "https://github.com/llamastash/llamastash"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/llamastash/llamastash/releases/download/v$version/llamastash-$version-x86_64-pc-windows-msvc.zip",
+        "extract_dir": "llamastash-$version-x86_64-pc-windows-msvc"
+      }
+    },
+    "hash": {
+      "url": "$url.sha256",
+      "regex": "^([a-fA-F0-9]{64})"
+    }
+  },
+  "notes": [
+    "llamastash is the daemon + TUI + CLI for running local models via llama.cpp.",
+    "First run: `llamastash init` walks through model + GPU detection.",
+    "Then `llamastash` to launch the TUI, or `llamastash --help` for the CLI."
+  ]
+}

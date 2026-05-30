@@ -468,7 +468,7 @@ Existing supervisor code calls `ProcessControl` through the trait; the per-OS su
 
 ### Phase D — Distribution + CI
 
-- [ ] **Unit 10: Windows build matrix, CI lane, `install.ps1`**
+- [x] **Unit 10: Windows build matrix, CI lane, `install.ps1`**
 
 **Goal:** Add the Windows target to the release pipeline, add a `windows-latest` CI lane, and ship a PowerShell installer companion to `install.sh`. Optional Scoop manifest scaffold.
 

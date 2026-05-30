@@ -40,11 +40,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Run clippy on macOS too so the `cfg(target_os = "macos")`
-        # branches (peercred via getpeereid, $TMPDIR runtime fallback,
-        # pbcopy clipboard) get lint-checked pre-merge instead of
-        # waiting for the release tarball to surface a regression.
-        os: [ubuntu-latest, macos-latest]
+        # Run clippy on macOS and Windows too so the `cfg(target_os …)`
+        # branches (macOS peercred via getpeereid; Windows Job Object /
+        # LockFileEx / DACL) get lint-checked pre-merge instead of waiting
+        # for the release matrix to surface a regression.
+        os: [ubuntu-latest, macos-latest, windows-latest]
         # Run with and without `uat` so neither side rots:
         # - `test-fixtures` alone is the shape the release binary ships.
         # - `test-fixtures,uat` compiles `src/cli/uat/*` (gated behind
@@ -69,7 +69,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         # See `clippy` for the feature-matrix rationale. The `uat`
         # feature adds ~52 hermetic tests (unit + `tests/uat_lifecycle_test.rs`
         # backend-mismatch path); none of them require a GPU because
@@ -77,23 +77,30 @@ jobs:
         # GPU-touching lifecycle lives on the nightly Metal lane plus
         # maintainer-run per-release UAT — never on PR CI.
         features: ["test-fixtures", "test-fixtures,uat"]
+        # macOS sets `$TMPDIR` to /var/folders/<a>/<b>/T/ (~49 chars);
+        # historical socket-path tests needed /tmp to stay under macOS's
+        # sun_path limit. The HTTP-loopback transport removed that
+        # constraint (Unit 4 of the Windows+HTTP-IPC plan) but pinning
+        # /tmp is still cheap and avoids any other long-path surprise.
+        # Windows uses the runner's default temp dir (no TMPDIR override).
+        include:
+          - os: ubuntu-latest
+            tmpdir_override: /tmp
+          - os: macos-latest
+            tmpdir_override: /tmp
+          - os: windows-latest
+            tmpdir_override: ""
     runs-on: ${{ matrix.os }}
     needs: prepare
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # macOS sets `$TMPDIR` to /var/folders/<a>/<b>/T/ (~49 chars).
-      # Integration tests that put a Unix-domain socket under
-      # `std::env::temp_dir()` end up with paths over 104 bytes,
-      # which is macOS's `sockaddr_un.sun_path` limit — `bind()`
-      # silently fails. Pinning to /tmp keeps every test path short
-      # enough to bind. Linux's default temp_dir is already /tmp.
       - name: cargo test
         run: cargo test --features ${{ matrix.features }} --workspace
         env:
           RUST_BACKTRACE: 1
-          TMPDIR: /tmp
+          TMPDIR: ${{ matrix.tmpdir_override }}
 
   test-no-features:
     # Validates that unit tests (--lib) pass without any feature flags.

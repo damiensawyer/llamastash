@@ -285,6 +285,14 @@ jobs:
             os: macos-latest
             use_cross: false
             verify_regex: 'Mach-O .*x86_64'
+          # Windows x86_64 ships as .zip (ecosystem convention) and uses
+          # MSVC as the native toolchain. aarch64-pc-windows-msvc is
+          # explicitly out of 0.0.2 scope per the plan's Scope
+          # Boundaries; no `use_cross` row needed.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_cross: false
+            verify_regex: 'PE32\+ executable .*x86-64'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -328,23 +336,46 @@ jobs:
           cargo build --release --target "${{ matrix.target }}" --bin llamastash --locked
 
       - name: verify binary is an executable for the target arch
+        # `file` ships with Git for Windows on windows-latest runners, so
+        # the bash shell setting plus bundled `file` keeps the check
+        # uniform across all platforms.
         shell: bash
         run: |
           set -euo pipefail
-          out=$(file "target/${{ matrix.target }}/release/llamastash")
+          # Windows binaries have the `.exe` suffix; everything else doesn't.
+          bin="target/${{ matrix.target }}/release/llamastash"
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+            bin="${bin}.exe"
+          fi
+          out=$(file "$bin")
           echo "$out"
           echo "$out" | grep -Eq "${{ matrix.verify_regex }}" || { echo "::error::wrong arch"; exit 1; }
 
-      - name: package tarball
+      - name: package archive
+        # Windows ships .zip (ecosystem convention; install.ps1 expects
+        # it). Linux/macOS keep .tar.gz. shasum on Windows is provided
+        # by Git for Windows' Perl shim; `tar` is available too but
+        # we use PowerShell's `Compress-Archive` semantics via bash's
+        # `zip` (preinstalled on windows-latest as part of the MSYS
+        # toolchain).
         shell: bash
         run: |
           set -euo pipefail
           stage="llamastash-${RELEASE_VERSION}-${{ matrix.target }}"
           mkdir -p "dist/${stage}"
-          cp "target/${{ matrix.target }}/release/llamastash" "dist/${stage}/"
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+            cp "target/${{ matrix.target }}/release/llamastash.exe" "dist/${stage}/"
+          else
+            cp "target/${{ matrix.target }}/release/llamastash" "dist/${stage}/"
+          fi
           cp LICENSE README.md CHANGELOG.md "dist/${stage}/"
-          (cd dist && tar -czf "${stage}.tar.gz" "${stage}" \
-            && shasum -a 256 "${stage}.tar.gz" >"${stage}.tar.gz.sha256")
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+            (cd dist && 7z a -tzip "${stage}.zip" "${stage}" \
+              && shasum -a 256 "${stage}.zip" >"${stage}.zip.sha256")
+          else
+            (cd dist && tar -czf "${stage}.tar.gz" "${stage}" \
+              && shasum -a 256 "${stage}.tar.gz" >"${stage}.tar.gz.sha256")
+          fi
           ls -la dist
 
       - name: upload assets to the existing release
@@ -356,22 +387,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh release upload "$RELEASE_TAG" --clobber \
-            "dist/llamastash-${RELEASE_VERSION}-${{ matrix.target }}.tar.gz" \
-            "dist/llamastash-${RELEASE_VERSION}-${{ matrix.target }}.tar.gz.sha256"
+          stage="llamastash-${RELEASE_VERSION}-${{ matrix.target }}"
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+            gh release upload "$RELEASE_TAG" --clobber \
+              "dist/${stage}.zip" "dist/${stage}.zip.sha256"
+          else
+            gh release upload "$RELEASE_TAG" --clobber \
+              "dist/${stage}.tar.gz" "dist/${stage}.tar.gz.sha256"
+          fi
 
       - name: stash sha sidecar for downstream jobs
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p sha-stash
-          cp "dist/llamastash-${RELEASE_VERSION}-${{ matrix.target }}.tar.gz.sha256" sha-stash/
+          stage="llamastash-${RELEASE_VERSION}-${{ matrix.target }}"
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+            cp "dist/${stage}.zip.sha256" sha-stash/
+          else
+            cp "dist/${stage}.tar.gz.sha256" sha-stash/
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: sha-${{ matrix.target }}
           path: sha-stash
 
   publish-shasums:
-    name: publish SHA256SUMS + install.sh
+    name: publish SHA256SUMS + install scripts
     needs: [create-release, build]
     runs-on: ubuntu-latest
     env:
@@ -383,6 +425,7 @@ jobs:
           ref: ${{ needs.create-release.outputs.tag }}
           sparse-checkout: |
             scripts/install.sh
+            scripts/install.ps1
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v8
         with:
@@ -390,15 +433,16 @@ jobs:
           merge-multiple: true
           path: sha-stash
 
-      - name: build aggregate SHA256SUMS + install.sh sidecar
+      - name: build aggregate SHA256SUMS + installer sidecars
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
           # Concatenate per-target .sha256 sidecars into a single SHA256SUMS,
-          # sorted for deterministic line order across runs.
-          cat sha-stash/*.tar.gz.sha256 | LC_ALL=C sort >dist/SHA256SUMS
-          # Verify shape: hex(64) + whitespace + filename, exactly 10 lines.
+          # sorted for deterministic line order across runs. Includes both
+          # .tar.gz (Linux/macOS) and .zip (Windows) sidecars.
+          cat sha-stash/*.sha256 | LC_ALL=C sort >dist/SHA256SUMS
+          # Verify shape: hex(64) + whitespace + filename.
           awk '
             NF < 2 || $1 !~ /^[a-fA-F0-9]{64}$/ {
               printf "::error::bad SHA256SUMS line: %s\n", $0 > "/dev/stderr"
@@ -406,8 +450,8 @@ jobs:
             }
           ' dist/SHA256SUMS
           line_count=$(wc -l <dist/SHA256SUMS)
-          if [ "$line_count" -ne 10 ]; then
-            echo "::error::SHA256SUMS has $line_count lines; expected 10 (one per target)"
+          if [ "$line_count" -ne 11 ]; then
+            echo "::error::SHA256SUMS has $line_count lines; expected 11 (one per target)"
             cat dist/SHA256SUMS
             exit 1
           fi
@@ -415,9 +459,11 @@ jobs:
           cp scripts/install.sh dist/install.sh
           chmod +x dist/install.sh
           (cd dist && shasum -a 256 install.sh >install.sh.sha256)
+          cp scripts/install.ps1 dist/install.ps1
+          (cd dist && shasum -a 256 install.ps1 >install.ps1.sha256)
           ls -la dist
 
-      - name: upload SHA256SUMS + install.sh + sidecar
+      - name: upload SHA256SUMS + installers + sidecars
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
@@ -426,7 +472,9 @@ jobs:
           gh release upload "$RELEASE_TAG" --clobber \
             dist/SHA256SUMS \
             dist/install.sh \
-            dist/install.sh.sha256
+            dist/install.sh.sha256 \
+            dist/install.ps1 \
+            dist/install.ps1.sha256
 
   publish-homebrew:
     name: publish homebrew formula
