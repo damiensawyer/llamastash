@@ -32,6 +32,15 @@ use llamastash::gguf::test_fixtures::build_minimal_gguf;
 use llamastash::ipc::Client;
 use tokio::task::JoinHandle;
 
+/// READY_TIMEOUT_NOTE: the windows-latest GitHub runner periodically
+/// takes 15+ seconds to launch the fake binary under parallel test
+/// load, and 5–8 s caps surface as flake without exercising anything
+/// about the supervisor itself. 30 s leaves enough headroom that
+/// genuine "supervisor stuck" failures still surface in under a minute
+/// while masking nothing on healthy runs (the loops break the instant
+/// the supervisor reports Ready).
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn fake_binary() -> PathBuf {
   PathBuf::from(env!("CARGO_BIN_EXE_fake_llama_server"))
 }
@@ -362,7 +371,8 @@ async fn agent_script_round_trip_list_start_status_logs_stop() {
 
   // Wait for ready via the daemon.
   let mut client = h.client().await;
-  let ready_deadline = Instant::now() + Duration::from_secs(5);
+  // 30 s headroom for slow CI runners — see `READY_TIMEOUT_NOTE`.
+  let ready_deadline = Instant::now() + READY_TIMEOUT;
   let launch_id = loop {
     let body = client.call("status", None).await.unwrap();
     let models = body["models"].as_array().unwrap();
@@ -744,7 +754,8 @@ async fn start_preset_chain_seeds_supervisor_with_saved_params() {
   // Ready, *and* the recorder polls state every 200 ms — so wait
   // for the write rather than racing it.
   let mut client = h.client().await;
-  let deadline = Instant::now() + Duration::from_secs(8);
+  // 30 s headroom for slow CI runners — see `READY_TIMEOUT_NOTE`.
+  let deadline = Instant::now() + READY_TIMEOUT;
   loop {
     let lp = client.call("last_params_list", None).await.unwrap();
     let arr = lp["last_params"].as_array().cloned().unwrap_or_default();
@@ -814,7 +825,8 @@ async fn start_ctx_above_native_succeeds_and_duplicate_launch_uses_new_port() {
   assert_eq!(code, exit_codes::SUCCESS);
 
   let mut client = h.client().await;
-  let deadline = Instant::now() + Duration::from_secs(8);
+  // 30 s headroom for slow CI runners — see `READY_TIMEOUT_NOTE`.
+  let deadline = Instant::now() + READY_TIMEOUT;
   let (port_a, port_b) = loop {
     let body = client.call("status", None).await.unwrap();
     let models = body["models"].as_array().unwrap();
@@ -860,7 +872,8 @@ async fn logs_follow_returns_daemon_unreachable_when_daemon_dies() {
 
   // Resolve the launch id by talking to the daemon directly.
   let mut client = h.client().await;
-  let deadline = Instant::now() + Duration::from_secs(5);
+  // 30 s headroom for slow CI runners — see `READY_TIMEOUT_NOTE`.
+  let deadline = Instant::now() + READY_TIMEOUT;
   let launch_id = loop {
     let body = client.call("status", None).await.unwrap();
     let models = body["models"].as_array().unwrap();
