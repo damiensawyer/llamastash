@@ -6,6 +6,11 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Fixed
 
+- **Usage errors exit `64` consistently.** clap's own arg rejections
+  (unknown flag/subcommand, mutually-exclusive flags, missing value)
+  exited `2`, and a malformed `--render-size` exited `71`; both now map
+  to `USAGE` (64) as the exit-code table documents. `--help` / `--version`
+  still exit `0`.
 - **Orphan re-adoption works against current llama.cpp.** The daemon-restart
   sweep matched the recorded model only against `/v1/models` `id ==` the full
   path; `llama-server b9245+` reports just the basename, so every orphan was

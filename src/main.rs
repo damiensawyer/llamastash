@@ -8,7 +8,21 @@ use llamastash::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-  let cli = Cli::parse();
+  // Parse by hand so clap's arg-rejection exit code matches our contract:
+  // a usage error exits USAGE (64), not clap's default 2. `--help` /
+  // `--version` are not errors — clap writes them to stdout and we exit 0.
+  let cli = match Cli::try_parse() {
+    Ok(cli) => cli,
+    Err(err) => {
+      let _ = err.print();
+      let code = if err.use_stderr() {
+        cli::exit_codes::USAGE
+      } else {
+        0
+      };
+      std::process::exit(code);
+    }
+  };
 
   // Logger must be initialised BEFORE the panic hook — `log::error!` inside
   // the hook is a silent no-op while no logger is registered, so a panic

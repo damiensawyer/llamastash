@@ -273,8 +273,10 @@ async fn render_snapshot(
   use ratatui::Terminal;
 
   let (width, height) = match cli.render_size.as_deref() {
+    // A malformed `--render-size` is a CLI usage error, not an internal
+    // failure — map it to USAGE (64) so it matches clap's own arg rejections.
     Some(raw) => cli_args::parse_render_size(raw)
-      .map_err(|msg| CliExit::new(exit_codes::UNKNOWN, format!("--render-size: {msg}")))?,
+      .map_err(|msg| CliExit::new(exit_codes::USAGE, format!("--render-size: {msg}")))?,
     None => (120, 40),
   };
 
