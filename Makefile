@@ -126,10 +126,22 @@ bench-table: .venv/bin/python
 ##   UAT_EXTRA='--some-extra-uat-flag' (appended after the per-target defaults)
 ## For the Vulkan lane, set either UAT_VULKAN_SERVER=/path/to/llama-server
 ## or the standard LLAMASTASH_LLAMA_SERVER env var.
+##
+## Windows: these recipes use POSIX shell syntax and `make` is not in-box.
+## Each target's PowerShell-friendly equivalent is shown above the rule —
+## paste those into PowerShell directly. Warm mode on Windows AMD reports
+## zero VRAM-used (no `rocm-smi.exe`); use `--mode cold` or `nvidia` /
+## `cpu_only` lanes there.
+
+## PowerShell equivalent (Linux/macOS bash also works):
+##   cargo run --features uat -- uat --host-backend amd --mode warm --report-out uat-amd-warm.json
 uat-amd:
 	@mkdir -p "$(UAT_REPORT_DIR)"
 	@$(UAT_CMD) --host-backend amd --mode "$(UAT_MODE)" --report-out "$(UAT_REPORT_DIR)/uat-amd-$(UAT_MODE).json" $(UAT_EXTRA)
 
+## PowerShell equivalent:
+##   $env:LLAMASTASH_LLAMA_SERVER='C:\path\to\llama-server.exe'
+##   cargo run --features uat -- uat --host-backend amd --runtime-backend vulkan --mode warm --report-out uat-amd-vulkan-warm.json
 uat-amd-vulkan:
 	@mkdir -p "$(UAT_REPORT_DIR)"
 	@if [ -z "$(UAT_VULKAN_SERVER)" ] && [ -z "$$LLAMASTASH_LLAMA_SERVER" ]; then \
@@ -140,6 +152,9 @@ uat-amd-vulkan:
 		$(UAT_CMD) --host-backend amd --runtime-backend vulkan --mode "$(UAT_MODE)" \
 		--report-out "$(UAT_REPORT_DIR)/uat-amd-vulkan-$(UAT_MODE).json" $(UAT_EXTRA)
 
+## PowerShell equivalent:
+##   $env:LLAMASTASH_LLAMA_SERVER='C:\path\to\llama-server.exe'
+##   cargo run --features uat -- uat --host-backend nvidia --runtime-backend vulkan --mode warm --report-out uat-nvidia-vulkan-warm.json
 uat-nvidia-vulkan:
 	@mkdir -p "$(UAT_REPORT_DIR)"
 	@if [ -z "$(UAT_VULKAN_SERVER)" ] && [ -z "$$LLAMASTASH_LLAMA_SERVER" ]; then \
@@ -150,14 +165,21 @@ uat-nvidia-vulkan:
 		$(UAT_CMD) --host-backend nvidia --runtime-backend vulkan --mode "$(UAT_MODE)" \
 		--report-out "$(UAT_REPORT_DIR)/uat-nvidia-vulkan-$(UAT_MODE).json" $(UAT_EXTRA)
 
+## PowerShell equivalent (warm mode needs `nvidia-smi.exe` on PATH):
+##   cargo run --features uat -- uat --host-backend nvidia --mode warm --report-out uat-nvidia-warm.json
 uat-nvidia:
 	@mkdir -p "$(UAT_REPORT_DIR)"
 	@$(UAT_CMD) --host-backend nvidia --mode "$(UAT_MODE)" --report-out "$(UAT_REPORT_DIR)/uat-nvidia-$(UAT_MODE).json" $(UAT_EXTRA)
 
+## PowerShell equivalent (Apple-only — Windows hosts have no Metal):
+##   cargo run --features uat -- uat --host-backend apple_metal --mode warm --report-out uat-apple-metal-warm.json
 uat-apple-metal:
 	@mkdir -p "$(UAT_REPORT_DIR)"
 	@$(UAT_CMD) --host-backend apple_metal --mode "$(UAT_MODE)" --report-out "$(UAT_REPORT_DIR)/uat-apple-metal-$(UAT_MODE).json" $(UAT_EXTRA)
 
+## PowerShell equivalent (the canonical Windows lane — the only one that
+## doesn't require a vendor `*-smi` tool for warm-mode sampling):
+##   cargo run --features uat -- uat --host-backend cpu_only --mode cold --report-out uat-cpu-only-cold.json
 uat-cpu-only:
 	@mkdir -p "$(UAT_REPORT_DIR)"
 	@$(UAT_CMD) --host-backend cpu_only --mode "$(UAT_MODE)" --report-out "$(UAT_REPORT_DIR)/uat-cpu-only-$(UAT_MODE).json" $(UAT_EXTRA)
