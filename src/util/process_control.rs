@@ -116,17 +116,34 @@ pub trait ProcessControl: Send + Sync + 'static {
 }
 
 /// Build the production [`ProcessControl`] for the current platform.
-/// Returns an `Arc<dyn ProcessControl>` so the daemon can stash one
-/// in its context and hand clones to every supervisor.
+/// Returns a process-global singleton `Arc<dyn ProcessControl>` so the
+/// daemon can stash one in its context and hand clones to every
+/// supervisor.
+///
+/// **Why a singleton:** on Windows the controller owns the per-PID
+/// `JobHandle` map. Each `JobHandle` carries `KILL_ON_JOB_CLOSE`, so
+/// closing the last handle to a Job tears down every process assigned
+/// to it. A per-call controller would drop the moment `spawn_supervised`
+/// returns — taking the just-spawned child with it. Sharing one
+/// controller across the process guarantees every Job handle outlives
+/// its assigned child (and any future code that looks up the
+/// HashMap entry by pid). On Unix the type is a unit struct so the
+/// `OnceLock` is functionally a no-op.
 pub fn platform_default() -> Arc<dyn ProcessControl> {
-  #[cfg(unix)]
-  {
-    Arc::new(UnixProcessControl)
-  }
-  #[cfg(windows)]
-  {
-    Arc::new(WindowsProcessControl::new())
-  }
+  use std::sync::OnceLock;
+  static SINGLETON: OnceLock<Arc<dyn ProcessControl>> = OnceLock::new();
+  SINGLETON
+    .get_or_init(|| {
+      #[cfg(unix)]
+      {
+        Arc::new(UnixProcessControl) as Arc<dyn ProcessControl>
+      }
+      #[cfg(windows)]
+      {
+        Arc::new(WindowsProcessControl::new()) as Arc<dyn ProcessControl>
+      }
+    })
+    .clone()
 }
 
 // ---------------------------------------------------------------------
