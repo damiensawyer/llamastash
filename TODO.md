@@ -104,32 +104,13 @@ Two release tracks:
 
 ## R2 (v0.0.2 roadmap)
 
-- [x] **IP**: Windows support including scoop — landed via [`docs/plans/2026-05-29-001-feat-windows-support-and-http-ipc-plan.md`](docs/plans/2026-05-29-001-feat-windows-support-and-http-ipc-plan.md) in 0.0.2. HTTP-loopback IPC unification, Job Object process control, LockFileEx + DACL hardening, .zip extraction, win-cpu/win-vulkan/win-cuda/win-hip asset routing, install.ps1, Scoop bucket auto-published via release.yml. See below for Windows follow-ups deferred from 0.0.2.
+- [ ] **IP**: Agent run UAT
 - [ ] Publish to Clawhub/Hermes/etc
 - [ ] Publish to https://www.skills.sh/
-
-### Windows follow-ups deferred from 0.0.2 (post-0.0.2)
-
 - [ ] **Windows AMD GPU detection.** Today Windows AMD hosts get "GPU detection unavailable" in the host pane (daemon + proxy + supervisor still work). Follow-up brainstorm needs to pick a probe path: DXGI (broadest reach, querying adapter info) vs. WMI (`Win32_VideoController`, slow but standard) vs. ADLX (AMD's official C SDK, most accurate but vendor-specific). 0.0.2 plan §Scope Boundaries.
-- [ ] **`aarch64-pc-windows-msvc`** — Snapdragon X / Surface Pro coverage. 0.0.2 ships x86_64 only. Adds another release-matrix row + `install.ps1` arch-detect branch + Scoop manifest `arm64` block. 0.0.2 plan §Scope Boundaries.
-- [ ] **Windows code signing** — release `.zip` is unsigned, so Defender SmartScreen may prompt on `install.ps1` and on first `llamastash.exe` launch. Needs a code-signing certificate (Sectigo/DigiCert OV cert ~$200/yr) and a `signtool` step in `publish-scoop` / release workflow.
-- [ ] **MSI installer + winget submission.** 0.0.2 ships `install.ps1` + Scoop bucket; `winget` and a proper MSI are deferred. MSI via `WiX` or `cargo-wix`; winget submission needs the manifest in `microsoft/winget-pkgs`.
 - [ ] **ConEmu / Alacritty / PowerShell ISE TUI verify.** 0.0.2 documents that the TUI is verified manually in Windows Terminal only (see `docs/testing/hardware-uat.md` Windows section); other terminals are presumed-working but unverified.
-- [ ] **WSL2 explicit support claim.** Today WSL2 users install the Linux build via `install.sh`. We should either document this explicitly or add a "use Linux install inside WSL2" note in `INSTALL.md` Platform notes.
-- [ ] **Per-test triage of integration tests on Windows.** A handful of integration tests are currently gated `#[cfg(unix)]` (symlinks, fork-based supervisor lifecycle). Most could land on Windows with a hyper test-server equivalent. Audit + port wherever cheap. 0.0.2 plan §Risks last bullet.
-- [ ] **`CTRL_BREAK_EVENT` reliability for `llama-server.exe`** — currently relies on the SIGTERM→SIGKILL grace window escalating to `TerminateJobObject` if CTRL+BREAK doesn't reach the child. If the grace window fires consistently, file upstream issue against llama.cpp Windows binary's signal handler. 0.0.2 plan §Deferred to Implementation.
-
-### Post-Windows-port deferrals from the 0.0.2 plan
-
-- [ ] **SSE for `logs_tail` streaming.** Today the CLI polls `logs_tail` every 250 ms over HTTP and de-dupes (works correctly; not a regression). SSE would collapse N polls/sec into one long-lived connection. Unit 3 of the 0.0.2 plan was explicitly deferred — needs its own brainstorm + plan.
-- [ ] **LAN-exposed HTTP surfaces — auth + TLS + LAN binding for the proxy.** Today the OpenAI-compat proxy is loopback-only. The HTTP-IPC refactor in 0.0.2 keeps the two listeners structurally separate so the proxy's R34 LAN-binding future stays available without touching the control plane. Brainstorm-grade work; not a small feature.
-- [ ] **MCP server surface.** Tracked under R34 alongside LAN exposure. The CLI is already agent-friendly via `--json`; MCP would add a Model Context Protocol server endpoint for agents that prefer it.
-- [ ] **Anthropic `/v1/messages` compatibility shim** on top of the OpenAI-compat proxy. Most agents do OpenAI; Claude Code prefers Anthropic shape.
-- [ ] **Per-PID VRAM attribution** via NVML's `nvmlDeviceGetComputeRunningProcesses` (Linux+NVIDIA only at first). Today right pane shows per-model RAM + CPU%; VRAM is host-level only.
-- [ ] **GPU/CPU offload split UI** — first-class control over which layers go where.
-- [ ] **MLX and vLLM backends** as opt-in alternatives to llama.cpp.
-- [ ] **Docker-ready packaging** — official images + a documented `docker run` path.
-- [ ] **CUDA build on Linux.** Today Linux+NVIDIA ships the Vulkan binary. CUDA-on-Linux has a driver/runtime sketch that needs its own brainstorm.
+- [ ] **Need brainstorm/plan**: **SSE for `logs_tail` streaming.** Today the CLI polls `logs_tail` every 250 ms over HTTP and de-dupes (works correctly; not a regression). SSE would collapse N polls/sec into one long-lived connection. Unit 3 of the 0.0.2 plan was explicitly deferred — needs its own brainstorm + plan.
+- [x] **IP**: Windows support including scoop — landed via [`docs/plans/2026-05-29-001-feat-windows-support-and-http-ipc-plan.md`](docs/plans/2026-05-29-001-feat-windows-support-and-http-ipc-plan.md) in 0.0.2. HTTP-loopback IPC unification, Job Object process control, LockFileEx + DACL hardening, .zip extraction, win-cpu/win-vulkan/win-cuda/win-hip asset routing, install.ps1, Scoop bucket auto-published via release.yml. See below for Windows follow-ups deferred from 0.0.2.
 - [x] **IP**: AUR package
 - [x] **IP**: Offer to update OpenCode and other supported tools (lets see what popular tools we can support) during `init`. Init should provide a multiselect of tools to choose (skip if none choosen) and then update the config for those tools to point to the proxy.
 - [x] `start/stop` command with no param should offer a clicklack picker. All available models for start and non idle models for stop
@@ -165,13 +146,22 @@ Two release tracks:
   - [ ] AMD GPU : Linux
     - [ ] gemma-3-4b-it.Q3_K_M
 - [ ] **Build CUDA llama.cpp prebuilts in CD** — ggml-org ships CUDA only for Windows (`cudart-llama-bin-win-cuda-{12.4,13.3}-x64.zip`); Linux+NVIDIA users get routed to the Vulkan prebuilt today, which is ~10–30% slower than native CUDA for LLM inference. Building CUDA doesn't need a GPU runner (only `nvcc`), so a standard `ubuntu-latest` runner + `Jimver/cuda-toolkit` action + `cmake -DGGML_CUDA=1 -DCMAKE_CUDA_ARCHITECTURES="70;75;80;86;89;90"` produces a fat binary covering Volta→Hopper. Publish to `llamastash/llamastash` releases tagged with the same `bNNNN` as the upstream llama.cpp tag so `pick_release_with_asset` keeps working. Then extend `pick_asset_suffix` in `src/init/install/gh_releases.rs:70` with a CUDA branch for Linux+NVIDIA (parameterise `RELEASES_URL` per-asset), and add a wizard prompt to choose CUDA vs Vulkan. Static-link libcudart (Ollama precedent) so users don't need the CUDA toolkit installed — adds ~100MB but zero user-side prereqs. Scope: ~1–2 days for workflow + routing + tests. Folds into the broader [version-drift brainstorm](#) above since both questions share the "do we own a llama.cpp build pipeline?" decision.
-- [ ] **Need brainstorm/plan**: Anthropic API compatibility.
-- [ ] **Need brainstorm/plan**: Consider Loopback + LAN binding options for the proxy.
+- [ ] **Need brainstorm/plan**: **Anthropic `/v1/messages` compatibility shim** on top of the OpenAI-compat proxy. Most agents do OpenAI; Claude Code prefers Anthropic shape.
+- [ ] **Need brainstorm/plan**: **LAN-exposed HTTP surfaces — auth + TLS + LAN binding for the proxy.** Today the OpenAI-compat proxy is loopback-only. The HTTP-IPC refactor in 0.0.2 keeps the two listeners structurally separate so the proxy's R34 LAN-binding future stays available without touching the control plane. Brainstorm-grade work; not a small feature.
+- [ ] Windows follow-ups deferred from 0.0.2 (post-0.0.2)
+  - [ ] **`aarch64-pc-windows-msvc`** — Snapdragon X / Surface Pro coverage. 0.0.2 ships x86_64 only. Adds another release-matrix row + `install.ps1` arch-detect branch + Scoop manifest `arm64` block. 0.0.2 plan §Scope Boundaries.
+  - [ ] **Windows code signing** — release `.zip` is unsigned, so Defender SmartScreen may prompt on `install.ps1` and on first `llamastash.exe` launch. Needs a code-signing certificate (Sectigo/DigiCert OV cert ~$200/yr) and a `signtool` step in `publish-scoop` / release workflow.
+  - [ ] **MSI installer + winget submission.** 0.0.2 ships `install.ps1` + Scoop bucket; `winget` and a proper MSI are deferred. MSI via `WiX` or `cargo-wix`; winget submission needs the manifest in `microsoft/winget-pkgs`.
+  - [ ] **WSL2 explicit support claim.** Today WSL2 users install the Linux build via `install.sh`. We should either document this explicitly or add a "use Linux install inside WSL2" note in `INSTALL.md` Platform notes.
+  - [ ] **Per-test triage of integration tests on Windows.** A handful of integration tests are currently gated `#[cfg(unix)]` (symlinks, fork-based supervisor lifecycle). Most could land on Windows with a hyper test-server equivalent. Audit + port wherever cheap. 0.0.2 plan §Risks last bullet.
+  - [ ] **`CTRL_BREAK_EVENT` reliability for `llama-server.exe`** — currently relies on the SIGTERM→SIGKILL grace window escalating to `TerminateJobObject` if CTRL+BREAK doesn't reach the child. If the grace window fires consistently, file upstream issue against llama.cpp Windows binary's signal handler. 0.0.2 plan §Deferred to Implementation.
+  - [ ] **Windows integration test triage.** Four `tests/cli_integration_test.rs` cases are `#[cfg_attr(windows, ignore)]`: `agent_script_round_trip_list_start_status_logs_stop`, `start_preset_chain_seeds_supervisor_with_saved_params`, `start_ctx_above_native_succeeds_and_duplicate_launch_uses_new_port`, `logs_follow_returns_daemon_unreachable_when_daemon_dies`. The first three drive multi-step supervisor chains (start→stop→start, or two concurrent launches); the fourth explicitly kills the in-process daemon mid-test. All six sister tests pass on Windows after the Job Object singleton fix landed in 0.0.2, so the remaining four are stuck behind a separate quirk — likely the CTRL+BREAK / CREATE_NO_WINDOW console-isolation interaction that prevents graceful shutdown from reaching the child. Needs its own brainstorm + plan to either swap to a console-shared spawn flag, route shutdown through a different IPC, or accept the 5s grace timeout per supervised child as the cost of doing business and refactor the tests to tolerate it.
 
 ### Low priority
 
 - [ ] No glyphs fallback.
 - [ ] **Need brainstorm/plan**: HTTP and MCP surfaces (origin: R34).
+  - [ ] **MCP server surface.** Tracked under R34 alongside LAN exposure. The CLI is already agent-friendly via `--json`; MCP would add a Model Context Protocol server endpoint for agents that prefer it.
   - [ ] check and make sure HTTP and CLI surfaces are consistent and reuses code and flow where it makes sense.
 - [ ] **Need brainstorm/plan**: MLX and vLLM if cheap to add.
 - [ ] **Need brainstorm/plan**: Docker-ready packaging.
