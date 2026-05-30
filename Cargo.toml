@@ -230,6 +230,16 @@ windows-sys = { version = "0.61", features = [
 # small. Linux/macOS binary size is unchanged since this is
 # Windows-only.
 zip = { version = "5", default-features = false, features = ["deflate"] }
+# Idiomatic Win32 COM bindings — only used for the DXGI-based GPU
+# probe in `src/gpu/dxgi.rs`, which fills the Windows AMD detection
+# gap (rocm-smi is Linux-only) and also covers Intel + the rare
+# NVIDIA-without-nvidia-smi.exe stripped-install case. Sibling of
+# `windows-sys` 0.61; only the requested features compile.
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+] }
 
 [lib]
 name = "llamastash"

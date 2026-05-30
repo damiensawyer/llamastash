@@ -4,6 +4,19 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Added
+
+- **Windows GPU detection via DXGI.** Fills the Windows AMD / Intel
+  gap that the Linux-only `rocm-smi` probe leaves open, and as a
+  bonus covers NVIDIA on stripped Windows installs without
+  `nvidia-smi.exe`. Reports adapter name + dedicated VRAM + shared
+  system memory (UMA APUs like Strix Halo / Phoenix don't
+  double-count weights against RAM). No live util/temp — DXGI
+  doesn't expose them; closing that gap needs vendor SDKs (NVML /
+  ADLX / IGCL) and is tracked under R2. See [`docs/architecture.md
+  §GPU detection`](docs/architecture.md#gpu-detection) for the full
+  coverage matrix.
+
 ## [0.0.2] — 2026-05-30
 
 ### Added

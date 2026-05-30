@@ -7,15 +7,28 @@
 //! follow-up: replace the shell-out with `nvml-wrapper` on Linux
 //! for accurate per-PID VRAM attribution.
 //!
-//! Detection order, per the plan:
-//! 1. NVIDIA via `nvidia-smi --query-gpu=...` (Linux + Windows).
-//! 2. AMD via `rocm-smi --showmeminfo vram --json` (Linux).
-//! 3. Apple Silicon Metal via `system_profiler SPDisplaysDataType
+//! Detection order:
+//! 1. NVIDIA via `nvidia-smi --query-gpu=...` (Linux + Windows) — wins
+//!    when available because it surfaces live util%/temperature that
+//!    DXGI can't.
+//! 2. AMD via `rocm-smi --showmeminfo vram --json` (Linux). Windows
+//!    AMD doesn't ship `rocm-smi.exe`, so the DXGI step below covers
+//!    it.
+//! 3. **Windows-only:** DXGI via `IDXGIFactory1::EnumAdapters1` —
+//!    static adapter name + dedicated VRAM + shared system memory
+//!    for AMD / Intel / and the rare NVIDIA-without-nvidia-smi.exe
+//!    stripped-install case. No live metrics (DXGI doesn't expose
+//!    them); host pane renders `—` for util/temp on this path.
+//! 4. Apple Silicon Metal via `system_profiler SPDisplaysDataType
 //!    -json` (macOS).
-//! 4. Fallback: `CpuOnly` — the supervisor still runs, just without
-//!    a GPU memory line in `status`.
+//! 5. Vulkan fallback (`vulkaninfo --summary`) — Linux Vulkan-only
+//!    AMD or Intel Arc machines without rocm-smi. Reports adapter
+//!    names only; surfaces under `Unknown`.
+//! 6. Final fallback: `CpuOnly` — supervisor still runs.
 
 pub mod amd;
+#[cfg(windows)]
+pub mod dxgi;
 pub mod metal;
 pub mod nvidia;
 pub mod vulkan;
@@ -136,6 +149,16 @@ pub fn probe() -> GpuInfo {
   if let Some(info) = amd::probe() {
     return info;
   }
+  // Windows-only: DXGI fills the AMD / Intel slot that `rocm-smi`
+  // doesn't reach. Also catches NVIDIA on stripped Windows installs
+  // where `nvidia-smi.exe` isn't on PATH. Static memory totals only —
+  // no live util/temp.
+  #[cfg(windows)]
+  {
+    if let Some(info) = dxgi::probe() {
+      return info;
+    }
+  }
   if let Some(info) = metal::probe() {
     return info;
   }
@@ -164,7 +187,16 @@ pub fn probe() -> GpuInfo {
 pub fn refresh_active(prev: &GpuInfo) -> Option<GpuInfo> {
   match prev {
     GpuInfo::Nvidia { .. } => nvidia::probe(),
+    // On Windows, `GpuInfo::Amd` is always DXGI-sourced (no
+    // `rocm-smi.exe` ships) — DXGI data is static, so per-tick
+    // refresh would just re-emit the same snapshot. Return None so
+    // the sampler preserves what it already has and skips the
+    // (failing) `rocm-smi` subprocess spawn. On Linux this still
+    // routes through `amd::probe` for live util/temp.
+    #[cfg(unix)]
     GpuInfo::Amd { .. } => amd::probe(),
+    #[cfg(windows)]
+    GpuInfo::Amd { .. } => None,
     GpuInfo::CpuOnly | GpuInfo::AppleMetal { .. } | GpuInfo::Unknown { .. } => None,
   }
 }
