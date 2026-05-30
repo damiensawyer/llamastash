@@ -329,16 +329,13 @@ impl ProcessControl for WindowsProcessControl {
     //    behavior.
     // `raw_handle()` is inherent on `tokio::process::Child` on
     // Windows; no trait import needed.
-    let process_handle = child.raw_handle().ok_or_else(|| {
-      std::io::Error::new(
-        std::io::ErrorKind::Other,
-        "spawned child has no raw handle (already reaped?)",
-      )
-    })?;
+    let process_handle = child
+      .raw_handle()
+      .ok_or_else(|| std::io::Error::other("spawned child has no raw handle (already reaped?)"))?;
     // SAFETY: `process_handle` was just returned by tokio for a live
     // child; `job.0` is a valid job handle from CreateJobObjectW.
-    let ok = unsafe { AssignProcessToJobObject(job.0, process_handle as _) };
-    if ok == 0 {
+    let assigned = unsafe { AssignProcessToJobObject(job.0, process_handle as _) };
+    if assigned == 0 {
       return Err(std::io::Error::last_os_error());
     }
 

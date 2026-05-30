@@ -341,7 +341,34 @@ fn available_bytes(path: &Path) -> Option<u64> {
   Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn available_bytes(path: &Path) -> Option<u64> {
+  use std::os::windows::ffi::OsStrExt;
+  use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+  let wide: Vec<u16> = path
+    .as_os_str()
+    .encode_wide()
+    .chain(std::iter::once(0))
+    .collect();
+  let mut avail: u64 = 0;
+  // SAFETY: `wide` is NUL-terminated UTF-16; `avail` is a writable u64
+  // the kernel populates with bytes-available-to-caller (honors quotas).
+  let ok = unsafe {
+    GetDiskFreeSpaceExW(
+      wide.as_ptr(),
+      &mut avail as *mut u64,
+      std::ptr::null_mut(),
+      std::ptr::null_mut(),
+    )
+  };
+  if ok == 0 {
+    return None;
+  }
+  Some(avail)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn available_bytes(_path: &Path) -> Option<u64> {
   None
 }
@@ -1198,12 +1225,19 @@ mod tests {
 
   #[test]
   fn precheck_disk_passes_when_root_is_huge() {
-    assert!(precheck_disk(Path::new("/"), 1024).is_ok());
+    // temp_dir() resolves to a valid filesystem root on both Unix
+    // (`/tmp`) and Windows (`%TEMP%`), so the `available_bytes` probe
+    // returns a real number on every platform — `Path::new("/")` is
+    // not a valid root on Windows and would have GetDiskFreeSpaceExW
+    // fail, masking the precheck signal.
+    let probe = std::env::temp_dir();
+    assert!(precheck_disk(&probe, 1024).is_ok());
   }
 
   #[test]
   fn precheck_disk_fails_when_needed_exceeds_available() {
-    let err = precheck_disk(Path::new("/"), u64::MAX / 2).unwrap_err();
+    let probe = std::env::temp_dir();
+    let err = precheck_disk(&probe, u64::MAX / 2).unwrap_err();
     assert!(matches!(err, DownloadError::InsufficientDisk { .. }));
   }
 

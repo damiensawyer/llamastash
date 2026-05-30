@@ -488,6 +488,8 @@ mod tests {
       assert_eq!(detected, OsFamily::Linux);
     } else if cfg!(target_os = "macos") {
       assert_eq!(detected, OsFamily::MacOs);
+    } else if cfg!(target_os = "windows") {
+      assert_eq!(detected, OsFamily::Windows);
     } else {
       assert_eq!(detected, OsFamily::Other);
     }

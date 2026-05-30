@@ -142,11 +142,17 @@ pub fn abbreviate_with_home(path: &Path) -> String {
 }
 
 fn trailing_path_label(path: &Path, keep_segments: usize) -> String {
+  // Only Normal components contribute to the label — RootDir on Unix
+  // (`/`) and RootDir+Prefix on Windows (`\`, `C:`) would otherwise
+  // count as a segment and produce `…/m/x` instead of `m/x` for
+  // `Path::new("/m/x")` on Windows.
   let parts: Vec<String> = path
     .components()
-    .filter_map(|comp| comp.as_os_str().to_str())
-    .filter(|part| !part.is_empty() && *part != "/")
-    .map(ToOwned::to_owned)
+    .filter_map(|comp| match comp {
+      std::path::Component::Normal(s) => s.to_str().map(ToOwned::to_owned),
+      _ => None,
+    })
+    .filter(|part| !part.is_empty())
     .collect();
   if parts.is_empty() {
     return abbreviate_with_home(path);

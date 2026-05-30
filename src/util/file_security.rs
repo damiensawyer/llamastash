@@ -42,15 +42,15 @@ pub fn set_owner_only_dacl(path: &Path) {
   let mut sd_ptr: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
   // SAFETY: SDDL is a NUL-terminated UTF-16 string; sd_ptr receives a
   // freshly-allocated security descriptor we LocalFree below.
-  let ok = unsafe {
+  let built = unsafe {
     ConvertStringSecurityDescriptorToSecurityDescriptorW(
       sddl.as_ptr(),
-      SDDL_REVISION_1 as u32,
+      SDDL_REVISION_1,
       &mut sd_ptr,
       std::ptr::null_mut(),
     )
   };
-  if ok == 0 {
+  if built == 0 {
     log::warn!(
       "could not build security descriptor for {}: {}",
       path.display(),
@@ -66,8 +66,8 @@ pub fn set_owner_only_dacl(path: &Path) {
   // SAFETY: sd_ptr is a valid SD from the call above; path_w is
   // NUL-terminated UTF-16; SetFileSecurityW reads both and returns
   // BOOL.
-  let ok = unsafe { SetFileSecurityW(path_w.as_ptr(), DACL_SECURITY_INFORMATION, sd_ptr) };
-  if ok == 0 {
+  let applied = unsafe { SetFileSecurityW(path_w.as_ptr(), DACL_SECURITY_INFORMATION, sd_ptr) };
+  if applied == 0 {
     log::warn!(
       "could not apply owner-only DACL to {}: {}",
       path.display(),

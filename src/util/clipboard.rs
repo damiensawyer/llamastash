@@ -206,7 +206,17 @@ mod tests {
 
   #[test]
   fn which_on_path_finds_cat_but_not_a_made_up_name() {
-    assert!(which_on_path("cat").is_some());
+    // Pick a binary every CI/dev box guarantees on PATH for the host
+    // OS. Unix has `cat`; Windows has `cmd.exe` (resolved via the
+    // PATHEXT-aware `which` crate without the .exe suffix).
+    // `which_on_path` checks `dir.join(bin).is_file()` verbatim — it
+    // doesn't append `.exe` or walk PATHEXT — so the Windows probe
+    // must name the file as it lives on disk.
+    #[cfg(unix)]
+    let present = "cat";
+    #[cfg(windows)]
+    let present = "cmd.exe";
+    assert!(which_on_path(present).is_some());
     assert!(which_on_path("nonexistent-tool-9f3a-llamastash").is_none());
   }
 

@@ -201,6 +201,14 @@ fn try_flock_exclusive(file: &File) -> io::Result<FlockOutcome> {
 /// contract as POSIX `flock`. The kernel releases the lock when the
 /// HANDLE closes — including via `TerminateProcess` — so a stale
 /// pidfile left behind by an ungraceful daemon death is re-acquirable.
+///
+/// Unlike Unix `flock` (which is whole-file advisory), Windows
+/// `LockFileEx` is byte-range and mandatory: any handle that overlaps
+/// the locked range fails reads with `ERROR_LOCK_VIOLATION`. We lock
+/// a single byte at a sentinel offset (`SENTINEL_OFFSET`) well past
+/// the few bytes of ASCII PID at offset 0 so the daemon-status surface
+/// and the contended-acquire path can both `fs::read_to_string` the
+/// pidfile without tripping the lock.
 #[cfg(windows)]
 fn try_flock_exclusive(file: &File) -> io::Result<FlockOutcome> {
   use std::os::windows::io::AsRawHandle;
@@ -210,15 +218,16 @@ fn try_flock_exclusive(file: &File) -> io::Result<FlockOutcome> {
   use windows_sys::Win32::System::IO::OVERLAPPED;
 
   // SAFETY: `OVERLAPPED` is a plain-old-data struct; zero-init matches
-  // the documented "synchronous-only" use (no events, no hOffset/Offset
-  // wraparound concerns for the full-range lock below).
+  // the documented "synchronous-only" use (no events).
   let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+  // Place the 1-byte lock at offset 2^32-1 (~4 GiB). The pidfile is
+  // ~10 bytes; readers touching the actual content range are not
+  // affected. `OVERLAPPED.Anonymous.Anonymous` is a union access —
+  // safe because we only ever write to the struct variant (never the
+  // Pointer variant) on this code path.
+  overlapped.Anonymous.Anonymous.Offset = u32::MAX;
+  overlapped.Anonymous.Anonymous.OffsetHigh = 0;
 
-  // Lock the full file range. `MAXDWORD` for both high and low DWORDs
-  // covers any conceivable pidfile content (pidfile is one line of
-  // ASCII; the range is intentionally larger than the file so the lock
-  // is a single-file-scope mutex).
-  const MAXDWORD: u32 = u32::MAX;
   // SAFETY: handle is borrowed from `file` (lives as long as the call);
   // `&mut overlapped` is a writable OVERLAPPED the kernel reads/writes.
   let ok = unsafe {
@@ -226,8 +235,8 @@ fn try_flock_exclusive(file: &File) -> io::Result<FlockOutcome> {
       file.as_raw_handle() as _,
       LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
       0,
-      MAXDWORD,
-      MAXDWORD,
+      1, // nNumberOfBytesToLockLow — lock a single sentinel byte
+      0, // nNumberOfBytesToLockHigh
       &mut overlapped as *mut _,
     )
   };

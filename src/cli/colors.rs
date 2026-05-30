@@ -408,6 +408,13 @@ mod tests {
     assert!(collapsed.contains("foo"));
   }
 
+  // Unix-only: drives `collapse_home` via `$HOME`. Windows resolves the
+  // home directory through `%USERPROFILE%` / `FOLDERID_Profile`, not
+  // `$HOME`, so the env-var override below has no effect there and the
+  // test is not portable. The behavior under test (substring-safe
+  // prefix matching) is shared cross-platform — only the env surface
+  // differs.
+  #[cfg(unix)]
   #[test]
   fn collapse_home_substitutes_tilde_and_leaves_other_paths_alone() {
     // EnvGuard holds the cross-module mutex and restores HOME (plus
