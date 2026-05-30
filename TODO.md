@@ -104,7 +104,7 @@ Two release tracks:
 - [x] **IP**: **R1 launch promotion** — telling the world about v0.0.1.
   - [ ] Release blog.
   - [ ] Social promotion — research an approach for max reach.
-- [ ] **IP**: Agent run UAT
+- [x] **IP**: Agent run UAT
 - [x] ~~**Windows AMD GPU detection.**~~ — DXGI-based probe (`src/gpu/dxgi.rs`) added in the GPU chain between AMD-rocm and Metal. Surfaces adapter name + dedicated VRAM + shared-system memory for AMD / Intel / NVIDIA-without-nvidia-smi.exe on Windows. Static data only — no live util%/temp/per-PID VRAM (DXGI API doesn't expose them). See [`docs/architecture.md §GPU detection`](docs/architecture.md#gpu-detection) for full coverage matrix. ADLX / NVML / IGCL for live metrics is the remaining gap, tracked below.
 - [ ] Verify in WIndows
   - `llamastash daemon start` (the `actual start_detached_with_exe` path, not `cargo test`) on Win11. Confirm supervisor pumps reach Ready when the daemon was launched via
