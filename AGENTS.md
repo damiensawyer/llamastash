@@ -148,7 +148,7 @@ cargo run                                # opens the TUI against the same daemon
 cargo run -- daemon stop
 ```
 
-Attach surface: clients read `$XDG_STATE_HOME/llamastash/runtime.json` (mode `0600`) to discover the daemon's control-plane URL + bearer token. Override the state directory with `LLAMASTASH_STATE_DIR=/path` for side-by-side daemons, or use `LLAMASTASH_IPC_URL` + `LLAMASTASH_IPC_TOKEN` (both required together) for clients that don't want to read runtime.json. If wedged, deleting `runtime.json` and `daemon.pid` in the state dir is safe — next `daemon start` rebinds clean.
+Attach surface: clients read `$XDG_STATE_HOME/llamastash/runtime.json` (mode `0600`) to discover the daemon's control-plane URL + bearer token. The file is `{"schema_version":1,"ipc_url":"http://127.0.0.1:<port>","ipc_token":"<bearer>","started_at_unix":<ts>,"daemon_pid":<pid>}` — the URL/token live under `ipc_url` / `ipc_token`. Note that under a `LLAMASTASH_STATE_DIR` override the file sits directly in that dir (no `llamastash/` subdir). Override the state directory with `LLAMASTASH_STATE_DIR=/path` for side-by-side daemons, or use `LLAMASTASH_IPC_URL` + `LLAMASTASH_IPC_TOKEN` (both required together) for clients that don't want to read runtime.json. If wedged, deleting `runtime.json` and `daemon.pid` in the state dir is safe — next `daemon start` rebinds clean.
 
 For full path isolation (e.g. integration tests, the maintainer UAT command, side-by-side daemon experiments), pair `LLAMASTASH_STATE_DIR` with `LLAMASTASH_CONFIG_DIR`, `LLAMASTASH_CACHE_DIR`, and `HF_HOME` so state, config, cache/logs, and the HF cache all redirect together. Each variable is a verbatim override; empty values are treated as unset. See `docs/usage.md §Environment variables`.
 

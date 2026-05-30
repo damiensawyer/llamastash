@@ -155,13 +155,22 @@ pub async fn handle(args: PresetsArgs, cli: &Cli, config: &Config) -> CliResult 
         .call("presets_save", Some(Value::Object(payload)))
         .await
         .map_err(CliExit::from_client_error)?;
-      let replaced = body.get("replaced").map(|v| !v.is_null()).unwrap_or(false);
-      let verb = if replaced { "replaced" } else { "saved" };
+      // The daemon returns the previous preset (params + name) under
+      // `replaced`, or null when this was a fresh save. Pass that through
+      // verbatim in `--json` so a caller can audit exactly what it
+      // overwrote (usage.md "reports `replaced: <old-params>`"), rather
+      // than collapsing it to a bare bool.
+      let replaced_row = body.get("replaced").cloned().unwrap_or(Value::Null);
+      let verb = if replaced_row.is_null() {
+        "saved"
+      } else {
+        "replaced"
+      };
       if as_json {
         let out = json!({
           "action": "save",
           "name": name,
-          "replaced": replaced,
+          "replaced": replaced_row,
           "model": row.name(),
         });
         println!("{}", pretty_json(&out));

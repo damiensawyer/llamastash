@@ -6,6 +6,11 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Fixed
 
+- **`presets save --json` surfaces the overwritten preset.** It reported
+  `replaced: true` (a bare bool) while the docs promise `replaced:
+  <old-params>`; the daemon already returned the previous preset, so the
+  CLI now passes it through (the old `{name, params}` object, or `null` on a
+  fresh save) — callers can audit exactly what they overwrote.
 - **Quant label reads from `general.file_type`, not a byte-weighted tensor
   scan.** A big-vocab model whose Q6_K token-embedding outweighed its Q4_K
   body mislabelled in `list` / `show` / `/api/tags` (a `Q4_K_M` gemma read as
