@@ -293,6 +293,10 @@ jobs:
         # Same intent for the AUR packager (publish-aur-source / publish-aur-bin).
         run: python3 deployment/aur/packager_test.py
 
+      - name: Scoop packager.py unit tests
+        # Same intent for the Scoop bucket packager (publish-scoop).
+        run: python3 deployment/scoop/packager_test.py
+
       - name: uat — R4 audit (release build never ships --features uat)
         # The shipped binary on crates.io / Homebrew must not carry the
         # maintainer-only `uat` Cargo feature. The release workflow may

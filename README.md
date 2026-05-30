@@ -46,6 +46,9 @@ yay -S llamastash       # source build
 
 # From crates.io (any platform with a Rust toolchain)
 cargo install llamastash
+
+# Windows via Scoop bucket
+scoop bucket add llamastash https://github.com/llamastash/scoop-llamastash && scoop install llamastash
 ```
 
 Then run `llamastash init` — the interactive wizard installs `llama-server` for your hardware, downloads a starter GGUF, writes a tuned config, and smoke-launches it.

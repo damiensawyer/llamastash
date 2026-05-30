@@ -595,6 +595,106 @@ jobs:
           echo "::error::tap push failed after 3 attempts; inspect manually"
           exit 1
 
+  publish-scoop:
+    name: publish scoop manifest
+    needs: [create-release, publish-shasums]
+    runs-on: ubuntu-latest
+    # Pre-release tags don't touch the bucket repo; mirror publish-homebrew.
+    if: needs.create-release.outputs.is_prerelease == 'false'
+    env:
+      RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
+      RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.create-release.outputs.tag }}
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: sha-*
+          merge-multiple: true
+          path: sha-stash
+
+      - name: extract Windows sha256
+        id: shas
+        shell: bash
+        run: |
+          set -euo pipefail
+          f="sha-stash/llamastash-${RELEASE_VERSION}-x86_64-pc-windows-msvc.zip.sha256"
+          if [ ! -f "$f" ]; then
+            echo "::error::missing sha256 sidecar for Windows zip: $f" >&2
+            exit 1
+          fi
+          sha=$(awk '{print $1; exit}' "$f")
+          echo "sha_x86_64_windows=${sha}" >>"$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: render scoop manifest
+        env:
+          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+          SHA_X86_64_WINDOWS: ${{ steps.shas.outputs.sha_x86_64_windows }}
+        run: |
+          set -euo pipefail
+          python3 deployment/scoop/packager.py \
+            "$RELEASE_VERSION" \
+            deployment/scoop/llamastash.json.template \
+            llamastash.json \
+            "$SHA_X86_64_WINDOWS"
+
+      - name: jq validate manifest is well-formed JSON
+        # Cheap safety net so a template typo that breaks JSON shape doesn't
+        # ship a broken manifest to the bucket.
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y jq
+          jq -e . llamastash.json >/dev/null
+
+      - name: clone + push bucket (token via GIT_ASKPASS, retry on non-fast-forward)
+        env:
+          GH_BUMP_TOKEN: ${{ secrets.GH_BUMP_TOKEN }}
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_BUMP_TOKEN:-}" ]; then
+            echo "::error::GH_BUMP_TOKEN secret is unset; cannot push to scoop bucket"
+            exit 1
+          fi
+
+          askpass_dir=$(mktemp -d)
+          cat >"$askpass_dir/askpass.sh" <<'ASKPASS'
+          #!/bin/sh
+          printf '%s\n' "$GH_BUMP_TOKEN"
+          ASKPASS
+          chmod +x "$askpass_dir/askpass.sh"
+          export GIT_ASKPASS="$askpass_dir/askpass.sh"
+
+          git config --global user.email "release-bot@users.noreply.github.com"
+          git config --global user.name  "llamastash-release-bot"
+          git config --global credential.helper ""
+
+          git clone "https://x-access-token@github.com/llamastash/scoop-llamastash.git" --branch main scoop
+          cp llamastash.json scoop/bucket/llamastash.json
+          cd scoop
+          git add bucket/llamastash.json
+          if git diff-index --quiet HEAD; then
+            echo "bucket already up to date for ${RELEASE_TAG}; nothing to commit"
+            exit 0
+          fi
+          git commit -m "chore(manifest): bump llamastash to ${RELEASE_TAG}"
+
+          for attempt in 1 2 3; do
+            if git push origin main; then
+              exit 0
+            fi
+            echo "push attempt ${attempt} failed; pulling --rebase and retrying"
+            git pull --rebase origin main
+            sleep $((attempt * 5))
+          done
+          echo "::error::bucket push failed after 3 attempts; inspect manually"
+          exit 1
+
   publish-site:
     name: publish site install.sh mirror
     needs: [create-release, publish-shasums]

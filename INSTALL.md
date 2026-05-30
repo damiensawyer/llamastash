@@ -85,7 +85,14 @@ Or pin a specific release:
 & ([scriptblock]::Create((irm https://llamastash.dev/install.ps1))) -Version v0.0.2 -AddToPath
 ```
 
-A Scoop manifest scaffold lives at `deployment/scoop/llamastash.json`; bucket publication is on the roadmap (`scoop install <raw-url>` works ad hoc in the meantime).
+### Option 8 — Scoop (Windows)
+
+```powershell
+scoop bucket add llamastash https://github.com/llamastash/scoop-llamastash
+scoop install llamastash
+```
+
+The bucket repo at [`llamastash/scoop-llamastash`](https://github.com/llamastash/scoop-llamastash) is auto-published on every tag by the `publish-scoop` job in `.github/workflows/release.yml` — same shape as the Homebrew tap publication. `scoop update llamastash` picks up new releases automatically. Scoop downloads the Windows `.zip` from the GitHub Release referenced by the manifest, SHA-256-verifies it, and shims `llamastash.exe` onto the user PATH. The manifest template stays in this repo at `deployment/scoop/llamastash.json.template` so updates are visible in `git log` here, not just on the bucket side.
 
 ### Platform notes
 
