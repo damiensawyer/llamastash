@@ -125,6 +125,38 @@ impl Quant {
     }
   }
 
+  /// Map `general.file_type` (the `LLAMA_FTYPE` enum picked at quantization
+  /// time) to the coarse quant family it names. This is the value
+  /// llama.cpp's filename convention is built from — a `*-Q4_K_M.gguf` file
+  /// carries `file_type = 15` — so it is the authoritative quant label.
+  /// Prefer it over the `dominant_quant` tensor scan, whose by-bytes tally a
+  /// large Q6_K token-embedding skews on big-vocab models (a Q4_K_M gemma
+  /// would otherwise read as `Q6_K`). Returns `None` for the IQ*/TQ*/`GUESSED`
+  /// ftypes whose enum values are less stable across llama.cpp versions, so
+  /// the caller falls back to the tensor scan for those.
+  ///
+  /// Note this is a *different* enum from [`Self::from_ggml_tag`], which maps
+  /// per-tensor GGML type tags (e.g. tag 14 is `Q6_K`, ftype 14 is `Q4_K_S`).
+  pub fn from_file_type(ftype: u32) -> Option<Self> {
+    use Quant::*;
+    Some(match ftype {
+      0 => F32,
+      1 => F16,
+      2 => Q4_0,
+      3 => Q4_1,
+      7 => Q8_0,
+      8 => Q5_0,
+      9 => Q5_1,
+      10 | 21 => Q2_K, // Q2_K, Q2_K_S
+      11..=13 => Q3_K, // Q3_K_S / Q3_K_M / Q3_K_L
+      14..=15 => Q4_K, // Q4_K_S / Q4_K_M
+      16..=17 => Q5_K, // Q5_K_S / Q5_K_M
+      18 => Q6_K,
+      32 => BF16,
+      _ => return None,
+    })
+  }
+
   /// (`elements_per_block`, `bytes_per_block`) for this quant. Returns
   /// (1, 2) as a conservative default for `Unknown` so estimators don't
   /// divide by zero.
@@ -262,7 +294,14 @@ pub fn summarise(header: &GgufHeader) -> ModelMetadata {
   let total_parameters = parameter_count(header, arch_key);
   let parameter_label = total_parameters.and_then(label_for_param_count);
 
-  let quant = dominant_quant(&header.tensors);
+  // Prefer the file's declared quant family (`general.file_type`, the value
+  // llama.cpp's filename convention is built from) over a dominant-by-bytes
+  // tensor scan; the scan mislabels big-vocab models whose Q6_K token
+  // embedding outweighs a Q4_K body (a Q4_K_M gemma would read as Q6_K).
+  let quant = header
+    .u64(&["general.file_type"])
+    .and_then(|ft| Quant::from_file_type(ft as u32))
+    .unwrap_or_else(|| dominant_quant(&header.tensors));
   let mode_hint = infer_mode_hint(header, arch_key);
   let reasoning_hint = infer_reasoning_hint(header);
   let weights_bytes = {
@@ -340,9 +379,12 @@ fn label_for_param_count(count: u64) -> Option<String> {
   Some((*label).to_string())
 }
 
-/// The most byte-significant quant across weight tensors. Mirrors the
-/// convention of llama.cpp's filename labels (which name the dominant K-quant
-/// even though norm tensors stay F32).
+/// The most byte-significant quant across weight tensors. Used as a
+/// **fallback** when `general.file_type` is absent or maps to an
+/// unstable IQ*/TQ* enum value (see [`Quant::from_file_type`], which is
+/// preferred because it matches llama.cpp's filename labels). On
+/// big-vocab models a large Q6_K token-embedding can outweigh a Q4_K
+/// body here, so this is a best-effort label, not authoritative.
 fn dominant_quant(tensors: &[TensorInfo]) -> Quant {
   if tensors.is_empty() {
     return Quant::Unknown(0);
@@ -597,6 +639,26 @@ mod tests {
       .build();
     let m = parse(bytes);
     assert!(m.reasoning_hint);
+  }
+
+  #[test]
+  fn from_file_type_maps_quant_families() {
+    use Quant::*;
+    // K-quant mixes collapse to their family — this is what fixes a
+    // Q4_K_M gemma reading as Q6_K (file_type 15 → Q4_K).
+    assert_eq!(Quant::from_file_type(15), Some(Q4_K)); // Q4_K_M
+    assert_eq!(Quant::from_file_type(14), Some(Q4_K)); // Q4_K_S
+    assert_eq!(Quant::from_file_type(11), Some(Q3_K)); // Q3_K_S
+    assert_eq!(Quant::from_file_type(13), Some(Q3_K)); // Q3_K_L
+    assert_eq!(Quant::from_file_type(17), Some(Q5_K)); // Q5_K_M
+    assert_eq!(Quant::from_file_type(10), Some(Q2_K));
+    assert_eq!(Quant::from_file_type(18), Some(Q6_K));
+    assert_eq!(Quant::from_file_type(7), Some(Q8_0));
+    assert_eq!(Quant::from_file_type(0), Some(F32));
+    assert_eq!(Quant::from_file_type(32), Some(BF16));
+    // IQ*/TQ*/GUESSED fall back to the tensor scan.
+    assert_eq!(Quant::from_file_type(30), None); // IQ4_XS
+    assert_eq!(Quant::from_file_type(1024), None); // GUESSED
   }
 
   #[test]

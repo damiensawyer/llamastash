@@ -6,6 +6,12 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Fixed
 
+- **Quant label reads from `general.file_type`, not a byte-weighted tensor
+  scan.** A big-vocab model whose Q6_K token-embedding outweighed its Q4_K
+  body mislabelled in `list` / `show` / `/api/tags` (a `Q4_K_M` gemma read as
+  `Q6_K`). The label now comes from the file's declared `general.file_type`
+  (the value llama.cpp's filename convention uses), falling back to the
+  dominant-tensor scan only when it's absent or an unstable IQ*/TQ* enum.
 - **`logs` and `stop` accept a model-name reference.** Both only resolved a
   `<launch_id>` or port, so `logs qwen` / `stop gemma` failed with "no
   running launch matches" even though `start` / `show` / `presets` /
