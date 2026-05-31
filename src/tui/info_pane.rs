@@ -23,6 +23,7 @@ const LABEL_SERVER: &str = "server  ";
 const LABEL_MODELS: &str = "models  ";
 const LABEL_RUNNING: &str = "running ";
 const LABEL_PROXY: &str = "proxy   ";
+const LABEL_PORT: &str = "port    ";
 
 /// Render the Daemon info panel into `area`. The block title is
 /// `Daemon`; inner content is five label-prefixed rows (daemon,
@@ -75,13 +76,14 @@ fn proxy_row<'a>(app: &'a App, palette: &'a Palette) -> Line<'a> {
 }
 
 fn daemon_row<'a>(app: &'a App, _budget: usize, palette: &'a Palette) -> Line<'a> {
-  // Layout: `port 48134  pid 1234  up 3h12m`. The panel title is
+  // Layout: `port    48134  pid 1234  up 3h12m`. The panel title is
   // already "Daemon", so a leading `daemon  ` label would just
   // repeat it. The full control-plane URL is loopback-only and the
   // host half is always `127.0.0.1`, so we surface the port (the
-  // only operator-relevant chunk) directly. `port`, `pid`, and `up`
-  // render in the panel's label colour; numeric values render in
-  // text colour.
+  // only operator-relevant chunk) directly. `port` is padded to
+  // LABEL_WIDTH so its value column lines up with the other rows;
+  // `port`, `pid`, and `up` render in the panel's label colour and
+  // numeric values render in text colour.
   let port_val = app
     .daemon_info
     .ipc_url
@@ -100,7 +102,7 @@ fn daemon_row<'a>(app: &'a App, _budget: usize, palette: &'a Palette) -> Line<'a
   };
 
   Line::from(vec![
-    Span::styled("port ", palette.label_style()),
+    Span::styled(LABEL_PORT, palette.label_style()),
     Span::styled(port_val, palette.text_style()),
     Span::styled("  pid ", palette.label_style()),
     Span::styled(pid_val, palette.text_style()),
@@ -676,8 +678,8 @@ mod tests {
     let rows = render_lines(&app);
     let daemon_row = rows.iter().find(|r| r.contains("port ")).unwrap();
     assert!(
-      daemon_row.contains("port 48134"),
-      "expected `port 48134` chunk, got: {daemon_row:?}"
+      daemon_row.contains("port    48134"),
+      "expected `port    48134` chunk (label padded to LABEL_WIDTH), got: {daemon_row:?}"
     );
     assert!(
       !daemon_row.contains("127.0.0.1"),
@@ -706,8 +708,8 @@ mod tests {
     let rows = render_lines(&app);
     let daemon_row = rows.iter().find(|r| r.contains("port ")).unwrap();
     assert!(
-      daemon_row.contains("port —"),
-      "expected `port —` placeholder, got: {daemon_row:?}"
+      daemon_row.contains("port    —"),
+      "expected `port    —` placeholder (label padded to LABEL_WIDTH), got: {daemon_row:?}"
     );
   }
 
