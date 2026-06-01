@@ -189,16 +189,29 @@ LlamaStash spawns the unmodified upstream `llama-server`. Three suites track wha
 
 Each cell below is **decode tok/s / TTFT ms** on the `chat_turn` workload (50-token prompt → 64 tokens decode). LlamaStash matches raw `llama-server` within ≤1% in normalized mode on every platform. Re-run on your hardware: `make bench-end-to-end` (Suite B) or `make bench-overhead` (Suite A).
 
-### AMD APU - Linux (Ryzen AI Max+ 395 / Radeon 8060S 128GB unified, llama.cpp build `9245 (b39a7bf1b)`)
+![LlamaStash vs raw llama-server vs LM Studio vs Ollama — decode tok/s across AMD APU, Apple M1, NVIDIA RTX 3050 Ti (defaults mode, log scale)](https://raw.githubusercontent.com/llamastash/llamastash/main/assets/charts/00-hero-all-hardware.png)
 
-| Tool               | small (E2B Q4) |     mid (31B Q4) | large_dense (27B Q8) | large_moe (35B-A3B Q8) | Engine notes                 |
-| ------------------ | -------------: | ---------------: | -------------------: | ---------------------: | ---------------------------- |
-| **LlamaStash**     |  **86.9 / 51** |        9.8 / 467 |        **7.4 / 417** |         **42.6 / 181** | local HIP/ROCm               |
-| raw `llama-server` |      86.0 / 51 |        9.9 / 468 |            7.4 / 414 |             42.7 / 186 | local HIP/ROCm               |
-| LM Studio 2.16.0   | **91.1** / 187 | **11.6** / 1 477 |      **7.9** / 1 274 |             37.0 / 683 | small=ROCm, mid/large=Vulkan |
-| Ollama 0.24.0      |     50.4 / 223 |      4.8 / 1 092 |          2.6 / 1 745 |             12.1 / 476 | bundled                      |
+### AMD APU - Linux (Ryzen AI Max+ 395 / Radeon 8060S 128GB unified, system ROCm 7.2.3, llama.cpp build `b9440 (e6123e208)`)
 
-Curated report with seven findings: [`linux-amd-apu-final-report.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/linux-amd-apu-final-report.md).
+`chat_turn` `normalized` mode, decode tok/s / TTFT ms. One bench JSON per row (no averaging).
+
+| Tool               | small (E2B Q4) |  mid (31B Q4) | large_dense (27B Q8) | large_moe (35B-A3B Q8) | Engine notes                           |
+| ------------------ | -------------: | ------------: | -------------------: | ---------------------: | -------------------------------------- |
+| **LlamaStash**     |  **82.1 / 51** | **9.9 / 468** |        **7.5 / 406** |         **42.3 / 178** | local HIP/ROCm                         |
+| raw `llama-server` |      81.0 / 51 |     9.9 / 466 |            7.5 / 406 |             43.1 / 185 | local HIP/ROCm                         |
+| LM Studio 2.18.0   |     91.1 / 187 |    — (crash¹) |           — (crash¹) |             — (crash¹) | bundled ROCm 6.4 vendor (see footnote) |
+| Ollama 0.24.0      |     50.8 / 224 |    4.8 / 1096 |           2.6 / 1750 |             12.2 / 484 | bundled                                |
+
+¹ LM Studio's bundled ROCm vendor libraries (v6.4) abort in `ggml_cuda_error` during backend init on `gfx1151` (Strix Halo) across all LMS-shipped runtimes. System ROCm 7.2.3 loads the same models cleanly via raw `llama-server`, so this is an LMS vendor-bundle limitation. LMS Vulkan numbers are in the [benchmark blog](https://deepu.tech/benchmarking-llamastash) and in the [final report](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/linux-amd-apu-final-report.md).
+
+#### AMD APU — Vulkan addendum (LlamaStash vs LM Studio, 2026-06-01)
+
+| Tool             | small (E2B Q4) |   mid (31B Q4) | large_dense (27B Q8) | large_moe (35B-A3B Q8) |
+| ---------------- | -------------: | -------------: | -------------------: | ---------------------: |
+| **LlamaStash**   | **101.2 / 55** | **10.8 / 671** |            7.5 / 196 |          **50.7 / 72** |
+| LM Studio 2.18.0 |     93.6 / 191 |     7.1 / 2307 |        **8.0 / 801** |             38.4 / 227 |
+
+Same backend (Vulkan b9440 / `vulkan-avx2@2.18.0`), same GGUF bytes. raw `llama-server` and Ollama omitted: the wrapper-overhead claim already covered by the HIP table; Ollama mainline has no Vulkan support.
 
 ### NVIDIA - Linux (RTX 3050 Ti, 4 GiB VRAM, llama.cpp build `b9360`)
 

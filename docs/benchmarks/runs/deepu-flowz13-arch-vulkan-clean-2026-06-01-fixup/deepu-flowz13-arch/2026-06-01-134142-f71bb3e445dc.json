@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "suite": "end_to_end",
+  "host": {
+    "host_id": "deepu-flowz13-arch",
+    "os": "Linux 7.0.7-arch2-1",
+    "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "cpu_threads": 32,
+    "ram_gb": 121.49,
+    "gpu_backend": "vulkan",
+    "gpu_name": null,
+    "gpu_vram_gb": null
+  },
+  "provenance": {
+    "llamastash_version": "llamastash 0.0.1",
+    "llama_server_version": "version: 9245 (b39a7bf1b)",
+    "llama_cpp_commit": "b39a7bf1b",
+    "ollama_version": "ollama version is 0.24.0",
+    "ollama_llama_cpp_commit": null,
+    "lmstudio_version": "error: Script not found \"version\"",
+    "python_version": "3.12.13"
+  },
+  "started_at_utc": "2026-06-01T13:41:42.626087+00:00",
+  "finished_at_utc": "2026-06-01T13:41:49.865824+00:00",
+  "git_sha": "f71bb3e445dc0e855b27c0220a83577896cfd2bc",
+  "comment": "",
+  "cells": [
+    {
+      "tool": "llamastash",
+      "model": {
+        "size_class": "small",
+        "hf_repo": "gemma-4-E2B-it-GGUF",
+        "hf_file": "gemma-4-E2B-it-Q4_K_M.gguf",
+        "sha256": "6c950d754366dd8b372fd17a40497ba5f130a46d833b4c5bccc9f6bb6382ce1e",
+        "bytes": 3427877696
+      },
+      "mode": "defaults",
+      "workload": "chat_turn",
+      "argv_recorded": [
+        "/usr/bin/llamastash",
+        "start",
+        "--llama-server",
+        "/mnt/work/Workspace/llms/llama.cpp/build-vulkan/bin/llama-server",
+        "/mnt/work/lmstudio-models/lmstudio-community/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q4_K_M.gguf"
+      ],
+      "reps": [
+        {
+          "rep_index": 0,
+          "is_warmup": true,
+          "ttft_ms": 73.90825194306672,
+          "ttft_ms_first_request": null,
+          "ttft_ms_post_load": null,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "prompt_tps": 649.4538666260912,
+          "decode_tps": 98.7257551251954,
+          "e2e_latency_ms": 712.0396080426872,
+          "rss_peak_mb": null,
+          "gpu_mem_peak_mb": null,
+          "error": null,
+          "truncated": true
+        },
+        {
+          "rep_index": 1,
+          "is_warmup": false,
+          "ttft_ms": 58.10663499869406,
+          "ttft_ms_first_request": null,
+          "ttft_ms_post_load": null,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "prompt_tps": 826.0674534169599,
+          "decode_tps": 100.06550891222147,
+          "e2e_latency_ms": 687.6941990340129,
+          "rss_peak_mb": null,
+          "gpu_mem_peak_mb": null,
+          "error": null,
+          "truncated": true
+        },
+        {
+          "rep_index": 2,
+          "is_warmup": false,
+          "ttft_ms": 60.101279988884926,
+          "ttft_ms_first_request": null,
+          "ttft_ms_post_load": null,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "prompt_tps": 798.6518757816318,
+          "decode_tps": 99.88674983718752,
+          "e2e_latency_ms": 690.8155649434775,
+          "rss_peak_mb": null,
+          "gpu_mem_peak_mb": null,
+          "error": null,
+          "truncated": true
+        },
+        {
+          "rep_index": 3,
+          "is_warmup": false,
+          "ttft_ms": 55.336441029794514,
+          "ttft_ms_first_request": null,
+          "ttft_ms_post_load": null,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "prompt_tps": 867.4211623793371,
+          "decode_tps": 99.84081396744706,
+          "e2e_latency_ms": 686.3409120123833,
+          "rss_peak_mb": null,
+          "gpu_mem_peak_mb": null,
+          "error": null,
+          "truncated": true
+        },
+        {
+          "rep_index": 4,
+          "is_warmup": false,
+          "ttft_ms": 56.673637009225786,
+          "ttft_ms_first_request": null,
+          "ttft_ms_post_load": null,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "prompt_tps": 846.9546429883471,
+          "decode_tps": 98.85827185022632,
+          "e2e_latency_ms": 693.9495960250497,
+          "rss_peak_mb": null,
+          "gpu_mem_peak_mb": null,
+          "error": null,
+          "truncated": true
+        }
+      ],
+      "summary": {
+        "ttft_ms_mean": 57.55449825664982,
+        "ttft_ms_stddev_pct": 3.544728770079831,
+        "prompt_tps_mean": 834.773783641569,
+        "prompt_tps_stddev_pct": 3.5230916873133733,
+        "decode_tps_mean": 99.6628361417706,
+        "decode_tps_stddev_pct": 0.5469074288176241,
+        "e2e_latency_ms_mean": 689.7000680037308,
+        "rss_peak_mb_max": null,
+        "gpu_mem_peak_mb_max": null,
+        "measured_rep_count": 4,
+        "error_rep_count": 0
+      },
+      "unfair_knobs": [],
+      "determinism": {
+        "prompt_sha256": null,
+        "first_n_token_ids_sha256": null,
+        "n_compared_tokens": 0,
+        "determinism_mismatch": false,
+        "notes": ""
+      },
+      "notes": ""
+    }
+  ],
+  "notes": ""
+}

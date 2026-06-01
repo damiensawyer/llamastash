@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "suite": "end_to_end",
+  "host": {
+    "host_id": "deepu-flowz13-arch",
+    "os": "Linux 7.0.7-arch2-1",
+    "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "cpu_threads": 32,
+    "ram_gb": 121.49,
+    "gpu_backend": "rocm",
+    "gpu_name": "AMD Radeon 8060S Graphics",
+    "gpu_vram_gb": 4.0
+  },
+  "provenance": {
+    "llamastash_version": "llamastash 0.0.1",
+    "llama_server_version": "version: 9245 (b39a7bf1b)",
+    "llama_cpp_commit": "b39a7bf1b",
+    "ollama_version": "ollama version is 0.24.0",
+    "ollama_llama_cpp_commit": null,
+    "lmstudio_version": "\u001b[38;5;166m   __   __  ___  ______          ___        _______   ____\u001b[0m",
+    "python_version": "3.12.13"
+  },
+  "started_at_utc": "2026-06-01T11:23:23.026740+00:00",
+  "finished_at_utc": "2026-06-01T11:23:26.326110+00:00",
+  "git_sha": "591187f77dc425f20806a32ace6c2e9e597f38bb",
+  "comment": "",
+  "cells": [
+    {
+      "tool": "lmstudio",
+      "model": {
+        "size_class": "small",
+        "hf_repo": "gemma-4-E2B-it-GGUF",
+        "hf_file": "gemma-4-E2B-it-Q4_K_M.gguf",
+        "sha256": "6c950d754366dd8b372fd17a40497ba5f130a46d833b4c5bccc9f6bb6382ce1e",
+        "bytes": 3427877696
+      },
+      "mode": "defaults",
+      "workload": "chat_turn",
+      "argv_recorded": [],
+      "reps": [],
+      "summary": {
+        "ttft_ms_mean": null,
+        "ttft_ms_stddev_pct": null,
+        "prompt_tps_mean": null,
+        "prompt_tps_stddev_pct": null,
+        "decode_tps_mean": null,
+        "decode_tps_stddev_pct": null,
+        "e2e_latency_ms_mean": null,
+        "rss_peak_mb_max": null,
+        "gpu_mem_peak_mb_max": null,
+        "measured_rep_count": 0,
+        "error_rep_count": 0
+      },
+      "unfair_knobs": [],
+      "determinism": {
+        "prompt_sha256": null,
+        "first_n_token_ids_sha256": null,
+        "n_compared_tokens": 0,
+        "determinism_mismatch": false,
+        "notes": ""
+      },
+      "notes": "driver-error: DriverError: lmstudio preflight chat for 'google/gemma-4-e2b' returned HTTP 400: {\n    \"error\": {\n        \"message\": \"Failed to load model \\\"google/gemma-4-e2b\\\". Error: Error loading model.\",\n        \"type\": \"invalid_request_error\",\n        \"param\": \"model\",\n        \"code\": null\n"
+    }
+  ],
+  "notes": ""
+}

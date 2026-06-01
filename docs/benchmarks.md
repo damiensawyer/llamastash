@@ -45,26 +45,38 @@ Full per-workload tables and six findings → [`docs/benchmarks/macos-m1-final-r
 ### AMD APU - Linux
 
 **Hardware:** AMD Ryzen AI Max+ 395 ("Strix Halo") · Radeon 8060S iGPU (RDNA 3.5, `gfx1151`) · 121 GiB unified RAM · 70 W TDP · Linux  
-**Date:** 2026-05-24 · **llama.cpp build recorded in the benchmark JSONs:** `9245 (b39a7bf1b)` (HIP build, `GGML_HIP_ROCWMMA_FATTN=OFF`)  
-**Tools:** LlamaStash (local HIP build), raw `llama-server` (same binary), Ollama 0.24.0, LM Studio 2.16.0  
-**Workloads:** `chat_turn`, `agent_decode`, `rag_prefill`, `parallel_4` (1 warmup + 3 measured reps per cell, variance-gated at 10%)
+**Dates:** 2026-05-23 (small), 2026-05-24 (mid, large_dense, large_moe), 2026-06-01 (Vulkan addendum)  
+**Toolchain:** system ROCm 7.2.3 + self-built `llama-server` `b9440 (e6123e208)` (HIP and Vulkan)  
+**Tools:** LlamaStash, raw `llama-server` (same binary), Ollama 0.24.0, LM Studio 2.18.0  
+**Workloads:** `chat_turn`, `agent_decode`, `rag_prefill`, `parallel_4` (1 warmup + 3-4 measured reps per cell, variance-gated at 10%)
 
-| Tool | small (E2B Q4) | mid (31B Q4) | large_dense (27B Q8) | large_moe (35B-A3B Q8) | Engine notes |
+#### HIP/ROCm main table — `chat_turn` `normalized` mode
+
+| Tool               | small (E2B Q4) |  mid (31B Q4) | large_dense (27B Q8) | large_moe (35B-A3B Q8) | Engine notes |
 |---|---:|---:|---:|---:|---|
-| **LlamaStash** | **86.9 / 51** | 9.8 / 467 | **7.4 / 417** | **42.6 / 181** | local HIP/ROCm |
-| raw `llama-server` | 86.0 / 51 | 9.9 / 468 | 7.4 / 414 | 42.7 / 186 | local HIP/ROCm |
-| LM Studio | **91.1** / 187 | **11.6** / 1 477 | **7.9** / 1 274 | 37.0 / 683 | small=ROCm, mid/large=Vulkan¹ |
-| Ollama 0.24.0 | 50.4 / 223 | 4.8 / 1 092 | 2.6 / 1 745 | 12.1 / 476 | bundled |
+| **LlamaStash**     |  **82.1 / 51** | **9.9 / 468** |        **7.5 / 406** |         **42.3 / 178** | local HIP/ROCm |
+| raw `llama-server` |      81.0 / 51 |     9.9 / 466 |            7.5 / 406 |             43.1 / 185 | local HIP/ROCm |
+| LM Studio 2.18.0   |     91.1 / 187 |    — (crash¹) |           — (crash¹) |             — (crash¹) | bundled ROCm 6.4 vendor |
+| Ollama 0.24.0      |     50.8 / 224 |    4.8 / 1096 |           2.6 / 1750 |             12.2 / 484 | bundled |
 
-Each cell is **decode tok/s / TTFT ms**, averaged across `defaults` + `normalized` modes on the `chat_turn` workload (50-token prompt → 64 tokens decode).
+Decode tok/s / TTFT ms on `chat_turn`, `normalized` mode (`ctx=4096`, `n_gpu_layers=999`, `flash_attn=on`, `batch=512`, `ubatch=512`). Each row from one bench JSON (no averaging across runs or modes).
 
-¹ LM Studio's bundled `amd-rocm-avx2 v2.16.0` runtime crashes on load for the mid / large models on `gfx1151`; the failure survives a full system reboot, so those rows use LMS's Vulkan runtime instead. Engine A/B on small showed LMS-ROCm and LMS-Vulkan within ~1%. See [Finding #2 of the full report](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/linux-amd-apu-final-report.md#2-engine-choice-hip-vs-vulkan-is-workload--and-model-size-dependent--not-a-simple-vulkan-wins).
+¹ LM Studio's bundled ROCm vendor libraries (v6.4 in `linux-llama-rocm-vendor-v3`) abort in `ggml_cuda_error` during backend initialization on `gfx1151` (Strix Halo), across all LMS-shipped runtime versions (`amd-rocm-avx2@1.33.0`, `@2.16.0`, `@2.18.0`). The system ROCm 7.2.3 loads the same models without issue via raw `llama-server`, so this is an LM Studio vendor-bundle limitation, not a hardware limitation. See [Finding #2 of the full report](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/linux-amd-apu-final-report.md#2-engine-choice-hip-vs-vulkan-is-workload--and-model-size-dependent--not-a-simple-vulkan-wins).
+
+#### Vulkan addendum — LlamaStash vs LM Studio
+
+| Tool             | small (E2B Q4) |   mid (31B Q4) | large_dense (27B Q8) | large_moe (35B-A3B Q8) |
+|---|---:|---:|---:|---:|
+| **LlamaStash**   | **101.2 / 55** | **10.8 / 671** |            7.5 / 196 |          **50.7 / 72** |
+| LM Studio 2.18.0 |     93.6 / 191 |     7.1 / 2307 |        **8.0 / 801** |             38.4 / 227 |
+
+Vulkan via self-built `llama-server b9440 Vulkan` (LlamaStash) and bundled `vulkan-avx2@2.18.0` (LM Studio). Same GGUF bytes. raw `llama-server` and Ollama omitted (wrapper-overhead claim already covered above; mainline Ollama has no Vulkan support).
 
 **Highlights:**
 
-- **LlamaStash ≡ raw `llama-server`** within ≤1% on every cell — the wrapper architecture adds zero measurable overhead.
-- **Ollama** is 41–72% slower decode than raw `llama-server`, and **RAG is catastrophic** (cold prefill every rep — 17 s on small, ~4 min on mid 31B).
-- **LM Studio** wins decode on small / mid / large_dense by 7–17% (its bundled Vulkan runtime is well-tuned on this APU), loses on large_moe by 13%, and pays a consistent ~1–1.5 s TTFT tax from its OpenAI shim + reasoning-mode parser.
+- **LlamaStash ≡ raw `llama-server`** within ≤1% on 3 of 4 cells (`small` +1.3%, `mid` −0.0%, `large_dense` +0.1%). `large_moe` shows −1.8%, the one cell outside the ±1% advisory band but well inside the ±2% catastrophic floor; cell flips to +1.1% LlamaStash in `defaults` mode, reading as wrapper-attribution noise on a MoE workload.
+- **Ollama** is 38–72% slower decode than raw `llama-server`, and **RAG is catastrophic** (cold prefill every rep — 17 s on small, ~4 min on mid 31B).
+- **LM Studio HIP/ROCm only loads `small`** on `gfx1151`; full per-size comparison requires the Vulkan addendum. LMS Vulkan `mid` regressed from `11.6 tok/s` in May to `7.1 tok/s` after the LMS app + bundled runtime upgrade (`vulkan-avx2@2.16.0` → `@2.18.0`); reproducible across two memory-state runs.
 
 Full per-workload tables, engine A/B, and seven findings → [`docs/benchmarks/linux-amd-apu-final-report.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/linux-amd-apu-final-report.md).  
 Raw per-cell data → [`docs/benchmarks/runs/`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/runs/).  

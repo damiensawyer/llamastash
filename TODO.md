@@ -114,6 +114,11 @@ Two release tracks:
   - `CTRL+BREAK` non-delivery to a real `llama-server.exe` (validates the `signal_graceful = signal_kill` decision under the actual workload).
   - Long-running daemon + repeated launch churn → check `Handle Count` in Task Manager Performance tab to confirm finding #1 in practice.
   - Scoop install from the live bucket: `scoop bucket add llamastash https://github.com/llamastash/scoop-llamastash; scoop install llamastash`.
+  - [x] Wrong ram and unified indicator '*' in Host panel. Init shows correct values. Both values should be derived via the same codepath. DRY.
+  - [ ] Shift + / (?) doesn't work
+  - [ ] VRAM load doesn't show up in Host panel on Windows AMD GPU. Check if the DXGI probe is correctly identifying the GPU and if the metrics sampler is correctly parsing the output.
+  - [ ] UI is slow and glitchy (needs more testing and hardening)
+  - [x] llamastash.exe fails to start from `init` (retest with an install, maybe due to cargo run)
 - [x] **IP**: Windows support including scoop — landed via [`docs/plans/2026-05-29-001-feat-windows-support-and-http-ipc-plan.md`](docs/plans/2026-05-29-001-feat-windows-support-and-http-ipc-plan.md) in 0.0.2. HTTP-loopback IPC unification, Job Object process control, LockFileEx + DACL hardening, .zip extraction, win-cpu/win-vulkan/win-cuda/win-hip asset routing, install.ps1, Scoop bucket auto-published via release.yml. See below for Windows follow-ups deferred from 0.0.2.
 - [x] **IP**: AUR package
 - [x] **IP**: Offer to update OpenCode and other supported tools (lets see what popular tools we can support) during `init`. Init should provide a multiselect of tools to choose (skip if none choosen) and then update the config for those tools to point to the proxy.

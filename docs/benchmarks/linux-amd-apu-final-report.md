@@ -1,5 +1,7 @@
 # R1 AMD-APU final bench report
 
+> **2026-06-01 update:** numbers in this report were the original 2026-05-24 run before the engine-mixing audit. The headline cross-tool cells for LlamaStash and raw `llama-server` (e.g. `small chat_turn 86.9 / 51`) average HIP and Vulkan engine paths into a single cell. The audited engine-clean tables are in [`docs/benchmarks.md`](../benchmarks.md#amd-apu---linux) and in the public post — they use single-source single-engine cells (HIP only for the main table, Vulkan only for the addendum). This report stays as the historical 2026-05-24 record, with the engine-A/B finding (#2 below) and the raw JSONs unchanged.
+
 **Hardware:** AMD Ryzen AI Max+ 395 ("Strix Halo") APU with Radeon 8060S iGPU (RDNA 3.5, `gfx1151`), 121 GiB unified RAM (4 GiB pinned VRAM partition + ≈96 GiB GTT), TDP 70 W steady (one mid-run blip to 90 W on the Qwen3.6-27B-Q8 dense run was confirmed benign by a clean 70 W re-run within ~1% of the mixed-power numbers).
 
 **Date:** 2026-05-24. Same hardware, same day, same local llama.cpp build recorded in the benchmark JSON provenance as `version: 9245 (b39a7bf1b)` for the LlamaStash + raw `llama-server` cells (HIP build, `GGML_HIP_ROCWMMA_FATTN=OFF` per the earlier empirical finding documented in `~/dotfiles/LLM-BENCH.md`).
