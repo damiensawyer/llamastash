@@ -206,10 +206,13 @@ async fn start_detached_honours_caller_supplied_paths() {
     .call("ping", None)
     .await
     .expect("ping detached child");
-  let _ = client
-    .call("shutdown", None)
-    .await
-    .expect("shutdown detached child");
+  // The detached child can tear down its listener before the shutdown
+  // response is fully observed on this side — kernel-level socket close
+  // races the in-process response flush. Treat the call as fire-and-
+  // forget; the real post-condition is that `runtime.json` disappears,
+  // which the poll loop below verifies. Mirrors the pattern used by
+  // `corrupt_state_json_is_quarantined_on_boot`.
+  let _ = client.call("shutdown", None).await;
 
   // Wait for the child to tear down its runtime.json so the temp dir
   // cleanup doesn't race a still-running process.
