@@ -19,7 +19,7 @@ use crate::cli::cli_args::{Cli, DaemonAction};
 use crate::config::Config;
 use crate::daemon::discovery_task::DiscoveryOptions;
 use crate::daemon::{
-  existing_daemon_pid, run_foreground, start_detached, DaemonOptions, StartOutcome,
+  existing_daemon_pid, run_foreground, runtime_file, start_detached, DaemonOptions, StartOutcome,
 };
 use crate::discovery::known_caches::{default_set, RootResolution};
 use crate::ipc::{Client, ClientError};
@@ -203,6 +203,13 @@ fn force_stop_via_pid(pid: i32, attach_dir: &std::path::Path) -> Result<()> {
   let deadline = Instant::now() + Duration::from_secs(3);
   while Instant::now() < deadline {
     if existing_daemon_pid(attach_dir).is_none() {
+      // A hard kill skips the daemon's own shutdown cleanup, so the
+      // `runtime.json` it published outlives it — pointing at a now-dead
+      // control-plane URL. Remove it here so the next CLI/TUI launch
+      // sees "no daemon" and auto-spawns cleanly instead of trying the
+      // stale URL. (The client also self-heals via the PID lock, but
+      // leaving clean state is tidier and avoids a wasted connect.)
+      runtime_file::remove(attach_dir);
       println!(
         "{}",
         crate::cli::colors::success(&format!("daemon: stopped (pid {pid})"))
@@ -945,6 +952,11 @@ mod tests {
 
   #[test]
   fn env_model_paths_splits_on_platform_separator() {
+    // Serialize against the other `LLAMASTASH_MODEL_PATHS` /
+    // `LLAMASTASH_NO_SCAN` tests: process-global env vars race across
+    // parallel test threads (one test's set_var landing between
+    // another's remove_var and read), which flaked CI on Windows.
+    let _env = crate::cli::test_lock::serialize();
     // Drive the production helper directly. Two paths joined with the
     // platform separator must round-trip. `join_paths` is the inverse
     // of `split_paths`, so this also documents the public contract
@@ -963,6 +975,7 @@ mod tests {
 
   #[test]
   fn env_model_paths_unset_returns_empty() {
+    let _env = crate::cli::test_lock::serialize();
     let prev = std::env::var_os("LLAMASTASH_MODEL_PATHS");
     std::env::remove_var("LLAMASTASH_MODEL_PATHS");
     let parsed = env_model_paths();
@@ -1014,6 +1027,7 @@ mod tests {
 
   #[test]
   fn env_no_scan_accepts_documented_truthy_values() {
+    let _env = crate::cli::test_lock::serialize();
     // `1` is what the README documents; `true`/`yes`/`on` ride along
     // because every other LLAMASTASH_* bool in this binary accepts
     // them, and a script that already uses LLAMASTASH_OFFLINE=true

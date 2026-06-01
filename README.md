@@ -51,6 +51,8 @@ cargo install llamastash
 scoop bucket add llamastash https://github.com/llamastash/scoop-llamastash && scoop install llamastash
 ```
 
+_Windows: 64-bit Windows 10 1809+ / Windows 11, PowerShell 5.1+, [Windows Terminal](https://aka.ms/terminal) recommended for the TUI; the bundled `llama-server` needs the VC++ 2015–2022 Redistributable (x64). See [INSTALL.md](INSTALL.md#platform-notes)._
+
 Then run `llamastash init` — the interactive wizard installs `llama-server` for your hardware, downloads a starter GGUF, writes a tuned config, and smoke-launches it.
 
 ## Quickstart

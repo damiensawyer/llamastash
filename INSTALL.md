@@ -110,7 +110,14 @@ xattr -d com.apple.quarantine ./llamastash
 
 **Arch Linux.** Prefer the AUR (`yay -S llamastash` / `llamastash-bin` / `llamastash-git`) so updates ride pacman. The install-script path also works if you'd rather not pull in an AUR helper.
 
-**Windows.** x86_64 Windows 11 is first-class as of 0.0.2. Use `irm https://llamastash.dev/install.ps1 | iex` (Option 7) or download the `.zip` from the GitHub Release directly. GPU detection covers NVIDIA (CUDA build via init wizard) and discrete-GPU Vulkan fallback; AMD-on-Windows detection is on the roadmap (shows "GPU detection unavailable" in 0.0.2). `aarch64-pc-windows-msvc` is also on the roadmap. The daemon's state dir is `%LOCALAPPDATA%\llamastash`; `runtime.json` + `state.json` get a Protected DACL restricting them to the file owner.
+**Windows.** x86_64 Windows 11 is first-class as of 0.0.2. Use `irm https://llamastash.dev/install.ps1 | iex` (Option 7) or download the `.zip` from the GitHub Release directly. GPU detection covers NVIDIA (CUDA build via init wizard), AMD and Intel (vendor + VRAM via DXGI/D3D12, incl. the unified-memory flag for APUs), and a discrete-GPU Vulkan fallback; live GPU utilization/temperature are not yet sampled on Windows (the host panel shows `—`). `aarch64-pc-windows-msvc` is on the roadmap. The daemon's state dir is `%LOCALAPPDATA%\llamastash`; `runtime.json` + `state.json` get a Protected DACL restricting them to the file owner.
+
+**Windows requirements.**
+
+- **OS:** 64-bit Windows 11, or Windows 10 version 1809 (build 17763) or newer. x86_64 only.
+- **Terminal:** a ConPTY/VT-capable terminal. **Windows Terminal is recommended** for the TUI (best truecolor + Unicode glyph rendering); the classic console window (`conhost.exe`, the default host for `cmd.exe` and Windows PowerShell) works on 1809+.
+- **PowerShell:** Windows PowerShell **5.1** (preinstalled on Windows 10/11) or **PowerShell 7+** — used by the `irm … | iex` installer and day-to-day commands.
+- **Visual C++ Redistributable:** the bundled `llama-server` (Vulkan/CUDA) links against the **Microsoft Visual C++ 2015–2022 Redistributable (x64)**. If model launches crash immediately with `0xC0000005` (access violation in `MSVCP140.dll`/`VCRUNTIME140.dll`), install/update it: `winget install --id Microsoft.VCRedist.2015+.x64`.
 
 ### Post-install
 

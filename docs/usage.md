@@ -10,6 +10,18 @@ This is the reference for the non-interactive CLI surface and the TUI keybinding
 
 **Model references.** `start`, `stop`, `logs`, `presets`, `favorites` all accept the same model reference: an absolute path, a canonical model id, or a case-insensitive substring of the file name or its parent directory. Ambiguous references exit `66` with a disambiguation list.
 
+## Platform requirements
+
+LlamaStash runs on Linux (x86_64, aarch64), macOS (Apple Silicon, Intel), and Windows (x86_64).
+
+**Windows.**
+
+- **OS:** 64-bit Windows 11, or Windows 10 version 1809 (build 17763) or newer.
+- **Terminal:** **Windows Terminal is recommended** for the TUI — it renders truecolor themes and the Unicode status/severity glyphs correctly. The legacy console (`conhost.exe`, the default window for `cmd.exe` and Windows PowerShell) is supported on 1809+ via ConPTY/VT, but glyph and color fidelity are lower. The `?` help overlay, theme cycling, and all chords work in either host.
+- **PowerShell:** Windows PowerShell 5.1 (preinstalled) or PowerShell 7+.
+- **Visual C++ Redistributable:** the bundled `llama-server` needs the Microsoft Visual C++ 2015–2022 Redistributable (x64). If `start` reaches `error` immediately with a `0xC0000005` crash in `MSVCP140.dll`/`VCRUNTIME140.dll`, install/update it with `winget install --id Microsoft.VCRedist.2015+.x64`.
+- **GPU host panel:** vendor, VRAM total, and the unified-memory marker are detected via DXGI/D3D12. Live GPU utilization and temperature are not sampled on Windows yet, so those rows show `—`.
+
 ## Configuration
 
 LlamaStash reads `$XDG_CONFIG_HOME/llamastash/config.yaml` on Linux (fallback `~/.config/llamastash/config.yaml`), `~/Library/Application Support/llamastash/config.yaml` on macOS, and `%APPDATA%\llamastash\config\config.yaml` on Windows. A fully-annotated sample lives at [`config.example.yaml`](../config.example.yaml) — copy it to the path above and edit.

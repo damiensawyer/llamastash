@@ -881,10 +881,28 @@ impl KeyMap {
   /// Look up the action triggered by `(key, mods)` in the supplied
   /// focus. Returns `None` when nothing matches.
   pub fn action_for(&self, focus: Focus, key: KeyCode, mods: KeyModifiers) -> Option<Action> {
+    // SHIFT normalization for character keys: a shifted character
+    // (`?` = Shift+/, `P` = Shift+p) already encodes the shift in the
+    // character itself, and terminals disagree on whether SHIFT is
+    // *also* reported. Windows Terminal sets `KeyModifiers::SHIFT` for
+    // shifted symbols like `?`, while most Unix terminals report
+    // `NONE` — so a binding registered as `(Char('?'), NONE)` never
+    // matched the Windows `(Char('?'), SHIFT)` event and `?` failed to
+    // open the help overlay. Mask SHIFT off `Char` keys on both the
+    // event and the binding so the match is platform-independent;
+    // non-char chords (Shift+Tab→BackTab, Shift+Enter) keep SHIFT.
+    let norm = |k: KeyCode, m: KeyModifiers| {
+      if matches!(k, KeyCode::Char(_)) {
+        m.difference(KeyModifiers::SHIFT)
+      } else {
+        m
+      }
+    };
+    let want = norm(key, mods);
     self.per_focus.get(&focus).and_then(|rows| {
       rows
         .iter()
-        .find(|b| b.key == key && b.mods == mods)
+        .find(|b| b.key == key && norm(b.key, b.mods) == want)
         .map(|b| b.action)
     })
   }

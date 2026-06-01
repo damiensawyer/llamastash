@@ -4321,6 +4321,22 @@ mod tests {
   }
 
   #[test]
+  fn question_mark_with_shift_modifier_opens_help() {
+    // Windows Terminal reports `?` (Shift+/) as `(Char('?'), SHIFT)`,
+    // unlike most Unix terminals which report `NONE`. The `?` binding
+    // is registered with `NONE`, so without SHIFT-normalization in
+    // `action_for` the overlay never opened on Windows. Regression
+    // guard for that platform discrepancy.
+    let mut app = App::new(Default::default());
+    assert!(!app.show_help);
+    pump_input(&mut app, key(KeyCode::Char('?'), KeyModifiers::SHIFT));
+    assert!(
+      app.show_help,
+      "`?` arriving with the SHIFT modifier (Windows) must open help"
+    );
+  }
+
+  #[test]
   fn ctrl_s_on_running_row_stages_stop_confirm_popup() {
     let mut app = App::new(Default::default());
     app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];

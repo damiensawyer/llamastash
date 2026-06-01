@@ -60,6 +60,19 @@ pub async fn connect_or_spawn(cli: &Cli, config: &Config) -> Result<Client, CliE
     .ok_or_else(|| CliExit::new(DAEMON_UNREACHABLE, "could not resolve state directory"))?;
   match Client::connect(&attach_dir).await {
     Ok(client) => {
+      // `runtime.json` exists — but the file alone isn't proof of life.
+      // An unclean exit (crash, `daemon stop --force`, power loss) leaves
+      // it behind pointing at a dead control-plane URL, and
+      // `Client::connect` deliberately doesn't probe reachability. The
+      // authoritative liveness signal is the PID lock, which the OS
+      // releases the instant the daemon dies (Unix `flock`, Windows
+      // `LockFileEx`). If nothing holds it, the daemon is gone: clear the
+      // stale file and auto-spawn a fresh one rather than handing back a
+      // client whose every call fails with a cryptic connect error.
+      if existing_daemon_pid(&attach_dir).is_none() {
+        runtime_file::remove(&attach_dir);
+        return spawn_and_attach(cli, config, &attach_dir).await;
+      }
       // Reconcile against the running daemon: if the user passed
       // `--llama-server` (or any other binary-resolving flag) on
       // *this* invocation but the daemon was started earlier
@@ -81,32 +94,43 @@ pub async fn connect_or_spawn(cli: &Cli, config: &Config) -> Result<Client, CliE
           stale_daemon_message(pid, &attach_dir),
         ));
       }
-      if cli.no_spawn {
-        return Err(CliExit::new(
-          DAEMON_UNREACHABLE,
-          format!(
-            "daemon: not running and --no-spawn was passed (state dir: {})",
-            attach_dir.display()
-          ),
-        ));
-      }
-      let opts = build_spawn_options(cli, config)?;
-      let attach_for_poll = opts.state_dir.clone();
-      match start_detached(opts) {
-        Ok(StartOutcome::RanToCompletion) | Ok(StartOutcome::AlreadyRunning(_)) => {
-          // Brief settle window: start_detached returns once
-          // runtime.json appears, but a second client opening at the
-          // same instant occasionally trips an EAGAIN. One retry is
-          // enough.
-          await_socket(&attach_for_poll, Duration::from_secs(2)).await
-        }
-        Err(e) => Err(CliExit::new(
-          DAEMON_UNREACHABLE,
-          format!("daemon: auto-spawn failed: {e}"),
-        )),
-      }
+      spawn_and_attach(cli, config, &attach_dir).await
     }
     Err(other) => Err(CliExit::from_client_error(other)),
+  }
+}
+
+/// Spawn a detached daemon and return a client attached to it. Shared
+/// by both the "no `runtime.json`" path and the self-heal path that
+/// fires when a stale `runtime.json` outlived its daemon. Honors
+/// `--no-spawn` (agent scripts opting into deterministic failure).
+async fn spawn_and_attach(
+  cli: &Cli,
+  config: &Config,
+  attach_dir: &std::path::Path,
+) -> Result<Client, CliExit> {
+  if cli.no_spawn {
+    return Err(CliExit::new(
+      DAEMON_UNREACHABLE,
+      format!(
+        "daemon: not running and --no-spawn was passed (state dir: {})",
+        attach_dir.display()
+      ),
+    ));
+  }
+  let opts = build_spawn_options(cli, config)?;
+  let attach_for_poll = opts.state_dir.clone();
+  match start_detached(opts) {
+    Ok(StartOutcome::RanToCompletion) | Ok(StartOutcome::AlreadyRunning(_)) => {
+      // Brief settle window: start_detached returns once runtime.json
+      // appears, but a second client opening at the same instant
+      // occasionally trips an EAGAIN. One retry is enough.
+      await_socket(&attach_for_poll, Duration::from_secs(2)).await
+    }
+    Err(e) => Err(CliExit::new(
+      DAEMON_UNREACHABLE,
+      format!("daemon: auto-spawn failed: {e}"),
+    )),
   }
 }
 
