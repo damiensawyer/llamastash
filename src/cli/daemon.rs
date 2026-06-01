@@ -19,7 +19,7 @@ use crate::cli::cli_args::{Cli, DaemonAction};
 use crate::config::Config;
 use crate::daemon::discovery_task::DiscoveryOptions;
 use crate::daemon::{
-  existing_daemon_pid, run_foreground, start_detached, DaemonOptions, StartOutcome,
+  existing_daemon_pid, run_foreground, runtime_file, start_detached, DaemonOptions, StartOutcome,
 };
 use crate::discovery::known_caches::{default_set, RootResolution};
 use crate::ipc::{Client, ClientError};
@@ -203,6 +203,13 @@ fn force_stop_via_pid(pid: i32, attach_dir: &std::path::Path) -> Result<()> {
   let deadline = Instant::now() + Duration::from_secs(3);
   while Instant::now() < deadline {
     if existing_daemon_pid(attach_dir).is_none() {
+      // A hard kill skips the daemon's own shutdown cleanup, so the
+      // `runtime.json` it published outlives it — pointing at a now-dead
+      // control-plane URL. Remove it here so the next CLI/TUI launch
+      // sees "no daemon" and auto-spawns cleanly instead of trying the
+      // stale URL. (The client also self-heals via the PID lock, but
+      // leaving clean state is tidier and avoids a wasted connect.)
+      runtime_file::remove(attach_dir);
       println!(
         "{}",
         crate::cli::colors::success(&format!("daemon: stopped (pid {pid})"))
