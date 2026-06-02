@@ -111,7 +111,7 @@ try {
   try {
     Invoke-WebRequest -Uri $AssetUrl -OutFile $zipPath -UseBasicParsing
   } catch {
-    Exit-WithCode 1 "could not download $AssetName: $_"
+    Exit-WithCode 1 "could not download ${AssetName}: $_"
   }
 
   Write-Log 'downloading SHA256SUMS…'
@@ -122,8 +122,9 @@ try {
   }
 
   # Find the expected hex for our asset in SHA256SUMS — same shape as
-  # `sha256sum -c`: <64-hex-chars>  <filename>.
-  $expected = (Get-Content $sumsPath | Where-Object { $_ -match "\s$([regex]::Escape($AssetName))$" }) `
+  # `sha256sum -c`: <64-hex-chars>  <filename>, where the filename may carry a
+  # leading '*' binary-mode marker (sha256sum --binary / shasum -b).
+  $expected = (Get-Content $sumsPath | Where-Object { $_ -match "\s\*?$([regex]::Escape($AssetName))$" }) `
     -replace '^\s*([a-fA-F0-9]{64}).*$', '$1'
   if ($expected -eq '' -or $expected.Length -ne 64) {
     Exit-WithCode 2 "no SHA256SUMS entry found for $AssetName"
