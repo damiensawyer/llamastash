@@ -183,6 +183,8 @@ Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs
 - [Atomic, mode-checked config + state writes](FEATURES.md#atomic-mode-checked-config--state-writes) — `0600` final mode; corrupt state quarantined, not fatal.
 - [Side-by-side daemons](FEATURES.md#side-by-side-daemons) — isolated instances via `LLAMASTASH_*_DIR` (state / config / cache); each daemon publishes its own `runtime.json`.
 
+_**Note**: This is beta software. Rough edges are to be expected. Windows and macOS support is not as well-tested as Linux; Same goes for non-AMD GPUs. Please report issues if you hit them. The `llama-server` builds are unmodified upstream binaries; any bugs in them are out of scope for LlamaStash._
+
 ## Benchmarks
 
 LlamaStash spawns the unmodified upstream `llama-server`. Three suites track what that means in practice — **Suite A** asserts the wrapper adds no measurable overhead vs raw `llama-server`, **Suite B** compares LlamaStash-as-shipped against Ollama + LM Studio on the same hardware through their OpenAI-compatible endpoints, **Suite C** measures the proxy hop vs hitting `llama-server` directly (TTFT p50 +0.45 ms, decode unchanged). Full write-up + per-workload tables: [`docs/benchmarks.md`](docs/benchmarks.md).
