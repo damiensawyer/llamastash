@@ -172,7 +172,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.prepare-release.outputs.tag }}
 
@@ -192,7 +192,7 @@ jobs:
           RUST_BACKTRACE: 1
           TMPDIR: /tmp
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: uat-${{ matrix.label }}-${{ github.run_id }}
