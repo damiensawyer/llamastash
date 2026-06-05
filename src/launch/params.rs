@@ -474,12 +474,28 @@ pub fn compose(params: &LaunchParams, allocated_port: u16, backend: &str) -> Vec
   let device_value = match &params.knobs.device {
     Some(sel) => match backend {
       "nvidia" | "amd" => {
-        // Strip the backend prefix — llama-server expects a bare index.
-        let is_digit = |c: char| c.is_ascii_digit();
-        sel
-          .split_once(|c| !is_digit(c))
-          .map(|(_, idx)| idx.to_string())
-          .unwrap_or_else(|| sel.clone())
+        // Card-first format: "1:0" → extract card index before ':'.
+        // Legacy Nvidia0 / Amd0 format — strip prefix, keep trailing digits.
+        if let Some((card_idx, _)) = sel.split_once(':') {
+          card_idx.to_string()
+        } else {
+          let is_digit = |c: char| c.is_ascii_digit();
+          sel
+            .find(|c: char| !is_digit(c))
+            .map(|i| sel[i..].to_string())
+            .unwrap_or_else(|| sel.clone())
+        }
+      }
+      "unknown" => {
+        // Vulkan: extract card index from "card:driver" format.
+        // Since Step 1 deduplicates Vulkan cards away, this path
+        // is only reached for genuine Vulkan-only cards (e.g. Intel Arc).
+        // The card index matches the vulkan device index in those cases.
+        if let Some((card_idx, _)) = sel.split_once(':') {
+          card_idx.to_string()
+        } else {
+          sel.clone()
+        }
       }
       _ => sel.clone(),
     },

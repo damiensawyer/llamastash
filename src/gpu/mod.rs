@@ -485,11 +485,15 @@ fn resolve_device_id(
   device: &GpuDevice,
   pci_map: &Option<(std::collections::BTreeMap<String, String>, Vec<String>)>,
 ) -> String {
-  // Primary: the device's own PCI (already canonical from the probe).
   if let Some(pci) = &device.device_id {
-    return pci.clone();
+    // PCI bus addresses: "00000002:00.0" — contains ':' but doesn't
+    // start with "0x".
+    // vendor:device IDs: "0x10de:0x2216" — starts with "0x".
+    if pci.contains(':') && !pci.starts_with("0x") {
+      return pci.clone();
+    }
   }
-  // Fallback: lspci name lookup.
+  // Fall back to lspci name lookup (already existing fallback).
   pci_map
     .as_ref()
     .and_then(|(m, _)| m.get(&device.name))
