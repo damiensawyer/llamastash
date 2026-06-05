@@ -549,6 +549,29 @@ fn resolve_device_id(
     .unwrap_or_else(|| device.name.clone())
 }
 
+/// Normalize a GPU product name for cross-backend dedup when PCI
+/// resolution is unavailable.
+///
+/// Vulkan reports the same physical card under a decorated name —
+/// `vulkaninfo` appends a driver tag (`AMD Radeon AI PRO R9700 (RADV
+/// GFX1201)`) while `rocm-smi` reports the bare `AMD Radeon AI PRO
+/// R9700`. When lspci can't map both to one PCI address (the primary
+/// dedup key), the raw-name fallback in [`resolve_device_id`] never
+/// collapses them and a 0-VRAM Vulkan duplicate survives. Stripping any
+/// trailing parenthetical group and normalizing whitespace + case lets
+/// that fallback path still match.
+fn normalize_card_name(name: &str) -> String {
+  let base = match name.split_once('(') {
+    Some((head, _)) => head,
+    None => name,
+  };
+  base
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ")
+    .to_lowercase()
+}
+
 /// Enrich a list of devices with lspci PCI address lookups.
 ///
 /// For devices whose `device_id` is missing or looks like a
@@ -779,13 +802,16 @@ pub fn probe() -> GpuInfo {
   }
   for d in unknown_devices {
     // Skip Vulkan devices that match an already-seen card by PCI
-    // address (via lspci on Linux) or by name (fallback on
-    // macOS/Windows).
+    // address (via lspci on Linux) or by name. The PCI path is exact;
+    // when it's unavailable we fall back to a normalized-name match so
+    // a RADV-decorated Vulkan duplicate of a ROCm/CUDA card still
+    // collapses instead of surfacing as a phantom 0-VRAM device.
     let seen_id = resolve_device_id(&d, &lspci);
-    if all_devices
-      .iter()
-      .any(|seen| resolve_device_id(seen, &lspci) == seen_id)
-    {
+    let norm_name = normalize_card_name(&d.name);
+    let is_duplicate = all_devices.iter().any(|seen| {
+      resolve_device_id(seen, &lspci) == seen_id || normalize_card_name(&seen.name) == norm_name
+    });
+    if is_duplicate {
       continue;
     }
     all_devices.push(d);
@@ -898,6 +924,22 @@ fn devices_match(a: &[GpuDevice], b: &[GpuDevice]) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn normalize_card_name_strips_vulkan_driver_tag() {
+    // rocm-smi vs vulkaninfo names for the same physical card must
+    // normalize to the same key so the cross-backend dedup collapses
+    // the 0-VRAM Vulkan duplicate.
+    assert_eq!(
+      normalize_card_name("AMD Radeon AI PRO R9700 (RADV GFX1201)"),
+      normalize_card_name("AMD Radeon AI PRO R9700"),
+    );
+    // Distinct cards stay distinct.
+    assert_ne!(
+      normalize_card_name("NVIDIA GeForce RTX 3080"),
+      normalize_card_name("AMD Radeon AI PRO R9700"),
+    );
+  }
 
   #[test]
   fn cpu_only_is_not_gpu() {
