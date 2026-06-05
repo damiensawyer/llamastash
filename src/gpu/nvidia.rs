@@ -12,12 +12,12 @@
 
 use std::process::Command;
 
-use super::{run_with_timeout, GpuDevice, GpuInfo};
+use super::{run_with_timeout, GpuDevice};
 
 /// Run `nvidia-smi`. Returns `None` if the binary isn't on `$PATH`,
 /// its exit status is non-zero (no NVIDIA driver loaded), or the
 /// invocation exceeds the per-probe wall-clock deadline.
-pub fn probe() -> Option<GpuInfo> {
+pub fn probe_devices() -> Option<Vec<GpuDevice>> {
   let mut cmd = Command::new("nvidia-smi");
   cmd.args([
     "--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu",
@@ -32,11 +32,12 @@ pub fn probe() -> Option<GpuInfo> {
   if devices.is_empty() {
     return None;
   }
-  Some(GpuInfo::Nvidia { devices })
+  Some(devices)
 }
 
 /// Parse the `--format=csv,noheader,nounits` output. Exposed so unit
 /// tests can pin the format without spawning a subprocess.
+/// Each device is tagged with the "nvidia" backend.
 pub(crate) fn parse(stdout: &str) -> Vec<GpuDevice> {
   let mut out = Vec::new();
   for line in stdout.lines() {
@@ -58,6 +59,7 @@ pub(crate) fn parse(stdout: &str) -> Vec<GpuDevice> {
     let temperature_c = parts.get(4).and_then(|s| parse_optional_f32(s));
     out.push(GpuDevice {
       name,
+      backend: "nvidia".into(),
       total_memory_bytes: total_mib.saturating_mul(1024 * 1024),
       used_memory_bytes: used_mib.saturating_mul(1024 * 1024),
       utilization_pct,

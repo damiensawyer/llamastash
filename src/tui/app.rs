@@ -1196,6 +1196,19 @@ impl App {
       }
     }
     state.active_instances = active_count;
+    // Populate available device selectors from host metrics so the
+    // device picker cycles through actual cards instead of generic
+    // indices.
+    state.devices = self
+      .host_metrics
+      .devices
+      .as_ref()
+      .map(|ds| {
+        ds.iter()
+          .map(|d| format!("{} ({})", d.selector, d.name))
+          .collect()
+      })
+      .unwrap_or_default();
     Some(state)
   }
 

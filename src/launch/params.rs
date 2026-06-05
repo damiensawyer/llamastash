@@ -209,13 +209,14 @@ pub fn argvify(knobs: &TypedKnobs) -> Vec<OsString> {
       KnobField::UbatchSize => push_u32(&mut out, spec.canonical, knobs.ubatch_size),
       KnobField::RopeFreqScale => push_f32(&mut out, spec.canonical, knobs.rope_freq_scale),
       KnobField::Keep => push_u32(&mut out, spec.canonical, knobs.keep),
+      KnobField::Device => push_str(&mut out, spec.canonical, knobs.device.as_deref()),
     }
     // `ValueKind` is the source-of-truth for emission shape; sanity
     // check that our match handled the right kind.
     debug_assert!(
       matches!(
         spec.kind,
-        ValueKind::U32 | ValueKind::F32 | ValueKind::Bool | ValueKind::KvCacheType
+        ValueKind::U32 | ValueKind::F32 | ValueKind::Bool | ValueKind::KvCacheType | ValueKind::Str
       ),
       "ValueKind exhaustiveness drift"
     );
@@ -413,6 +414,7 @@ fn try_inherit_field(into: &mut TypedKnobs, from: &TypedKnobs, field: KnobField)
     KnobField::UbatchSize => copy_some(&mut into.ubatch_size, from.ubatch_size),
     KnobField::RopeFreqScale => copy_some(&mut into.rope_freq_scale, from.rope_freq_scale),
     KnobField::Keep => copy_some(&mut into.keep, from.keep),
+    KnobField::Device => copy_some_clone(&mut into.device, &from.device),
   }
 }
 
@@ -440,8 +442,12 @@ fn copy_some_clone(into: &mut Option<String>, from: &Option<String>) -> bool {
 /// `llama-server`. Caller passes the resolved listening port
 /// separately because allocation happens in the supervisor, not in
 /// `LaunchParams`.
-pub fn compose(params: &LaunchParams, allocated_port: u16) -> Vec<OsString> {
-  let knob_argv = argvify(&params.knobs);
+///
+/// `backend` is used to format the device selector correctly:
+/// for CUDA/HIP backends it emits just the numeric index
+/// (`"0"`, `"1"`), for Vulkan it emits `Vulkan0`, `Vulkan1` etc.
+pub fn compose(params: &LaunchParams, allocated_port: u16, backend: &str) -> Vec<OsString> {
+  let mut knob_argv = argvify(&params.knobs);
   let mut argv: Vec<OsString> = Vec::with_capacity(16 + knob_argv.len() + params.extras.len());
   argv.push("--host".into());
   argv.push("127.0.0.1".into());
@@ -462,6 +468,26 @@ pub fn compose(params: &LaunchParams, allocated_port: u16) -> Vec<OsString> {
   if let Some(ctx) = params.ctx {
     argv.push("-c".into());
     argv.push(ctx.to_string().into());
+  }
+  // Format the device selector: for CUDA/HIP it's a numeric index;
+  // for Vulkan it's `VulkanN`.
+  let device_value = match &params.knobs.device {
+    Some(sel) => match backend {
+      "nvidia" | "amd" => {
+        // Strip the backend prefix — llama-server expects a bare index.
+        let is_digit = |c: char| c.is_ascii_digit();
+        sel
+          .split_once(|c| !is_digit(c))
+          .map(|(_, idx)| idx.to_string())
+          .unwrap_or_else(|| sel.clone())
+      }
+      _ => sel.clone(),
+    },
+    None => String::new(),
+  };
+  if !device_value.is_empty() {
+    knob_argv.push("--device".into());
+    knob_argv.push(device_value.into());
   }
   argv.extend(knob_argv);
   // Defensive strip: refuse to pass loopback-breaking flags even if
@@ -511,7 +537,7 @@ mod tests {
   #[test]
   fn chat_mode_emits_canonical_argv_prefix() {
     let p = base_params();
-    let argv = strs(&compose(&p, 41100));
+    let argv = strs(&compose(&p, 41100, "nvidia"));
     let head: Vec<&str> = argv.iter().map(String::as_str).take(6).collect();
     assert_eq!(
       head,
@@ -533,7 +559,7 @@ mod tests {
   fn embedding_mode_adds_embeddings_flag() {
     let mut p = base_params();
     p.mode = LaunchMode::Embedding;
-    let argv = strs(&compose(&p, 41100));
+    let argv = strs(&compose(&p, 41100, "nvidia"));
     assert!(argv.iter().any(|a| a == "--embeddings"));
     assert!(!argv.iter().any(|a| a == "--reranking"));
   }
@@ -542,7 +568,7 @@ mod tests {
   fn rerank_mode_adds_reranking_flag() {
     let mut p = base_params();
     p.mode = LaunchMode::Rerank;
-    let argv = strs(&compose(&p, 41100));
+    let argv = strs(&compose(&p, 41100, "nvidia"));
     assert!(argv.iter().any(|a| a == "--reranking"));
   }
 
@@ -550,7 +576,7 @@ mod tests {
   fn reasoning_bundles_jinja_and_deepseek() {
     let mut p = base_params();
     p.reasoning = true;
-    let argv = strs(&compose(&p, 41100));
+    let argv = strs(&compose(&p, 41100, "nvidia"));
     assert!(argv.iter().any(|a| a == "--jinja"));
     let i = argv.iter().position(|a| a == "--reasoning-format").unwrap();
     assert_eq!(argv[i + 1], "deepseek");
@@ -560,7 +586,7 @@ mod tests {
   fn ctx_override_emits_dash_c() {
     let mut p = base_params();
     p.ctx = Some(32768);
-    let argv = strs(&compose(&p, 41100));
+    let argv = strs(&compose(&p, 41100, "nvidia"));
     let i = argv.iter().position(|a| a == "-c").unwrap();
     assert_eq!(argv[i + 1], "32768");
   }
@@ -568,7 +594,7 @@ mod tests {
   #[test]
   fn ctx_unset_omits_dash_c() {
     let p = base_params();
-    let argv = strs(&compose(&p, 41100));
+    let argv = strs(&compose(&p, 41100, "nvidia"));
     assert!(!argv.iter().any(|a| a == "-c"));
   }
 
@@ -589,6 +615,7 @@ mod tests {
       ubatch_size: Some(512),
       rope_freq_scale: Some(1.0),
       keep: Some(128),
+      device: None,
     };
     let argv = strs(&argvify(&knobs));
     assert_eq!(
@@ -681,7 +708,7 @@ mod tests {
     let mut p = base_params();
     p.knobs.n_gpu_layers = Some(99);
     p.extras = vec!["--rope-freq-base".into(), "10000".into()];
-    let argv = strs(&compose(&p, 41100));
+    let argv = strs(&compose(&p, 41100, "nvidia"));
     let ngl = argv.iter().position(|a| a == "--n-gpu-layers").unwrap();
     let rfb = argv.iter().position(|a| a == "--rope-freq-base").unwrap();
     assert!(ngl < rfb, "knobs must precede extras");
@@ -700,7 +727,7 @@ mod tests {
       OsString::from("--ssl-key-file"),
       OsString::from("/etc/key.pem"),
     ];
-    let argv = strs(&compose(&p, 41100));
+    let argv = strs(&compose(&p, 41100, "nvidia"));
     let host_count = argv.iter().filter(|a| *a == "--host").count();
     assert_eq!(host_count, 1, "only the bundled --host should remain");
     assert!(!argv.iter().any(|a| a == "0.0.0.0"));
@@ -717,7 +744,7 @@ mod tests {
     let mut p = base_params();
     p.knobs.n_gpu_layers = Some(99);
     p.extras = vec!["--n-gpu-layers".into(), "7".into()];
-    let argv = strs(&compose(&p, 41100));
+    let argv = strs(&compose(&p, 41100, "nvidia"));
     let positions: Vec<usize> = argv
       .iter()
       .enumerate()
@@ -732,7 +759,7 @@ mod tests {
   #[test]
   fn allocated_port_appears_after_port_flag() {
     let p = base_params();
-    let argv = strs(&compose(&p, 41200));
+    let argv = strs(&compose(&p, 41200, "nvidia"));
     let i = argv.iter().position(|a| a == "--port").unwrap();
     assert_eq!(argv[i + 1], "41200");
   }

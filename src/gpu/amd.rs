@@ -13,7 +13,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use super::{run_with_timeout, GpuDevice, GpuInfo};
+use super::{run_with_timeout, GpuDevice};
 
 /// rocm-smi argument variants to try, in order. Older ROCm releases
 /// (pre-5.4) may reject the combined four-flag form or emit non-JSON
@@ -44,7 +44,7 @@ const ROCM_SMI_ARG_VARIANTS: &[&[&str]] = &[
   &["--showmeminfo", "vram", "--json"],
 ];
 
-pub fn probe() -> Option<GpuInfo> {
+pub fn probe_devices() -> Option<Vec<GpuDevice>> {
   for args in ROCM_SMI_ARG_VARIANTS {
     let mut cmd = Command::new("rocm-smi");
     cmd.args(*args);
@@ -59,7 +59,10 @@ pub fn probe() -> Option<GpuInfo> {
     };
     let devices = parse(&stdout);
     if !devices.is_empty() {
-      return Some(GpuInfo::Amd { devices });
+      // Tag each device with the "amd" backend for multi-backend
+      // aggregation in `gpu::probe()`. The AMD probe is always the
+      // AMD source — no need to disambiguate.
+      return Some(devices);
     }
   }
   // Every variant produced either a process-spawn failure, non-zero
@@ -138,6 +141,7 @@ pub(crate) fn parse(stdout: &str) -> Vec<GpuDevice> {
         };
         out.push(GpuDevice {
           name: gpu_key.clone(),
+          backend: "amd".into(),
           total_memory_bytes,
           used_memory_bytes,
           utilization_pct,
