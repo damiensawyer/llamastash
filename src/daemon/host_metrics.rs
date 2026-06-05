@@ -12,6 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::gpu::Card;
 use serde::{Deserialize, Serialize};
 use sysinfo::{Components, CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 use tokio::sync::RwLock;
@@ -111,6 +112,12 @@ pub struct HostMetricsSnapshot {
   /// of re-deriving it from the backend string + UMA fields.
   #[serde(default)]
   pub unified: bool,
+  /// Card-first device list from [`crate::gpu::GpuInfo::cards()`].
+  /// Each card carries its available drivers. Used by the TUI device
+  /// picker to present physical cards first (pick the card, then pick
+  /// the driver when multiple are available).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cards: Option<Vec<Card>>,
 }
 
 impl HostMetricsSnapshot {
@@ -333,6 +340,7 @@ fn build_snapshot(sys: &System, components: &Components, info: GpuInfo) -> HostM
     uma_shared_total_bytes: agg.uma_shared_total,
     uma_shared_used_bytes: agg.uma_shared_used,
     unified: info.is_unified(),
+    cards: Some(info.cards()),
   }
 }
 

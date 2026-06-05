@@ -36,7 +36,7 @@ pub mod vulkan;
 use std::process::{Command, Output};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Wall-clock budget for a single vendor probe. A wedged GPU driver
 /// (nvidia-smi hang, ROCm reset, locked Vulkan loader) would otherwise
@@ -145,7 +145,7 @@ pub struct GpuDevice {
 /// A physical GPU card discovered across one or more drivers. Each
 /// card carries its available drivers so the TUI picker can present
 /// card-first (pick the card, then pick the driver for it).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Card {
   /// Stable physical identifier (PCI bus address on Linux/Windows,
   /// IOKit serial on macOS).
@@ -160,7 +160,7 @@ pub struct Card {
 }
 
 /// One driver backend for a physical card.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Driver {
   /// Backend label: "nvidia", "amd", "vulkan", "apple_metal".
   pub backend: String,

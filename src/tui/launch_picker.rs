@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use crate::config::TypedKnobs;
+use crate::gpu::Card;
 use crate::launch::flag_aliases::{KnobField, KV_CACHE_TYPES};
 use crate::launch::params::LayerLabel;
 
@@ -25,6 +26,30 @@ pub const CTX_PRESETS: &[u32] = &[2048, 4096, 8192, 16384, 32768, 65536, 131072]
 /// auto-select (which may split across all GPUs on Vulkan). A single-item
 /// list so cycle_through wraps back to `None` (reset) reliably.
 pub const DEVICE_PRESETS: &[&str] = &[""];
+
+/// Encode a card-first device selector as "card_index:driver_offset".
+/// When `driver_offset` is -1 the card has no drivers (unified GPU
+/// or single-driver card) so the user just sees the card name.
+pub fn encode_device_selector(card_index: usize, driver_offset: i32) -> String {
+  format!("{}:{}", card_index, driver_offset)
+}
+
+/// Parse a card-first device selector back to (card_index, driver_offset).
+pub fn parse_device_selector(input: &str) -> (usize, i32) {
+  if input.is_empty() {
+    return (0, 0);
+  }
+  let parts = input.splitn(2, ':').collect::<Vec<_>>();
+  match parts.as_slice() {
+    [card_str, driver_str] => {
+      let card = card_str.parse::<usize>().unwrap_or(0);
+      let driver = driver_str.parse::<i32>().unwrap_or(-1);
+      (card, driver)
+    }
+    [card_str] => (card_str.parse::<usize>().unwrap_or(0), -1),
+    _ => (0, -1),
+  }
+}
 
 /// Which row the cursor is on. The editor renders top-to-bottom in
 /// [`PickerField::all`] order so it doubles as the vertical-navigation
@@ -172,10 +197,16 @@ pub struct LaunchPickerState {
   /// Available GPU devices (backend-prefixed names), from host metrics.
   /// Used by the device picker to cycle through cards.
   pub devices: Vec<String>,
-  /// Backend for each device in `devices` ("nvidia", "amd", "apple_metal",
-  /// "unknown"). Used to filter Vulkan-only devices from the picker when
-  /// native backends are available.
-  pub device_backends: Vec<String>,
+  /// Card-first device list from host metrics. Each card carries its
+  /// available drivers. When a card has a single driver the picker
+  /// shows just the card; when multiple drivers are available the user
+  /// first selects a card then cycles through its drivers.
+  pub cards: Vec<Card>,
+  /// When the focused card has multiple drivers, this holds the
+  /// selected driver offset within that card (0 = first driver,
+  /// -1 = not yet selected). Only used when cards.len() > 0
+  /// and the focused card has drivers.len() > 1.
+  pub selected_driver_offset: i32,
   /// Row offset clipped from the top of the rendered line list so the
   /// focused row stays visible on small viewports. Recomputed on each
   /// render using the actual area height — the `Cell` lets the
@@ -198,7 +229,8 @@ impl LaunchPickerState {
       active_instances: 0,
       prefer_port: None,
       devices: Vec::new(),
-      device_backends: Vec::new(),
+      cards: Vec::new(),
+      selected_driver_offset: -1,
       scroll_offset: Cell::new(0),
     }
   }
@@ -291,32 +323,90 @@ impl LaunchPickerState {
   }
 
   fn cycle_device(&mut self, field: KnobField, forward: bool) {
-    // Cycle through the device presets when the device picker has GPUs;
-    // fall back to a single empty preset when it doesn't (no GPUs).
-    let presets: Vec<&str> = if self.devices.is_empty() {
-      DEVICE_PRESETS.to_vec()
-    } else {
-      // Build: "" (default) + device names from host metrics.
-      // Filter out Vulkan ("unknown") devices when native backends
-      // (nvidia / amd / apple_metal) are available — Vulkan is a
-      // fallback probe and may report devices llama-server can't use.
-      let has_native = self
-        .device_backends
-        .iter()
-        .any(|b| matches!(b.as_str(), "nvidia" | "amd" | "apple_metal"));
-      let mut p: Vec<&str> = Vec::with_capacity(self.devices.len() + 1);
-      p.push("");
-      for (sel, bak) in self.devices.iter().zip(self.device_backends.iter()) {
-        if has_native && bak == "unknown" {
-          continue;
-        }
-        p.push(sel);
-      }
-      p
-    };
+    if self.cards.is_empty() {
+      // No GPUs — fall back to default preset.
+      let current: Option<&str> = self.user_value_str(field);
+      let next = cycle_through(current, DEVICE_PRESETS, forward);
+      self.set_user_str(field, next.map(str::to_string));
+      self.selected_driver_offset = -1;
+      return;
+    }
+    // Card-first: the current device value encodes "card_index:driver_offset"
+    // or is empty (default / unselected).
     let current: Option<&str> = self.user_value_str(field);
-    let next = cycle_through(current, &presets, forward);
-    self.set_user_str(field, next.map(str::to_string));
+    let (card_idx, driver_offset) = current.map(parse_device_selector).unwrap_or((0, 0));
+    if forward {
+      // Try cycling the driver first (within the current card).
+      let card = self.cards.get(card_idx);
+      if let Some(c) = card {
+        let max_driver = (c.drivers.len() - 1) as i32;
+        if max_driver > 0 {
+          let next_driver = if driver_offset < max_driver {
+            driver_offset + 1
+          } else {
+            -1
+          };
+          if next_driver >= 0 {
+            // Advance driver within card.
+            self.set_user_str(field, Some(encode_device_selector(card_idx, next_driver)));
+            self.selected_driver_offset = next_driver;
+            return;
+          }
+        }
+      }
+      // Driver exhausted — advance to next card.
+      let next_card = card_idx + 1;
+      if next_card < self.cards.len() {
+        let next_card_ref = &self.cards[next_card];
+        let driver = if !next_card_ref.drivers.is_empty() {
+          0i32
+        } else {
+          -1
+        };
+        self.set_user_str(field, Some(encode_device_selector(next_card, driver)));
+        self.selected_driver_offset = driver;
+        return;
+      }
+      // All cards exhausted — wrap to first card, first driver.
+      let first_card = &self.cards[0];
+      let driver = if !first_card.drivers.is_empty() {
+        0i32
+      } else {
+        -1
+      };
+      self.set_user_str(field, Some(encode_device_selector(0, driver)));
+      self.selected_driver_offset = driver;
+    } else {
+      // Backward: try cycling driver first.
+      let cur_card = self.cards.get(card_idx);
+      if let Some(c) = cur_card {
+        if !c.drivers.is_empty() && driver_offset > 0 {
+          let next_driver = driver_offset - 1;
+          self.set_user_str(field, Some(encode_device_selector(card_idx, next_driver)));
+          self.selected_driver_offset = next_driver;
+          return;
+        }
+      }
+      // Driver at minimum — go to previous card, last driver.
+      if card_idx > 0 {
+        let prev_card = &self.cards[card_idx - 1];
+        let max_driver = (prev_card.drivers.len().saturating_sub(1)) as i32;
+        self.set_user_str(
+          field,
+          Some(encode_device_selector(card_idx - 1, max_driver)),
+        );
+        self.selected_driver_offset = max_driver;
+        return;
+      }
+      // Wrapped to last card.
+      let last_card = &self.cards[self.cards.len() - 1];
+      let max_driver = (last_card.drivers.len().saturating_sub(1)) as i32;
+      self.set_user_str(
+        field,
+        Some(encode_device_selector(self.cards.len() - 1, max_driver)),
+      );
+      self.selected_driver_offset = max_driver;
+    }
   }
 
   /// Backspace on a focused row: clear the user override and re-
@@ -542,23 +632,16 @@ impl LaunchPickerState {
       .filter(|v| !v.is_empty());
     sel
       .map(|s| {
-        let bak = self
-          .device_backends
-          .iter()
-          .map(|b| {
-            if b == "nvidia" {
-              "CUDA"
-            } else if b == "amd" {
-              "HIP"
-            } else if b == "apple_metal" {
-              "Metal"
-            } else {
-              "Vulkan"
-            }
-          })
-          .next()
-          .unwrap_or("GPU");
-        format!("{} ({})", s, bak)
+        let (card_idx, driver_offset) = parse_device_selector(&s);
+        let card = self.cards.get(card_idx);
+        match (card, driver_offset) {
+          (Some(c), drv) if drv >= 0 && drv < (c.drivers.len() as i32) => {
+            let driver = &c.drivers[drv as usize];
+            format!("{} ({})", c.name, driver.label)
+          }
+          (Some(c), _) => c.name.to_string(),
+          _ => s.to_string(),
+        }
       })
       .unwrap_or_else(|| "default".into())
   }
@@ -634,7 +717,9 @@ fn cycle_through<T: PartialEq + PartialOrd + Copy>(
 
 #[cfg(test)]
 mod tests {
+  #![allow(clippy::useless_conversion)]
   use super::*;
+  use crate::gpu::Driver;
 
   #[test]
   fn cycle_ctx_walks_through_presets_then_returns_to_native() {
@@ -764,5 +849,255 @@ mod tests {
     // Forward from above presets[last] has nothing greater → fall back
     // to last preset.
     assert_eq!(cycle_through(Some(99_u32), presets, true), Some(30));
+  }
+
+  // ---- Card-first device picker tests ----
+
+  #[test]
+  fn encode_decode_roundtrips_card_and_driver() {
+    assert_eq!(encode_device_selector(0, 0), "0:0");
+    assert_eq!(encode_device_selector(3, -1), "3:-1");
+    assert_eq!(encode_device_selector(10, 5), "10:5");
+    assert_eq!(parse_device_selector("0:0"), (0, 0));
+    assert_eq!(parse_device_selector("3:-1"), (3, -1));
+    assert_eq!(parse_device_selector("10:5"), (10, 5));
+  }
+
+  #[test]
+  fn parse_device_selector_handles_empty_and_edge_cases() {
+    assert_eq!(parse_device_selector(""), (0, 0));
+    assert_eq!(parse_device_selector("5"), (5, -1));
+    assert_eq!(parse_device_selector("abc"), (0, -1));
+  }
+
+  #[test]
+  fn device_value_display_single_card_no_driver() {
+    let mut s = LaunchPickerState::for_model("test");
+    s.cards = vec![Card {
+      id: "PCI-0000:01:00.0".into(),
+      name: "NVIDIA GeForce RTX 3080".into(),
+      total_memory_bytes: 10_737_418_240,
+      drivers: vec![Driver {
+        backend: "nvidia".into(),
+        label: "CUDA".into(),
+        index: 0,
+        selector: "Nvidia0".into(),
+        utilization_pct: None,
+        temperature_c: None,
+        used_memory_bytes: None,
+      }],
+    }];
+    // No selection → default.
+    assert_eq!(s.device_value_display(), "default");
+    // Select card 0, driver -1 (no driver needed).
+    s.set_user_str(KnobField::Device, Some("0:-1".into()));
+    assert_eq!(s.device_value_display(), "NVIDIA GeForce RTX 3080");
+  }
+
+  #[test]
+  fn device_value_display_card_with_multiple_drivers() {
+    let mut s = LaunchPickerState::for_model("test");
+    s.cards = vec![
+      Card {
+        id: "PCI-0000:01:00.0".into(),
+        name: "AMD Radeon RX 6800".into(),
+        total_memory_bytes: 16_106_127_360,
+        drivers: vec![
+          Driver {
+            backend: "amd".into(),
+            label: "ROCm".into(),
+            index: 0,
+            selector: "Amd0".into(),
+            utilization_pct: None,
+            temperature_c: None,
+            used_memory_bytes: None,
+          },
+          Driver {
+            backend: "unknown".into(),
+            label: "Vulkan".into(),
+            index: 1,
+            selector: "Vulkan0".into(),
+            utilization_pct: None,
+            temperature_c: None,
+            used_memory_bytes: None,
+          },
+        ],
+      },
+      Card {
+        id: "PCI-0000:02:00.0".into(),
+        name: "NVIDIA GeForce RTX 3090".into(),
+        total_memory_bytes: 24_696_061_500,
+        drivers: vec![
+          Driver {
+            backend: "nvidia".into(),
+            label: "CUDA".into(),
+            index: 0,
+            selector: "Nvidia0".into(),
+            utilization_pct: None,
+            temperature_c: None,
+            used_memory_bytes: None,
+          },
+          Driver {
+            backend: "unknown".into(),
+            label: "Vulkan".into(),
+            index: 1,
+            selector: "Vulkan0".into(),
+            utilization_pct: None,
+            temperature_c: None,
+            used_memory_bytes: None,
+          },
+        ],
+      },
+    ];
+    // Select card 0, driver 0 → card name + driver label.
+    s.set_user_str(KnobField::Device, Some("0:0".into()));
+    assert_eq!(s.device_value_display(), "AMD Radeon RX 6800 (ROCm)");
+    // Select card 0, driver 1.
+    s.set_user_str(KnobField::Device, Some("0:1".into()));
+    assert_eq!(s.device_value_display(), "AMD Radeon RX 6800 (Vulkan)");
+    // Select card 1, driver 0.
+    s.set_user_str(KnobField::Device, Some("1:0".into()));
+    assert_eq!(s.device_value_display(), "NVIDIA GeForce RTX 3090 (CUDA)");
+  }
+
+  #[test]
+  fn cycle_device_forward_with_single_card_single_driver() {
+    let mut s = LaunchPickerState::for_model("test");
+    s.cards = vec![Card {
+      id: "apple-metal".into(),
+      name: "Apple Silicon (unified)".into(),
+      total_memory_bytes: 16_106_127_360,
+      drivers: vec![Driver {
+        backend: "apple_metal".into(),
+        label: "Metal".into(),
+        index: 0,
+        selector: "Metal0".into(),
+        utilization_pct: None,
+        temperature_c: None,
+        used_memory_bytes: None,
+      }],
+    }];
+    // Start: no selection.
+    assert_eq!(s.user_value_str(KnobField::Device), None);
+    // Forward: selects card 0, driver 0 (first forward picks card 0, driver 0).
+    s.cycle_device(KnobField::Device, true);
+    assert_eq!(s.user_value_str(KnobField::Device), Some("0:0".into()));
+    assert_eq!(s.selected_driver_offset, 0);
+    // Forward again: wraps to card 0, driver 0 (single card, single driver).
+    s.cycle_device(KnobField::Device, true);
+    assert_eq!(s.user_value_str(KnobField::Device), Some("0:0".into()));
+    assert_eq!(s.selected_driver_offset, 0);
+  }
+
+  #[test]
+  fn cycle_device_forward_with_multi_card_multi_driver() {
+    let mut s = LaunchPickerState::for_model("test");
+    s.cards = vec![
+      Card {
+        id: "PCI-0000:01:00.0".into(),
+        name: "NVIDIA GeForce RTX 3080".into(),
+        total_memory_bytes: 10_737_418_240,
+        drivers: vec![
+          Driver {
+            backend: "nvidia".into(),
+            label: "CUDA".into(),
+            index: 0,
+            selector: "Nvidia0".into(),
+            utilization_pct: None,
+            temperature_c: None,
+            used_memory_bytes: None,
+          },
+          Driver {
+            backend: "unknown".into(),
+            label: "Vulkan".into(),
+            index: 1,
+            selector: "Vulkan0".into(),
+            utilization_pct: None,
+            temperature_c: None,
+            used_memory_bytes: None,
+          },
+        ],
+      },
+      Card {
+        id: "PCI-0000:02:00.0".into(),
+        name: "AMD Radeon RX 6800".into(),
+        total_memory_bytes: 16_106_127_360,
+        drivers: vec![Driver {
+          backend: "amd".into(),
+          label: "ROCm".into(),
+          index: 0,
+          selector: "Amd0".into(),
+          utilization_pct: None,
+          temperature_c: None,
+          used_memory_bytes: None,
+        }],
+      },
+    ];
+    // First forward: cycles to card 0, driver 1 (first forward advances driver).
+    s.cycle_device(KnobField::Device, true);
+    assert_eq!(s.user_value_str(KnobField::Device), Some("0:1".into()));
+    // Second forward: card 1, driver 0 (driver exhausted, advance card).
+    s.cycle_device(KnobField::Device, true);
+    assert_eq!(s.user_value_str(KnobField::Device), Some("1:0".into()));
+    // Third forward: wraps to card 0, driver 0.
+    s.cycle_device(KnobField::Device, true);
+    assert_eq!(s.user_value_str(KnobField::Device), Some("0:0".into()));
+  }
+
+  #[test]
+  fn cycle_device_backward_with_multi_card() {
+    let mut s = LaunchPickerState::for_model("test");
+    s.cards = vec![
+      Card {
+        id: "PCI-0000:01:00.0".into(),
+        name: "NVIDIA RTX 3080".into(),
+        total_memory_bytes: 10_737_418_240,
+        drivers: vec![Driver {
+          backend: "nvidia".into(),
+          label: "CUDA".into(),
+          index: 0,
+          selector: "Nvidia0".into(),
+          utilization_pct: None,
+          temperature_c: None,
+          used_memory_bytes: None,
+        }],
+      },
+      Card {
+        id: "PCI-0000:02:00.0".into(),
+        name: "AMD RX 6800".into(),
+        total_memory_bytes: 16_106_127_360,
+        drivers: vec![Driver {
+          backend: "amd".into(),
+          label: "ROCm".into(),
+          index: 0,
+          selector: "Amd0".into(),
+          utilization_pct: None,
+          temperature_c: None,
+          used_memory_bytes: None,
+        }],
+      },
+    ];
+    // First forward: card 0 → card 1 (card 0 wraps to card 1).
+    s.cycle_device(KnobField::Device, true);
+    assert_eq!(s.user_value_str(KnobField::Device), Some("1:0".into()));
+    // Second forward: card 1 wraps to card 0 (no more cards).
+    s.cycle_device(KnobField::Device, true);
+    assert_eq!(s.user_value_str(KnobField::Device), Some("0:0".into()));
+    // Backward: wraps to card 1 (last card — no prev card from card 0).
+    s.cycle_device(KnobField::Device, false);
+    assert_eq!(s.user_value_str(KnobField::Device), Some("1:0".into()));
+    // Backward: goes to card 0 (prev card, last driver).
+    s.cycle_device(KnobField::Device, false);
+    assert_eq!(s.user_value_str(KnobField::Device), Some("0:0".into()));
+  }
+
+  #[test]
+  fn cycle_device_with_no_cards_falls_back_to_default() {
+    let mut s = LaunchPickerState::for_model("test");
+    // cards is empty — should fall through to DEVICE_PRESETS.
+    s.cycle_device(KnobField::Device, true);
+    assert_eq!(s.selected_driver_offset, -1);
+    s.cycle_device(KnobField::Device, false);
+    assert_eq!(s.selected_driver_offset, -1);
   }
 }
