@@ -604,9 +604,6 @@ pub fn probe() -> GpuInfo {
 
   // Vulkan devices — only add if not already covered by CUDA/ROCm
   // on the same physical card (dedup by PCI address or name).
-  let nv_names = non_vulkan_names(&nvidia_devices);
-  let amd_seen_via_rocm = !amd_devices.is_empty();
-  let nvidia_seen = !nvidia_devices.is_empty();
   let mut all_devices = Vec::new();
   for d in nvidia_devices {
     all_devices.push(d);
@@ -618,19 +615,14 @@ pub fn probe() -> GpuInfo {
     all_devices.push(d);
   }
   for d in unknown_devices {
-    // Skip Vulkan AMD devices if ROCm already found AMD cards.
-    let skip_amd = d.backend == "amd" && amd_seen_via_rocm;
-    // Skip Vulkan NVIDIA devices if CUDA already found NVIDIA cards.
-    let skip_nvidia = d.backend == "nvidia" && nvidia_seen;
-    // Name-based dedup for non-ROCm AMD cards.
-    let skip_by_name = d.backend == "amd"
-      && !amd_seen_via_rocm
-      && nv_names.iter().any(|n| {
-        let n_lc = n.to_lowercase();
-        let d_lc = d.name.to_lowercase();
-        n_lc == d_lc || d_lc.contains(&n_lc) || n_lc.contains(&d_lc)
-      });
-    if skip_amd || skip_nvidia || skip_by_name {
+    // Skip Vulkan devices that match an already-seen card by PCI
+    // address (via lspci on Linux) or by name (fallback on
+    // macOS/Windows).
+    let seen_id = resolve_device_id(&d, &pci_map);
+    if all_devices
+      .iter()
+      .any(|seen| resolve_device_id(seen, &pci_map) == seen_id)
+    {
       continue;
     }
     all_devices.push(d);
@@ -639,14 +631,6 @@ pub fn probe() -> GpuInfo {
   GpuInfo::Multi {
     devices: all_devices,
   }
-}
-
-fn non_vulkan_names(devices: &[GpuDevice]) -> Vec<String> {
-  let mut names = Vec::new();
-  for d in devices {
-    names.push(d.name.clone());
-  }
-  names
 }
 
 /// Refresh the already-detected backends by calling only their vendor

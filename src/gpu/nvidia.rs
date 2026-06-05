@@ -32,7 +32,39 @@ pub fn probe_devices() -> Option<Vec<GpuDevice>> {
   if devices.is_empty() {
     return None;
   }
-  Some(devices)
+  // Also grab PCI bus IDs — needed for deduplication across backends.
+  let mut pci_cmd = Command::new("nvidia-smi");
+  pci_cmd.args(["--query-gpu=pci.bus_id", "--format=csv,noheader"]);
+  let pci_ids = run_with_timeout(pci_cmd)
+    .filter(|o| o.status.success())
+    .and_then(|o| String::from_utf8(o.stdout).ok())
+    .map(|s| parse_pci_ids(&s))
+    .unwrap_or_default();
+  Some(
+    devices
+      .into_iter()
+      .enumerate()
+      .map(|(i, mut d)| {
+        d.device_id = pci_ids.get(i).cloned();
+        d
+      })
+      .collect(),
+  )
+}
+
+/// Parse `nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader`
+/// output. Each row is a PCI bus address like `0000:0F:00.0`.
+fn parse_pci_ids(stdout: &str) -> Vec<String> {
+  stdout
+    .lines()
+    .map(|l| {
+      let trimmed = l.trim();
+      // nvidia-smi format: `00000000:0F:00.0` (domain:bus:device.fn).
+      // Normalize to `0000:0F:00.0` (strip leading zeros from domain).
+      trimmed.to_string()
+    })
+    .filter(|s| !s.is_empty())
+    .collect()
 }
 
 /// Parse the `--format=csv,noheader,nounits` output. Exposed so unit

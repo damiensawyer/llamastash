@@ -393,10 +393,7 @@ fn format_knob_value(state: &LaunchPickerState, field: KnobField) -> String {
     KnobField::CacheTypeK | KnobField::CacheTypeV => state
       .effective_str(field)
       .unwrap_or_else(|| "default".into()),
-    KnobField::Device => state
-      .effective_str(field)
-      .filter(|v| !v.is_empty())
-      .unwrap_or_else(|| "default".into()),
+    KnobField::Device => state.device_value_display(),
     KnobField::Reasoning | KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => {
       match state.effective_bool(field) {
         Some(true) => "on".into(),

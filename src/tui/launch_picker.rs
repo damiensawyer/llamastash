@@ -172,6 +172,10 @@ pub struct LaunchPickerState {
   /// Available GPU devices (backend-prefixed names), from host metrics.
   /// Used by the device picker to cycle through cards.
   pub devices: Vec<String>,
+  /// Backend for each device in `devices` ("nvidia", "amd", "apple_metal",
+  /// "unknown"). Used to filter Vulkan-only devices from the picker when
+  /// native backends are available.
+  pub device_backends: Vec<String>,
   /// Row offset clipped from the top of the rendered line list so the
   /// focused row stays visible on small viewports. Recomputed on each
   /// render using the actual area height — the `Cell` lets the
@@ -194,6 +198,7 @@ impl LaunchPickerState {
       active_instances: 0,
       prefer_port: None,
       devices: Vec::new(),
+      device_backends: Vec::new(),
       scroll_offset: Cell::new(0),
     }
   }
@@ -292,9 +297,21 @@ impl LaunchPickerState {
       DEVICE_PRESETS.to_vec()
     } else {
       // Build: "" (default) + device names from host metrics.
+      // Filter out Vulkan ("unknown") devices when native backends
+      // (nvidia / amd / apple_metal) are available — Vulkan is a
+      // fallback probe and may report devices llama-server can't use.
+      let has_native = self
+        .device_backends
+        .iter()
+        .any(|b| matches!(b.as_str(), "nvidia" | "amd" | "apple_metal"));
       let mut p: Vec<&str> = Vec::with_capacity(self.devices.len() + 1);
       p.push("");
-      p.extend(self.devices.iter().map(|s| s.as_str()));
+      for (sel, bak) in self.devices.iter().zip(self.device_backends.iter()) {
+        if has_native && bak == "unknown" {
+          continue;
+        }
+        p.push(sel);
+      }
       p
     };
     let current: Option<&str> = self.user_value_str(field);
@@ -514,6 +531,36 @@ impl LaunchPickerState {
     self.set_user_f32(field, None);
     self.set_user_str(field, None);
     self.set_user_bool(field, None);
+  }
+
+  /// Display label for the device knob, including backend context
+  /// (e.g. `"Nvidia0 (CUDA)"`). Returns `"default"` when no device
+  /// is selected.
+  pub fn device_value_display(&self) -> String {
+    let sel = self
+      .effective_str(KnobField::Device)
+      .filter(|v| !v.is_empty());
+    sel
+      .map(|s| {
+        let bak = self
+          .device_backends
+          .iter()
+          .map(|b| {
+            if b == "nvidia" {
+              "CUDA"
+            } else if b == "amd" {
+              "HIP"
+            } else if b == "apple_metal" {
+              "Metal"
+            } else {
+              "Vulkan"
+            }
+          })
+          .next()
+          .unwrap_or("GPU");
+        format!("{} ({})", s, bak)
+      })
+      .unwrap_or_else(|| "default".into())
   }
 }
 

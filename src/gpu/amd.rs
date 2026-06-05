@@ -9,6 +9,7 @@
 //! (C)` for utilization and temperature respectively. Missing
 //! keys fall back to `None` rather than dropping the device.
 
+use std::collections::HashMap;
 use std::process::Command;
 
 use serde_json::Value;
@@ -59,10 +60,29 @@ pub fn probe_devices() -> Option<Vec<GpuDevice>> {
     };
     let devices = parse(&stdout);
     if !devices.is_empty() {
+      // Also grab PCI bus IDs for cross-backend deduplication.
+      let mut pci_cmd = Command::new("rocm-smi");
+      pci_cmd.args(["--showbus", "--json"]);
+      let pci_map = run_with_timeout(pci_cmd)
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| parse_pci_map(&s))
+        .unwrap_or_default();
+      let tagged: Vec<GpuDevice> = devices
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut d)| {
+          d.device_id = pci_map
+            .get(&format!("card{}", i))
+            .or(pci_map.get(&format!("gpu{}", i)))
+            .cloned();
+          d
+        })
+        .collect();
       // Tag each device with the "amd" backend for multi-backend
       // aggregation in `gpu::probe()`. The AMD probe is always the
       // AMD source — no need to disambiguate.
-      return Some(devices);
+      return Some(tagged);
     }
   }
   // Every variant produced either a process-spawn failure, non-zero
@@ -71,6 +91,27 @@ pub fn probe_devices() -> Option<Vec<GpuDevice>> {
   // silent degrade-to-cpu_only failure mode).
   log::debug!("rocm-smi probe failed across all argument variants; treating as no-AMD");
   None
+}
+
+/// Parse `rocm-smi --showbus --json` output into a map of
+/// `cardN` -> PCI bus address.
+fn parse_pci_map(stdout: &str) -> HashMap<String, String> {
+  let v: serde_json::Map<String, serde_json::Value> = match serde_json::from_str(stdout) {
+    Ok(Value::Object(obj)) => obj,
+    _ => return std::collections::HashMap::new(),
+  };
+  v.into_iter()
+    .filter_map(|(key, val)| {
+      val.as_str().and_then(|s| {
+        let bus = s.trim().trim_start_matches(':');
+        if !bus.is_empty() {
+          Some((key, bus.to_string()))
+        } else {
+          None
+        }
+      })
+    })
+    .collect()
 }
 
 pub(crate) fn parse(stdout: &str) -> Vec<GpuDevice> {

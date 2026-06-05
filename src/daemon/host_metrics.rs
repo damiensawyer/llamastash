@@ -28,6 +28,9 @@ pub struct DeviceRow {
   /// `Metal0`. This is what the TUI passes as the `device` knob
   /// (which becomes `--device` in the llama-server argv).
   pub selector: String,
+  /// Backend the probe used to detect this device: `"nvidia"`,
+  /// `"amd"`, `"apple_metal"`, or `"unknown"` (Vulkan fallback).
+  pub backend: String,
   /// Human-readable device name (e.g. `"NVIDIA GeForce RTX 3080"`).
   pub name: String,
   /// Total memory bytes for this device.
@@ -473,6 +476,7 @@ pub fn build_device_rows(info: &GpuInfo) -> (Option<Vec<DeviceRow>>, Option<Vec<
     GpuInfo::AppleMetal { total_memory_bytes } => {
       let picker = Some(vec![DeviceRow {
         selector: "Metal0".into(),
+        backend: "apple_metal".into(),
         name: "Apple Silicon (unified)".into(),
         total_memory_bytes: *total_memory_bytes,
         used_memory_bytes: None,
@@ -489,12 +493,26 @@ pub fn build_device_rows(info: &GpuInfo) -> (Option<Vec<DeviceRow>>, Option<Vec<
     return (None, None);
   }
 
-  // Build device rows with selectors (for the device picker)
-  let picker: Vec<DeviceRow> = all
+  // Deduplicate by device name, preferring native backends (nvidia /
+  // amd / apple_metal) over Vulkan fallback (unknown). Since native
+  // probes run before Vulkan, the first occurrence of each name is
+  // from a native backend — keep it, skip later Vulkan matches.
+  let native_names: Vec<String> = all
+    .iter()
+    .filter(|d| matches!(d.backend.as_str(), "nvidia" | "amd" | "apple_metal"))
+    .map(|d| d.name.clone())
+    .collect();
+  let deduped: Vec<&GpuDevice> = all
+    .iter()
+    .filter(|d| {
+      let is_native = matches!(d.backend.as_str(), "nvidia" | "amd" | "apple_metal");
+      is_native || !native_names.contains(&d.name)
+    })
+    .collect();
+  let picker: Vec<DeviceRow> = deduped
     .iter()
     .enumerate()
     .map(|(i, d)| {
-      // Use the device's actual backend tag to determine the prefix
       let dev_prefix = match d.backend.as_str() {
         "nvidia" => "Nvidia",
         "amd" => "Amd",
@@ -504,6 +522,7 @@ pub fn build_device_rows(info: &GpuInfo) -> (Option<Vec<DeviceRow>>, Option<Vec<
       };
       DeviceRow {
         selector: format!("{}{}", dev_prefix, i),
+        backend: d.backend.clone(),
         name: d.name.clone(),
         total_memory_bytes: d.total_memory_bytes,
         used_memory_bytes: if d.used_memory_bytes > 0 {
