@@ -249,6 +249,11 @@ pub struct TypedKnobs {
   pub rope_freq_scale: Option<f32>,
   /// Tokens to retain on context shift. Maps to `--keep`.
   pub keep: Option<u32>,
+  /// GPU device to target (`--device`). `None` lets llama-server
+  /// auto-select (the default, which may split across all GPUs on
+  /// Vulkan). For CUDA/HIP backends the value is a numeric index
+  /// (`"0"`, `"1"`); for Vulkan it is `Vulkan0`, `Vulkan1`.
+  pub device: Option<String>,
 }
 
 impl Default for Config {

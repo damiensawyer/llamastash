@@ -9,11 +9,12 @@
 //! (C)` for utilization and temperature respectively. Missing
 //! keys fall back to `None` rather than dropping the device.
 
+use std::collections::HashMap;
 use std::process::Command;
 
 use serde_json::Value;
 
-use super::{run_with_timeout, GpuDevice, GpuInfo};
+use super::{run_with_timeout, GpuDevice};
 
 /// rocm-smi argument variants to try, in order. Older ROCm releases
 /// (pre-5.4) may reject the combined four-flag form or emit non-JSON
@@ -44,7 +45,7 @@ const ROCM_SMI_ARG_VARIANTS: &[&[&str]] = &[
   &["--showmeminfo", "vram", "--json"],
 ];
 
-pub fn probe() -> Option<GpuInfo> {
+pub fn probe_devices() -> Option<Vec<GpuDevice>> {
   for args in ROCM_SMI_ARG_VARIANTS {
     let mut cmd = Command::new("rocm-smi");
     cmd.args(*args);
@@ -59,7 +60,29 @@ pub fn probe() -> Option<GpuInfo> {
     };
     let devices = parse(&stdout);
     if !devices.is_empty() {
-      return Some(GpuInfo::Amd { devices });
+      // Also grab PCI bus IDs for cross-backend deduplication.
+      let mut pci_cmd = Command::new("rocm-smi");
+      pci_cmd.args(["--showbus", "--json"]);
+      let pci_map = run_with_timeout(pci_cmd)
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| parse_pci_map(&s))
+        .unwrap_or_default();
+      let tagged: Vec<GpuDevice> = devices
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut d)| {
+          d.device_id = pci_map
+            .get(&format!("card{}", i))
+            .or(pci_map.get(&format!("gpu{}", i)))
+            .cloned();
+          d
+        })
+        .collect();
+      // Tag each device with the "amd" backend for multi-backend
+      // aggregation in `gpu::probe()`. The AMD probe is always the
+      // AMD source — no need to disambiguate.
+      return Some(tagged);
     }
   }
   // Every variant produced either a process-spawn failure, non-zero
@@ -68,6 +91,27 @@ pub fn probe() -> Option<GpuInfo> {
   // silent degrade-to-cpu_only failure mode).
   log::debug!("rocm-smi probe failed across all argument variants; treating as no-AMD");
   None
+}
+
+/// Parse `rocm-smi --showbus --json` output into a map of
+/// `cardN` -> PCI bus address.
+fn parse_pci_map(stdout: &str) -> HashMap<String, String> {
+  let v: serde_json::Map<String, serde_json::Value> = match serde_json::from_str(stdout) {
+    Ok(Value::Object(obj)) => obj,
+    _ => return std::collections::HashMap::new(),
+  };
+  v.into_iter()
+    .filter_map(|(key, val)| {
+      val.as_str().and_then(|s| {
+        let bus = s.trim().trim_start_matches(':');
+        if !bus.is_empty() {
+          Some((key, bus.to_string()))
+        } else {
+          None
+        }
+      })
+    })
+    .collect()
 }
 
 pub(crate) fn parse(stdout: &str) -> Vec<GpuDevice> {
@@ -138,12 +182,14 @@ pub(crate) fn parse(stdout: &str) -> Vec<GpuDevice> {
         };
         out.push(GpuDevice {
           name: gpu_key.clone(),
+          backend: "amd".into(),
           total_memory_bytes,
           used_memory_bytes,
           utilization_pct,
           temperature_c,
           uma_shared_total_bytes,
           uma_shared_used_bytes,
+          device_id: None,
         });
       }
     }

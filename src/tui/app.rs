@@ -1196,6 +1196,22 @@ impl App {
       }
     }
     state.active_instances = active_count;
+    // Populate available device selectors and their backends from
+    // host metrics so the device picker cycles through actual cards
+    // instead of generic indices, and can filter Vulkan fallback
+    // devices when native backends are available.
+    state.devices = self
+      .host_metrics
+      .devices
+      .as_ref()
+      .map(|ds| ds.iter().map(|d| d.selector.clone()).collect())
+      .unwrap_or_default();
+    state.device_backends = self
+      .host_metrics
+      .devices
+      .as_ref()
+      .map(|ds| ds.iter().map(|d| d.backend.clone()).collect())
+      .unwrap_or_default();
     Some(state)
   }
 

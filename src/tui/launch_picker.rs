@@ -21,6 +21,11 @@ use crate::launch::params::LayerLabel;
 /// values flow through the same field when the user types digits.
 pub const CTX_PRESETS: &[u32] = &[2048, 4096, 8192, 16384, 32768, 65536, 131072];
 
+/// Default device selector when no GPUs are detected — lets llama-server
+/// auto-select (which may split across all GPUs on Vulkan). A single-item
+/// list so cycle_through wraps back to `None` (reset) reliably.
+pub const DEVICE_PRESETS: &[&str] = &[""];
+
 /// Which row the cursor is on. The editor renders top-to-bottom in
 /// [`PickerField::all`] order so it doubles as the vertical-navigation
 /// order.
@@ -75,7 +80,8 @@ impl PickerField {
         | KnobField::Keep
         | KnobField::RopeFreqScale
         | KnobField::CacheTypeK
-        | KnobField::CacheTypeV => true,
+        | KnobField::CacheTypeV
+        | KnobField::Device => true,
       },
     }
   }
@@ -163,6 +169,13 @@ pub struct LaunchPickerState {
   pub field: PickerField,
   pub active_instances: usize,
   pub prefer_port: Option<u16>,
+  /// Available GPU devices (backend-prefixed names), from host metrics.
+  /// Used by the device picker to cycle through cards.
+  pub devices: Vec<String>,
+  /// Backend for each device in `devices` ("nvidia", "amd", "apple_metal",
+  /// "unknown"). Used to filter Vulkan-only devices from the picker when
+  /// native backends are available.
+  pub device_backends: Vec<String>,
   /// Row offset clipped from the top of the rendered line list so the
   /// focused row stays visible on small viewports. Recomputed on each
   /// render using the actual area height — the `Cell` lets the
@@ -184,6 +197,8 @@ impl LaunchPickerState {
       field: PickerField::Knob(KnobField::Ctx),
       active_instances: 0,
       prefer_port: None,
+      devices: Vec::new(),
+      device_backends: Vec::new(),
       scroll_offset: Cell::new(0),
     }
   }
@@ -227,6 +242,7 @@ impl LaunchPickerState {
       KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => {
         self.cycle_bool(field, forward)
       }
+      KnobField::Device => self.cycle_device(field, forward),
     }
   }
 
@@ -272,6 +288,35 @@ impl LaunchPickerState {
       }
     };
     self.set_user_bool(field, next);
+  }
+
+  fn cycle_device(&mut self, field: KnobField, forward: bool) {
+    // Cycle through the device presets when the device picker has GPUs;
+    // fall back to a single empty preset when it doesn't (no GPUs).
+    let presets: Vec<&str> = if self.devices.is_empty() {
+      DEVICE_PRESETS.to_vec()
+    } else {
+      // Build: "" (default) + device names from host metrics.
+      // Filter out Vulkan ("unknown") devices when native backends
+      // (nvidia / amd / apple_metal) are available — Vulkan is a
+      // fallback probe and may report devices llama-server can't use.
+      let has_native = self
+        .device_backends
+        .iter()
+        .any(|b| matches!(b.as_str(), "nvidia" | "amd" | "apple_metal"));
+      let mut p: Vec<&str> = Vec::with_capacity(self.devices.len() + 1);
+      p.push("");
+      for (sel, bak) in self.devices.iter().zip(self.device_backends.iter()) {
+        if has_native && bak == "unknown" {
+          continue;
+        }
+        p.push(sel);
+      }
+      p
+    };
+    let current: Option<&str> = self.user_value_str(field);
+    let next = cycle_through(current, &presets, forward);
+    self.set_user_str(field, next.map(str::to_string));
   }
 
   /// Backspace on a focused row: clear the user override and re-
@@ -361,6 +406,7 @@ impl LaunchPickerState {
       KnobField::UbatchSize => self.user_knobs.ubatch_size.is_some(),
       KnobField::RopeFreqScale => self.user_knobs.rope_freq_scale.is_some(),
       KnobField::Keep => self.user_knobs.keep.is_some(),
+      KnobField::Device => self.user_knobs.device.is_some(),
     }
   }
 
@@ -388,6 +434,7 @@ impl LaunchPickerState {
     match field {
       KnobField::CacheTypeK => self.user_knobs.cache_type_k.as_deref(),
       KnobField::CacheTypeV => self.user_knobs.cache_type_v.as_deref(),
+      KnobField::Device => self.user_knobs.device.as_deref(),
       _ => None,
     }
   }
@@ -426,6 +473,7 @@ impl LaunchPickerState {
     match field {
       KnobField::CacheTypeK => self.resolved.cache_type_k.as_deref(),
       KnobField::CacheTypeV => self.resolved.cache_type_v.as_deref(),
+      KnobField::Device => self.resolved.device.as_deref(),
       _ => None,
     }
   }
@@ -463,6 +511,7 @@ impl LaunchPickerState {
     match field {
       KnobField::CacheTypeK => self.user_knobs.cache_type_k = value,
       KnobField::CacheTypeV => self.user_knobs.cache_type_v = value,
+      KnobField::Device => self.user_knobs.device = value,
       _ => {}
     }
   }
@@ -482,6 +531,36 @@ impl LaunchPickerState {
     self.set_user_f32(field, None);
     self.set_user_str(field, None);
     self.set_user_bool(field, None);
+  }
+
+  /// Display label for the device knob, including backend context
+  /// (e.g. `"Nvidia0 (CUDA)"`). Returns `"default"` when no device
+  /// is selected.
+  pub fn device_value_display(&self) -> String {
+    let sel = self
+      .effective_str(KnobField::Device)
+      .filter(|v| !v.is_empty());
+    sel
+      .map(|s| {
+        let bak = self
+          .device_backends
+          .iter()
+          .map(|b| {
+            if b == "nvidia" {
+              "CUDA"
+            } else if b == "amd" {
+              "HIP"
+            } else if b == "apple_metal" {
+              "Metal"
+            } else {
+              "Vulkan"
+            }
+          })
+          .next()
+          .unwrap_or("GPU");
+        format!("{} ({})", s, bak)
+      })
+      .unwrap_or_else(|| "default".into())
   }
 }
 
