@@ -1203,11 +1203,7 @@ impl App {
       .host_metrics
       .devices
       .as_ref()
-      .map(|ds| {
-        ds.iter()
-          .map(|d| format!("{} ({})", d.selector, d.name))
-          .collect()
-      })
+      .map(|ds| ds.iter().map(|d| d.selector.clone()).collect())
       .unwrap_or_default();
     Some(state)
   }
