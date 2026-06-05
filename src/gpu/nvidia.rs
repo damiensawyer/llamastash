@@ -53,17 +53,12 @@ pub fn probe_devices() -> Option<Vec<GpuDevice>> {
 }
 
 /// Parse `nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader`
-/// output. Each row is a PCI bus address like `0000:0F:00.0`.
+/// output. Each row is a PCI bus address like `00000000:0F:00.0`.
+/// Normalized to canonical `00000000:0f:00.0` (8-char, lowercase).
 fn parse_pci_ids(stdout: &str) -> Vec<String> {
   stdout
     .lines()
-    .map(|l| {
-      let trimmed = l.trim();
-      // nvidia-smi format: `00000000:0F:00.0` (domain:bus:device.fn).
-      // Normalize to `0000:0F:00.0` (strip leading zeros from domain).
-      trimmed.to_string()
-    })
-    .filter(|s| !s.is_empty())
+    .filter_map(|l| crate::gpu::normalize_pci(l.trim()))
     .collect()
 }
 

@@ -62,6 +62,60 @@ pub(crate) fn run_with_timeout(cmd: Command) -> Option<Output> {
   }
 }
 
+/// Normalize a PCI bus address to canonical `00000000:bb:dd.f`.
+///
+/// Handles variants:
+/// - `00000000:0F:00.0` (NVIDIA nvml — 8-char, uppercase)
+/// - `0000:0E:00.0` (rocm-smi — 4-char domain, uppercase)
+/// - `0e:00.0` (lspci short — no domain)
+/// - `00000000:0f:00.0` (vulkaninfo — already canonical)
+pub(crate) fn normalize_pci(raw: &str) -> Option<String> {
+  let trimmed = raw.trim();
+  if trimmed.is_empty() {
+    return None;
+  }
+  // Try splitting on colons. Expected: [domain:]bus:device.fn
+  let parts: Vec<&str> = trimmed.splitn(4, ':').collect();
+  if parts.len() < 3 {
+    return None;
+  }
+  let domain = match parts.len() {
+    3 => {
+      // Format: bus:device.fn (no domain). Pad to 8 chars.
+      let bus = parts[0].trim();
+      let dev_fn = parts[1].trim();
+      let (dev, func) = if let Some(dot) = dev_fn.find('.') {
+        (dev_fn[..dot].trim(), dev_fn[dot + 1..].trim())
+      } else {
+        // No dot — treat the whole thing as the device, func=0.
+        (dev_fn, "0")
+      };
+      if bus.is_empty() || dev.is_empty() {
+        return None;
+      }
+      let bus_num = u8::from_str_radix(bus, 16).ok()?;
+      let dev_num = u8::from_str_radix(dev, 16).ok()?;
+      Some(format!(
+        "{:08x}:{:02x}:{:02x}.{}",
+        0, bus_num, dev_num, func
+      ))
+    }
+    4 => {
+      // Format: domain:bus:device.fn
+      let domain_str = parts[0].trim();
+      let bus_str = parts[1].trim();
+      let dev_fn = parts[2].trim();
+      let func = parts[3].trim();
+      let domain = u32::from_str_radix(domain_str, 16).ok()?;
+      let bus = u8::from_str_radix(bus_str, 16).ok()?;
+      let dev = u8::from_str_radix(dev_fn, 16).ok()?;
+      Some(format!("{:08x}:{:02x}:{:02x}.{}", domain, bus, dev, func))
+    }
+    _ => None,
+  };
+  domain
+}
+
 /// What detection found. Always a complete snapshot — no
 /// "partial" / "unknown" middle ground — so the IPC handler can
 /// serialise it directly into `status`.
@@ -362,61 +416,83 @@ impl GpuInfo {
 }
 
 /// Queried once per probe cycle: maps GPU names to PCI bus addresses
-/// (e.g. "NVIDIA GeForce RTX 3080" → "00000000:0f:00.0").
-/// Returns `None` on Linux when lspci is unavailable; the caller
-/// falls back to name-based matching for dedup.
+/// (e.g. "NVIDIA GeForce RTX 3080" → "00000000:0f:00.0") and also
+/// returns the GPU list in enumeration order (index 0 → first GPU,
+/// index 1 → second GPU, etc.).
+///
+/// Returns `None` on non-Linux or when lspci is unavailable.
 #[cfg(target_os = "linux")]
-fn query_lspci() -> Option<std::collections::BTreeMap<String, String>> {
+fn query_lspci() -> Option<(std::collections::BTreeMap<String, String>, Vec<String>)> {
   let cmd = std::process::Command::new("lspci");
   let output = run_with_timeout(cmd)?;
   if !output.status.success() {
     return None;
   }
   let stdout = String::from_utf8(output.stdout).ok()?;
-  let mut map = std::collections::BTreeMap::new();
+  let mut name_map = std::collections::BTreeMap::new();
+  let mut index_order = Vec::new();
   for line in stdout.lines() {
     let trimmed = line.trim();
-    // Only VGA/Display controllers: "... VGA compatible controller ..."
+    // Only VGA/Display/3D controllers.
     if !trimmed.contains("VGA") && !trimmed.contains("Display") && !trimmed.contains("3D") {
       continue;
     }
-    // Extract PCI ID from brackets: [... [10de:2216] (rev a1)]
+    // Extract PCI address from brackets: [... [10de:2216] (rev a1)]
     if let Some(end) = trimmed.rfind(']') {
       if let Some(start) = trimmed.rfind('[') {
         let pci_id = &trimmed[start + 1..end];
         if let Some(colon1) = pci_id.find(':') {
           if let Some(colon2) = pci_id[colon1 + 1..].find(':') {
             let vendor = &pci_id[..colon1];
-            // Accept NVIDIA (10de) or AMD (1002)
-            if vendor == "10de" || vendor == "1002" {
+            // Accept NVIDIA (10de), AMD (1002), or Intel (8086)
+            if vendor == "10de" || vendor == "1002" || vendor == "8086" {
               let bus = pci_id[..colon1].to_string();
               let dev = pci_id[colon1 + 1..colon2].to_string();
               let func = pci_id[colon2 + 1..].trim().to_string();
-              let addr = format!("{}:{}:{}", bus, dev, func);
+              // Build canonical PCI: zero-pad domain to 8 chars, lowercase.
+              let addr = format!(
+                "{:08x}:{:02x}:{:02x}.{}",
+                0,
+                u8::from_str_radix(&bus, 16).ok()?,
+                u8::from_str_radix(&dev, 16).ok()?,
+                func
+              );
               // Extract the card name: everything after the vendor and before the PCI ID
               let name = trimmed[..start].trim().to_string();
               if !name.is_empty() {
-                map.insert(name, addr);
+                name_map.insert(name, addr.clone());
               }
+              index_order.push(addr);
             }
           }
         }
       }
     }
   }
-  Some(map)
+  if index_order.is_empty() {
+    None
+  } else {
+    Some((name_map, index_order))
+  }
 }
 
-/// Build a unique identifier for a device by matching it against the
-/// lspci PCI map (if available). Falls back to a name-based key when
-/// lspci is unavailable.
+/// Resolve a canonical PCI address for a device.
+///
+/// Uses the device's own `device_id` (already normalized to canonical
+/// `00000000:bb:dd.f` by the backend probe) as the primary source.
+/// Falls back to lspci name lookup when device_id is absent.
 fn resolve_device_id(
   device: &GpuDevice,
-  pci_map: &Option<std::collections::BTreeMap<String, String>>,
+  pci_map: &Option<(std::collections::BTreeMap<String, String>, Vec<String>)>,
 ) -> String {
+  // Primary: the device's own PCI (already canonical from the probe).
+  if let Some(pci) = &device.device_id {
+    return pci.clone();
+  }
+  // Fallback: lspci name lookup.
   pci_map
     .as_ref()
-    .and_then(|m| m.get(&device.name))
+    .and_then(|(m, _)| m.get(&device.name))
     .cloned()
     .unwrap_or_else(|| device.name.clone())
 }
