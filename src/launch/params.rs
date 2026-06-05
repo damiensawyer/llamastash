@@ -479,9 +479,10 @@ pub fn compose(params: &LaunchParams, allocated_port: u16, backend: &str) -> Vec
         if let Some((card_idx, _)) = sel.split_once(':') {
           card_idx.to_string()
         } else {
-          let is_digit = |c: char| c.is_ascii_digit();
+          // Legacy prefix: find the first digit and take everything from there.
+          // "Nvidia0" → "0", "Amd3" → "3", "3" → "3".
           sel
-            .find(|c: char| !is_digit(c))
+            .find(|c: char| c.is_ascii_digit())
             .map(|i| sel[i..].to_string())
             .unwrap_or_else(|| sel.clone())
         }
@@ -1116,5 +1117,86 @@ mod tests {
     let json = serde_json::to_string(&p).unwrap();
     let back: LaunchParams = serde_json::from_str(&json).unwrap();
     assert_eq!(back, p);
+  }
+
+  // ---- Device formatting tests ----
+
+  #[test]
+  fn compose_formats_card_first_device_selector() {
+    // Card-first format: "card:driver" → extract card index.
+    // This is what the TUI's device picker produces.
+    let mut p = base_params();
+    p.knobs.device = Some("3:0".into());
+    let argv = strs(&compose(&p, 41100, "nvidia"));
+    let device_vals: Vec<&str> = argv
+      .iter()
+      .enumerate()
+      .filter(|(_, a)| *a == "--device")
+      .flat_map(|(i, _)| argv.get(i + 1).map(|v| v.as_str()))
+      .collect();
+    // Both the raw (from argvify) and formatted (from formatting block)
+    // are present; the last one is the formatted value.
+    assert!(
+      device_vals.len() >= 2,
+      "should have raw + formatted --device"
+    );
+    // The LAST --device value must be the formatted card index.
+    assert_eq!(device_vals.last().copied(), Some("3"));
+  }
+
+  #[test]
+  fn compose_formats_legacy_device_selector() {
+    // Legacy format: "Nvidia0", "Amd3" → extract trailing digits.
+    // This handles configs set via arch_defaults or config.yaml.
+    let mut p = base_params();
+    p.knobs.device = Some("Amd3".into());
+    let argv = strs(&compose(&p, 41100, "nvidia"));
+    let device_vals: Vec<&str> = argv
+      .iter()
+      .enumerate()
+      .filter(|(_, a)| *a == "--device")
+      .flat_map(|(i, _)| argv.get(i + 1).map(|v| v.as_str()))
+      .collect();
+    assert!(device_vals.len() >= 2);
+    assert_eq!(device_vals.last().copied(), Some("3"));
+  }
+
+  #[test]
+  fn compose_formats_nvidia_legacy_selector() {
+    let mut p = base_params();
+    p.knobs.device = Some("Nvidia0".into());
+    let argv = strs(&compose(&p, 41100, "nvidia"));
+    let device_vals: Vec<&str> = argv
+      .iter()
+      .enumerate()
+      .filter(|(_, a)| *a == "--device")
+      .flat_map(|(i, _)| argv.get(i + 1).map(|v| v.as_str()))
+      .collect();
+    assert!(device_vals.len() >= 2);
+    assert_eq!(device_vals.last().copied(), Some("0"));
+  }
+
+  #[test]
+  fn compose_passes_raw_numeric_device() {
+    // Raw numeric: "0", "3" → pass through unchanged.
+    let mut p = base_params();
+    p.knobs.device = Some("0".into());
+    let argv = strs(&compose(&p, 41100, "nvidia"));
+    let device_vals: Vec<&str> = argv
+      .iter()
+      .enumerate()
+      .filter(|(_, a)| *a == "--device")
+      .flat_map(|(i, _)| argv.get(i + 1).map(|v| v.as_str()))
+      .collect();
+    assert!(device_vals.len() >= 2);
+    assert_eq!(device_vals.last().copied(), Some("0"));
+  }
+
+  #[test]
+  fn compose_skips_device_when_none() {
+    let p = base_params();
+    assert!(p.knobs.device.is_none());
+    let argv = strs(&compose(&p, 41100, "nvidia"));
+    assert!(!argv.iter().any(|a| *a == "--device"));
   }
 }
