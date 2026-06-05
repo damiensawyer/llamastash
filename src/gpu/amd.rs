@@ -148,6 +148,7 @@ pub(crate) fn parse(stdout: &str) -> Vec<GpuDevice> {
           temperature_c,
           uma_shared_total_bytes,
           uma_shared_used_bytes,
+          device_id: None,
         });
       }
     }
