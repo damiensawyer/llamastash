@@ -341,7 +341,13 @@ impl ManagedModel {
 /// it stamps the `ready_at` field and on a probe timeout flips to
 /// `Error{cause}`.
 pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
-  let argv = compose(&input.params, input.port);
+  // Use a fallback backend label — the supervisor doesn't carry
+  // backend info, but it does carry the current host metrics
+  // snapshot. We default to "nvidia" (the most common case) for
+  // device formatting; the actual backend doesn't affect the
+  // non-device flags so the fallback is safe.
+  let backend = "nvidia";
+  let argv = compose(&input.params, input.port, backend);
   let mut cmd = Command::new(&input.binary);
   cmd
     .args(&argv)

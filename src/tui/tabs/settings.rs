@@ -302,6 +302,7 @@ fn knob_label(field: KnobField) -> &'static str {
     KnobField::UbatchSize => "ubatch_size",
     KnobField::RopeFreqScale => "rope_freq_scale",
     KnobField::Keep => "keep",
+    KnobField::Device => "device",
   }
 }
 
@@ -356,6 +357,12 @@ fn format_persisted_knob_value(knobs: &crate::config::TypedKnobs, field: KnobFie
     KnobField::FlashAttn => bool_label(knobs.flash_attn),
     KnobField::Mlock => bool_label(knobs.mlock),
     KnobField::NoMmap => bool_label(knobs.no_mmap),
+    KnobField::Device => knobs
+      .device
+      .as_deref()
+      .filter(|v| !v.is_empty())
+      .map(str::to_string)
+      .unwrap_or_else(|| "default".into()),
   }
 }
 
@@ -385,6 +392,10 @@ fn format_knob_value(state: &LaunchPickerState, field: KnobField) -> String {
       .unwrap_or_else(|| "default".into()),
     KnobField::CacheTypeK | KnobField::CacheTypeV => state
       .effective_str(field)
+      .unwrap_or_else(|| "default".into()),
+    KnobField::Device => state
+      .effective_str(field)
+      .filter(|v| !v.is_empty())
       .unwrap_or_else(|| "default".into()),
     KnobField::Reasoning | KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => {
       match state.effective_bool(field) {

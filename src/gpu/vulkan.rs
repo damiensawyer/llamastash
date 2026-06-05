@@ -9,12 +9,12 @@
 
 use std::process::Command;
 
-use super::{run_with_timeout, GpuDevice, GpuInfo};
+use super::GpuDevice;
 
-pub fn probe() -> Option<GpuInfo> {
+pub fn probe_devices() -> Option<Vec<GpuDevice>> {
   let mut cmd = Command::new("vulkaninfo");
   cmd.arg("--summary");
-  let output = run_with_timeout(cmd)?;
+  let output = super::run_with_timeout(cmd)?;
   if !output.status.success() {
     return None;
   }
@@ -28,15 +28,16 @@ pub fn probe() -> Option<GpuInfo> {
   // AMD — Intel Arc, llvmpipe (software), and AMD-without-rocm-smi
   // all hit this path on Linux, and the TUI renders
   // `backend  unknown` so the user knows the vendor probe failed.
-  Some(GpuInfo::Unknown {
-    devices: names
+  Some(
+    names
       .into_iter()
       .map(|name| GpuDevice {
         name,
+        backend: "unknown".into(),
         ..Default::default()
       })
       .collect(),
-  })
+  )
 }
 
 pub(crate) fn parse(stdout: &str) -> Vec<String> {
