@@ -958,6 +958,13 @@ pub(crate) struct StartParams {
   /// doesn't model. Appended after the resolved knobs.
   #[serde(default)]
   pub(crate) extras: Vec<String>,
+  /// Optional path to a multimodal projector (mmproj) file. When
+  /// `None`, the daemon auto-detects by scanning the parent
+  /// directory of the model for a `mmproj-<stem>.gguf` companion.
+  /// Set to `Some(path)` to override the auto-detection, or leave
+  /// as `None` to let the daemon find it automatically.
+  #[serde(default)]
+  pub(crate) mmproj_path: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -1170,6 +1177,10 @@ pub(crate) async fn start_model_inner(
   let mut launch_params = LaunchParams::new(parsed.model_path.clone(), mode);
   launch_params.port = Some(port);
   launch_params.extras = parsed.extras.into_iter().map(OsString::from).collect();
+  launch_params.mmproj_path = parsed
+    .mmproj_path
+    .clone()
+    .or_else(|| crate::discovery::scanner::find_mmproj(&parsed.model_path));
 
   // Merge the caller's top-level `ctx` and `reasoning` into the
   // User-layer typed knobs so they participate in the resolver chain

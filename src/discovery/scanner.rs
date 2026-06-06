@@ -129,6 +129,36 @@ fn is_projector_companion(path: &Path) -> bool {
     .unwrap_or(false)
 }
 
+/// Find the multimodal projector (mmproj) companion file for a given
+/// model path. The projector file is expected to be in the same
+/// directory with a `mmproj-<stem>.gguf` or `mmproj_<stem>.gguf`
+/// naming pattern, where `<stem>` is the model's file name without the
+/// `.gguf` extension. Returns `None` if no companion is found.
+pub fn find_mmproj(model_path: &Path) -> Option<PathBuf> {
+  let parent = model_path.parent()?;
+  let stem = model_path.file_stem()?.to_str()?;
+  for entry in std::fs::read_dir(parent).ok()? {
+    let entry = entry.ok()?;
+    let name = entry.file_name();
+    let name_str = name.to_str()?;
+    let is_mmproj = name_str.starts_with("mmproj-") || name_str.starts_with("mmproj_");
+    if !is_mmproj {
+      continue;
+    }
+    if let Some(rest) = name_str.strip_prefix("mmproj-") {
+      if rest == format!("{stem}.gguf") || rest == stem {
+        return Some(entry.path());
+      }
+    }
+    if let Some(rest) = name_str.strip_prefix("mmproj_") {
+      if rest == format!("{stem}.gguf") || rest == stem {
+        return Some(entry.path());
+      }
+    }
+  }
+  None
+}
+
 /// Concurrency cap for [`walk_root`]'s per-file parse. Default to
 /// `num_cpus()`-flavoured but capped — too many parallel
 /// `spawn_blocking` calls land everything on the blocking pool
@@ -689,5 +719,57 @@ mod tests {
       second_arch, "phi3",
       "size change must invalidate cache and re-parse"
     );
+  }
+
+  #[test]
+  fn find_mmproj_detects_mmproj_dash_prefix() {
+    let dir = temp_dir("mmproj-find");
+    fs::write(dir.join("model.gguf"), build_minimal_gguf("llama")).unwrap();
+    fs::write(dir.join("mmproj-model.gguf"), build_minimal_gguf("llama")).unwrap();
+    let found = find_mmproj(&dir.join("model.gguf"));
+    assert!(found.is_some(), "find_mmproj must find mmproj-model.gguf");
+    assert_eq!(
+      found.unwrap().file_name().and_then(|s| s.to_str()),
+      Some("mmproj-model.gguf")
+    );
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn find_mmproj_detects_mmproj_underscore_prefix() {
+    let dir = temp_dir("mmproj-find-underscore");
+    fs::write(
+      dir.join("Qwen2.5-7B.Q4_K_M.gguf"),
+      build_minimal_gguf("llama"),
+    )
+    .unwrap();
+    fs::write(
+      dir.join("mmproj_Qwen2.5-7B.Q4_K_M.gguf"),
+      build_minimal_gguf("llama"),
+    )
+    .unwrap();
+    let found = find_mmproj(&dir.join("Qwen2.5-7B.Q4_K_M.gguf"));
+    assert!(
+      found.is_some(),
+      "find_mmproj must find mmproj_Qwen2.5-7B.Q4_K_M.gguf"
+    );
+    assert_eq!(
+      found.unwrap().file_name().and_then(|s| s.to_str()),
+      Some("mmproj_Qwen2.5-7B.Q4_K_M.gguf")
+    );
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn find_mmproj_returns_none_when_no_companion() {
+    let dir = temp_dir("mmproj-none");
+    fs::write(dir.join("model.gguf"), build_minimal_gguf("llama")).unwrap();
+    fs::write(dir.join("unrelated.gguf"), build_minimal_gguf("llama")).unwrap();
+    let found = find_mmproj(&dir.join("model.gguf"));
+    assert!(
+      found.is_none(),
+      "find_mmproj must return None when no companion exists"
+    );
+    fs::remove_dir_all(&dir).ok();
   }
 }

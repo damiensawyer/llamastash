@@ -166,6 +166,13 @@ pub struct LaunchParams {
   /// documented on the Settings tab.
   #[serde(default)]
   pub extras: Vec<OsString>,
+  /// Optional path to a multimodal projector (mmproj) file. When set,
+  /// the supervisor appends `--mmproj <path>` to the llama-server
+  /// argv. The file is auto-detected by scanning the parent directory
+  /// of the model for a `mmproj-<stem>.gguf` or `mmproj_<stem>.gguf`
+  /// companion.
+  #[serde(default)]
+  pub mmproj_path: Option<PathBuf>,
 }
 
 impl LaunchParams {
@@ -178,6 +185,7 @@ impl LaunchParams {
       reasoning: false,
       knobs: TypedKnobs::default(),
       extras: Vec::new(),
+      mmproj_path: None,
     }
   }
 }
@@ -465,6 +473,10 @@ pub fn compose(params: &LaunchParams, allocated_port: u16) -> Vec<OsString> {
   argv.push(allocated_port.to_string().into());
   argv.push("-m".into());
   argv.push(params.model_path.clone().into());
+  if let Some(ref mmproj) = params.mmproj_path {
+    argv.push("--mmproj".into());
+    argv.push(mmproj.clone().into());
+  }
   match params.mode {
     LaunchMode::Chat => {}
     LaunchMode::Embedding => argv.push("--embeddings".into()),
@@ -1086,6 +1098,22 @@ mod tests {
     }
 
     restore();
+  }
+
+  #[test]
+  fn compose_emits_mmproj_flag_when_path_set() {
+    let mut p = base_params();
+    p.mmproj_path = Some(PathBuf::from("/m/mmproj-model.gguf"));
+    let argv = strs(&compose(&p, 41100));
+    let i = argv.iter().position(|a| a == "--mmproj").unwrap();
+    assert_eq!(argv[i + 1], "/m/mmproj-model.gguf");
+  }
+
+  #[test]
+  fn compose_omits_mmproj_flag_when_path_not_set() {
+    let p = base_params();
+    let argv = strs(&compose(&p, 41100));
+    assert!(!argv.iter().any(|a| a == "--mmproj"));
   }
 
   #[test]
