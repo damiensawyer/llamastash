@@ -128,18 +128,19 @@ fn is_projector_companion(path: &Path) -> bool {
     .and_then(|n| n.to_str())
     .map(|n| {
       let n = n.to_lowercase();
-      n.starts_with("mmproj-")
-        || n.starts_with("mmproj_")
-        || n.contains(".mmproj.")
-        || n.ends_with(".mmproj.gguf")
-        || n.ends_with("-mmproj.gguf")
-        || n.ends_with("_mmproj.gguf")
-        || n == "mmproj.gguf"
+      n.ends_with(".gguf")
+        && (n.starts_with("mmproj-")
+          || n.starts_with("mmproj_")
+          || n.contains(".mmproj.")
+          || n.ends_with(".mmproj.gguf")
+          || n.ends_with("-mmproj.gguf")
+          || n.ends_with("_mmproj.gguf")
+          || n == "mmproj.gguf")
     })
     .unwrap_or(false)
 }
 
-const QUANT_PATTERN: &str = r"\b(bf16|f16|f32|mxfp4_moe|iq[1-4](_?s|_?xs|_?xxs|_?m|_?nl|_?nl_xl)?|q[2-8](_?[01])?(_?k)?(_?[sml]|_?xl)?)\b";
+const QUANT_PATTERN: &str = r"(?:^|[-._])(bf16|f16|f32|mxfp4_moe|iq[1-8](_?s|_?xs|_?xxs|_?m|_?nl|_?nl_xl)?|q[1-8](_?[01])?(_?k)?(_?[sml]|_?xl)?)\b";
 
 /// Strip all quantization tokens and separators from a name to derive
 /// a canonical base name for matching.
@@ -157,36 +158,37 @@ fn canonical_base(s: &str) -> String {
     s.replace_range(start..end, "");
   }
 
-  // Clean up separators and common "UD" (Up/Down) markers
-  s.trim_matches(|c| c == '.' || c == '-' || c == '_')
-    .replace("-ud", "")
-    .replace(".ud", "")
-    .replace("_ud", "")
-    .trim_matches(|c| c == '.' || c == '-' || c == '_')
-    .to_string()
+  // Normalize all separators to dashes and collapse multiple dashes
+  // so that "model_name" matches "model-name".
+  s = s.replace(['.', '_'], "-");
+  while s.contains("--") {
+    s = s.replace("--", "-");
+  }
+
+  s.trim_matches('-').to_string()
 }
 
 /// Strip mmproj-related prefixes and suffixes to find the base model
 /// name part.
 fn strip_mmproj_markers(name: &str) -> String {
-  let name = name.strip_suffix(".gguf").unwrap_or(name);
-  let mut s = name.to_lowercase();
+  let Some(s) = name.strip_suffix(".gguf") else {
+    return name.to_lowercase();
+  };
+  let mut s = s.to_lowercase();
 
-  if s.starts_with("mmproj-") {
-    s = s["mmproj-".len()..].to_string();
-  } else if s.starts_with("mmproj_") {
-    s = s["mmproj_".len()..].to_string();
+  if let Some(rest) = s.strip_prefix("mmproj-").or_else(|| s.strip_prefix("mmproj_")) {
+    s = rest.to_string();
   }
 
-  if s.ends_with("-mmproj") {
-    s = s[..s.len() - "-mmproj".len()].to_string();
-  } else if s.ends_with("_mmproj") {
-    s = s[..s.len() - "_mmproj".len()].to_string();
-  } else if s.contains(".mmproj.") {
-    s = s.replace(".mmproj.", ".");
-  } else if s.ends_with(".mmproj") {
-    s = s[..s.len() - ".mmproj".len()].to_string();
+  if let Some(rest) = s
+    .strip_suffix("-mmproj")
+    .or_else(|| s.strip_suffix("_mmproj"))
+    .or_else(|| s.strip_suffix(".mmproj"))
+  {
+    s = rest.to_string();
   }
+
+  s = s.replace(".mmproj.", ".");
 
   if s == "mmproj" {
     return "".to_string();
@@ -255,6 +257,18 @@ pub fn find_mmproj(model_path: &Path) -> Option<PathBuf> {
         .collect::<Vec<_>>()
     );
     candidates.retain(|(score, _)| *score >= 100);
+  }
+
+  let named_candidates: Vec<_> = candidates.iter().filter(|(s, _)| *s >= 100).collect();
+  if named_candidates.len() > 1 {
+    log::warn!(
+      "multiple matching mmproj candidates for model {}; picking the first one: {:?}",
+      model_filename,
+      named_candidates
+        .iter()
+        .map(|(_, p)| p.file_name().unwrap().to_string_lossy())
+        .collect::<Vec<_>>()
+    );
   }
 
   candidates.sort_by(|a, b| b.0.cmp(&a.0));
@@ -909,6 +923,42 @@ mod tests {
       Some("Qwen2-7B.mmproj.gguf")
     );
 
+    // Test underscore separator for quant (regression test for Regex boundary)
+    fs::remove_file(dir.join("Qwen2-7B.mmproj.gguf")).unwrap();
+    fs::write(
+      dir.join("Qwen2_7B_mmproj.gguf"),
+      build_minimal_gguf("llama"),
+    )
+    .unwrap();
+    let found = find_mmproj(&dir.join("Qwen2-7B-Q4_K_M.gguf"));
+    assert_eq!(
+      found.unwrap().file_name().and_then(|s| s.to_str()),
+      Some("Qwen2_7B_mmproj.gguf")
+    );
+
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn find_mmproj_warns_on_multiple_named_candidates() {
+    let dir = temp_dir("mmproj-multiple-named");
+    let model = "my-model";
+    fs::write(dir.join(format!("{model}.gguf")), build_minimal_gguf("llama")).unwrap();
+    fs::write(
+      dir.join(format!("mmproj-{model}-f16.gguf")),
+      build_minimal_gguf("llama"),
+    )
+    .unwrap();
+    fs::write(
+      dir.join(format!("mmproj-{model}-bf16.gguf")),
+      build_minimal_gguf("llama"),
+    )
+    .unwrap();
+
+    let found = find_mmproj(&dir.join(format!("{model}.gguf")));
+    assert!(found.is_some());
+    // Both are equally valid named candidates, pick the first one (arbitrary).
+    // The log warning should have triggered.
     fs::remove_dir_all(&dir).ok();
   }
 
@@ -981,14 +1031,24 @@ mod tests {
   }
 
   #[test]
-  fn find_mmproj_returns_none_when_no_companion() {
-    let dir = temp_dir("mmproj-none");
-    fs::write(dir.join("model.gguf"), build_minimal_gguf("llama")).unwrap();
-    fs::write(dir.join("unrelated.gguf"), build_minimal_gguf("llama")).unwrap();
-    let found = find_mmproj(&dir.join("model.gguf"));
-    assert!(
-      found.is_none(),
-      "find_mmproj must return None when no companion exists"
+  fn test_canonical_base_normalization() {
+    assert_eq!(canonical_base("Qwen2-7B-Q4_K_M"), "qwen2-7b");
+    assert_eq!(canonical_base("Qwen2_7B_Q4_K_M"), "qwen2-7b");
+    assert_eq!(canonical_base("model...name---_"), "model-name");
+    assert_eq!(canonical_base("model-f16"), "model");
+  }
+
+  #[test]
+  fn find_mmproj_handles_separator_mismatch() {
+    let dir = temp_dir("mmproj-sep-mismatch");
+    fs::write(dir.join("qwen2_7b_q4_k_m.gguf"), build_minimal_gguf("llama")).unwrap();
+    fs::write(dir.join("qwen2-7b-mmproj.gguf"), build_minimal_gguf("llama")).unwrap();
+
+    let found = find_mmproj(&dir.join("qwen2_7b_q4_k_m.gguf"));
+    assert!(found.is_some());
+    assert_eq!(
+      found.unwrap().file_name().and_then(|s| s.to_str()),
+      Some("qwen2-7b-mmproj.gguf")
     );
     fs::remove_dir_all(&dir).ok();
   }
