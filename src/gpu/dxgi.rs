@@ -169,12 +169,22 @@ pub fn probe_devices() -> Option<Vec<GpuDevice>> {
         used_memory_bytes: 0,
         utilization_pct: None,
         temperature_c: None,
+        // DXGI exposes no PCI bus address; cross-backend dedup on
+        // Windows falls back to the adapter name.
+        device_id: None,
         uma_shared_total_bytes: uma_shared_total,
         uma_shared_used_bytes: None,
       },
     ));
   }
-  classify_devices(adapters)
+  // No hardware adapter survived filtering — let the probe chain fall
+  // through to the Vulkan fallback rather than reporting an empty set.
+  let devices = classify_devices(adapters);
+  if devices.is_empty() {
+    None
+  } else {
+    Some(devices)
+  }
 }
 
 /// Query the authoritative D3D12 `UMA` architecture flag for an
@@ -211,45 +221,9 @@ fn adapter_is_uma(adapter: &IDXGIAdapter1) -> bool {
   queried.is_ok() && arch.UMA.as_bool()
 }
 
-/// Roll up the per-adapter list into a single `GpuInfo` for the
-/// pre-multi-backend probe chain. Mixed-vendor laptops prefer the
-/// discrete-class vendor: NVIDIA > AMD > Intel.
-/// Returns `None` when no adapter remained after filtering — the
-/// probe chain falls through to the Vulkan fallback.
-#[cfg(test)]
-pub(crate) fn classify(adapters: Vec<(Vendor, GpuDevice)>) -> Option<GpuInfo> {
-  if adapters.is_empty() {
-    return None;
-  }
-  let has_nvidia = adapters.iter().any(|(v, _)| *v == Vendor::Nvidia);
-  let has_amd = adapters.iter().any(|(v, _)| *v == Vendor::Amd);
-  if has_nvidia {
-    let devices = adapters
-      .into_iter()
-      .filter(|(v, _)| *v == Vendor::Nvidia)
-      .map(|(_, d)| d)
-      .collect();
-    return Some(GpuInfo::Nvidia { devices });
-  }
-  if has_amd {
-    let devices = adapters
-      .into_iter()
-      .filter(|(v, _)| *v == Vendor::Amd)
-      .map(|(_, d)| d)
-      .collect();
-    return Some(GpuInfo::Amd { devices });
-  }
-  // Intel-only or unrecognised vendor — surface under `Unknown` so
-  // the TUI renders `backend unknown` instead of mis-labelling the
-  // card. The supervisor's `-ngl > 0` hint still applies.
-  let devices = adapters.into_iter().map(|(_, d)| d).collect();
-  Some(GpuInfo::Unknown { devices })
-}
-
-/// Return the raw device list (now that `probe_devices` collects all
-/// backends in `gpu::mod`, this is only used by tests that pin the
-/// old classify behavior). The devices retain their per-vendor backend
-/// tags set by `probe_devices`.
+/// Return the raw device list. Every DXGI adapter becomes a device
+/// carrying the per-vendor backend tag that `probe_devices` set; the
+/// multi-backend probe in `gpu::mod` groups and labels them.
 pub(crate) fn classify_devices(adapters: Vec<(Vendor, GpuDevice)>) -> Vec<GpuDevice> {
   adapters.into_iter().map(|(_, d)| d).collect()
 }
@@ -295,91 +269,5 @@ mod tests {
       buf[i] = c;
     }
     assert_eq!(description_to_string(&buf), "AMD Radeon RX 7900 XTX");
-  }
-
-  fn dev(name: &str, dedicated: u64) -> GpuDevice {
-    GpuDevice {
-      name: name.into(),
-      total_memory_bytes: dedicated,
-      ..Default::default()
-    }
-  }
-
-  #[test]
-  fn classify_returns_none_when_empty() {
-    assert!(classify(vec![]).is_none());
-  }
-
-  #[test]
-  fn classify_amd_only_surfaces_as_amd() {
-    let info = classify(vec![(Vendor::Amd, dev("RX 7900 XTX", 24 << 30))]).unwrap();
-    assert_eq!(info.label(), "amd");
-    if let GpuInfo::Amd { devices } = info {
-      assert_eq!(devices.len(), 1);
-      assert_eq!(devices[0].name, "RX 7900 XTX");
-    } else {
-      panic!("expected GpuInfo::Amd");
-    }
-  }
-
-  #[test]
-  fn classify_nvidia_only_surfaces_as_nvidia() {
-    let info = classify(vec![(Vendor::Nvidia, dev("RTX 4090", 24 << 30))]).unwrap();
-    assert_eq!(info.label(), "nvidia");
-  }
-
-  #[test]
-  fn classify_intel_only_surfaces_as_unknown() {
-    // Intel doesn't have a dedicated GpuInfo variant; surface under
-    // Unknown so the TUI says `backend unknown` rather than picking
-    // a wrong vendor label.
-    let info = classify(vec![(Vendor::Intel, dev("Arc A770", 16 << 30))]).unwrap();
-    assert_eq!(info.label(), "unknown");
-  }
-
-  #[test]
-  fn classify_mixed_prefers_nvidia_over_intel_igpu() {
-    // Common laptop shape: discrete NVIDIA + integrated Intel.
-    let info = classify(vec![
-      (Vendor::Nvidia, dev("RTX 4070 Laptop", 8 << 30)),
-      (Vendor::Intel, dev("Iris Xe", 0)),
-    ])
-    .unwrap();
-    assert_eq!(info.label(), "nvidia");
-    if let GpuInfo::Nvidia { devices } = info {
-      assert_eq!(devices.len(), 1);
-      assert_eq!(devices[0].name, "RTX 4070 Laptop");
-    } else {
-      panic!("expected GpuInfo::Nvidia");
-    }
-  }
-
-  #[test]
-  fn classify_mixed_prefers_amd_over_intel_igpu() {
-    let info = classify(vec![
-      (Vendor::Amd, dev("RX 7900 XTX", 24 << 30)),
-      (Vendor::Intel, dev("UHD Graphics 770", 0)),
-    ])
-    .unwrap();
-    assert_eq!(info.label(), "amd");
-  }
-
-  #[test]
-  fn classify_nvidia_and_amd_prefers_nvidia() {
-    // Edge case — workstation with both. Pick the vendor that has
-    // the best Rust SDK story (NVIDIA / NVML); we can revisit if a
-    // real user reports this.
-    let info = classify(vec![
-      (Vendor::Amd, dev("Radeon Pro W7900", 48 << 30)),
-      (Vendor::Nvidia, dev("RTX 6000 Ada", 48 << 30)),
-    ])
-    .unwrap();
-    assert_eq!(info.label(), "nvidia");
-  }
-
-  #[test]
-  fn classify_other_vendor_surfaces_as_unknown() {
-    let info = classify(vec![(Vendor::Other, dev("Mystery Card", 8 << 30))]).unwrap();
-    assert_eq!(info.label(), "unknown");
   }
 }

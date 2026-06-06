@@ -24,9 +24,11 @@ use crate::gpu::{self, GpuDevice, GpuInfo};
 /// list cards by name and the host stats pane can render per-GPU rows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceRow {
-  /// Backend-prefixed selector: `Nvidia0`, `Amd0`, `Vulkan0`,
-  /// `Metal0`. This is what the TUI passes as the `device` knob
-  /// (which becomes `--device` in the llama-server argv).
+  /// Backend-prefixed display label: `Nvidia0`, `Amd0`, `Vulkan0`,
+  /// `Metal0`. Used by the host stats pane to tag per-device rows.
+  /// This is *not* the `--device` value — launch selection draws from
+  /// the `llama-server --list-devices` catalog (`crate::launch::list_devices`),
+  /// whose selectors (`CUDA0`, `ROCm0`) are the only ones the binary accepts.
   pub selector: String,
   /// Backend the probe used to detect this device: `"nvidia"`,
   /// `"amd"`, `"apple_metal"`, or `"unknown"` (Vulkan fallback).
