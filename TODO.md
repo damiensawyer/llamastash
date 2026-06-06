@@ -144,6 +144,7 @@ Two release tracks:
 - [ ] n-cpu-moe flag support (pr #20)
 - [ ] **Need brainstorm/plan**: Look into gpu/cpu offload split
 - [ ] `start` should support advanced params like TUI.
+- [ ] reorder knobs by importance in settings ui
 - [ ] **Surface mmproj/vision in the UI.** Multimodal projector auto-detection (PR #15, issue #13) attaches `--mmproj` daemon-side, but nothing tells the user a projector was found and the model launched vision-capable — they only learn by trying image input or reading daemon logs. Add a visible signal: e.g. a "vision" badge on the model row in the TUI list / `llamastash list`, and/or a line in the Settings/Logs tab and `show` output. Detection lives in `src/discovery/scanner.rs::find_mmproj`; the resolved path rides `LaunchParams.mmproj_path`.
 - [ ] **Need brainstorm/plan**: **Anthropic `/v1/messages` compatibility shim** on top of the OpenAI-compat proxy. Most agents do OpenAI; Claude Code prefers Anthropic shape.
 - [ ] **Need brainstorm/plan**: Multiple backend support
