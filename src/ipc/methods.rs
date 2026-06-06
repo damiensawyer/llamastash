@@ -1177,10 +1177,18 @@ pub(crate) async fn start_model_inner(
   let mut launch_params = LaunchParams::new(parsed.model_path.clone(), mode);
   launch_params.port = Some(port);
   launch_params.extras = parsed.extras.into_iter().map(OsString::from).collect();
-  launch_params.mmproj_path = parsed
-    .mmproj_path
-    .clone()
-    .or_else(|| crate::discovery::scanner::find_mmproj(&parsed.model_path));
+  // Resolve the multimodal projector: an explicit `mmproj_path` wins;
+  // otherwise auto-detect a companion next to the model — unless the
+  // caller is already managing the projector through `extras`
+  // (`--mmproj` to pin a path, `--no-mmproj` to force text-only), in
+  // which case auto-detection would only emit a redundant second flag.
+  launch_params.mmproj_path = parsed.mmproj_path.clone().or_else(|| {
+    if extras_manage_mmproj(&launch_params.extras) {
+      None
+    } else {
+      crate::discovery::scanner::find_mmproj(&parsed.model_path)
+    }
+  });
 
   // Merge the caller's top-level `ctx` and `reasoning` into the
   // User-layer typed knobs so they participate in the resolver chain
@@ -1520,6 +1528,21 @@ fn resolve_model_id_and_arch(
   Ok((id, arch))
 }
 
+/// Does the caller's `extras` tail already manage the multimodal
+/// projector? `--mmproj <path>` pins a projector and `--no-mmproj`
+/// force-disables it; in either case the daemon must not auto-detect
+/// one too. Matches the flag head in both space form (`--mmproj`) and
+/// equals form (`--mmproj=/path`), case-insensitively. `--no-mmproj-offload`
+/// (offload tuning, projector still on) is left to auto-detect, so the
+/// match is exact rather than a prefix test.
+fn extras_manage_mmproj(extras: &[OsString]) -> bool {
+  extras.iter().any(|e| {
+    let lossy = e.to_string_lossy();
+    let head = lossy.split('=').next().unwrap_or(&lossy);
+    head.eq_ignore_ascii_case("--mmproj") || head.eq_ignore_ascii_case("--no-mmproj")
+  })
+}
+
 /// Total on-disk weight bytes for the model the launch handler is
 /// about to spawn. Prefers the catalog row (which already includes
 /// split-shard aggregation via `discovery::shard_sizes`); falls back
@@ -1789,6 +1812,27 @@ mod tests {
 
   fn ctx() -> MethodContext {
     MethodContext::new(ShutdownToken::new())
+  }
+
+  #[test]
+  fn extras_manage_mmproj_detects_explicit_projector_flags() {
+    let pin = vec![OsString::from("--mmproj"), OsString::from("/m/p.gguf")];
+    assert!(extras_manage_mmproj(&pin), "space-form --mmproj");
+    let pin_eq = vec![OsString::from("--MMPROJ=/m/p.gguf")];
+    assert!(
+      extras_manage_mmproj(&pin_eq),
+      "equals-form, case-insensitive"
+    );
+    let disable = vec![OsString::from("--no-mmproj")];
+    assert!(extras_manage_mmproj(&disable), "--no-mmproj force-disable");
+    // Offload tuning leaves the projector on → auto-detect still runs.
+    let offload = vec![OsString::from("--no-mmproj-offload")];
+    assert!(
+      !extras_manage_mmproj(&offload),
+      "--no-mmproj-offload is not projector management"
+    );
+    let unrelated = vec![OsString::from("--threads"), OsString::from("8")];
+    assert!(!extras_manage_mmproj(&unrelated));
   }
 
   #[tokio::test]
