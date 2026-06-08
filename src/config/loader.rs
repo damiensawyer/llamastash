@@ -277,6 +277,20 @@ pub struct TypedKnobs {
   /// device catalog, never a bare index. The daemon spawns the binary
   /// that owns the selector (see [`crate::launch::list_devices`]).
   pub device: Option<String>,
+  /// Proportional split of the model across multiple GPUs. Maps to
+  /// `--tensor-split` (e.g. `"3,1"` puts 75% on GPU 0 and 25% on
+  /// GPU 1). Forwarded verbatim; one comma-separated value per GPU.
+  /// Only meaningful on multi-GPU hosts.
+  pub tensor_split: Option<String>,
+  /// Primary GPU index that holds non-split tensors (and the KV cache
+  /// under `split_mode = row`). Maps to `--main-gpu`. Only meaningful
+  /// on multi-GPU hosts.
+  pub main_gpu: Option<u32>,
+  /// How llama-server splits the model across GPUs. Maps to
+  /// `--split-mode` (`none` = single GPU, `layer` = llama-server's
+  /// default by-layer split, `row` = by-row split). Only meaningful
+  /// on multi-GPU hosts.
+  pub split_mode: Option<String>,
 }
 
 impl Default for Config {

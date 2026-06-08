@@ -226,13 +226,21 @@ pub fn argvify(knobs: &TypedKnobs) -> Vec<OsString> {
       KnobField::UbatchSize => push_u32(&mut out, spec.canonical, knobs.ubatch_size),
       KnobField::RopeFreqScale => push_f32(&mut out, spec.canonical, knobs.rope_freq_scale),
       KnobField::Keep => push_u32(&mut out, spec.canonical, knobs.keep),
+      KnobField::TensorSplit => push_str(&mut out, spec.canonical, knobs.tensor_split.as_deref()),
+      KnobField::MainGpu => push_u32(&mut out, spec.canonical, knobs.main_gpu),
+      KnobField::SplitMode => push_str(&mut out, spec.canonical, knobs.split_mode.as_deref()),
     }
     // `ValueKind` is the source-of-truth for emission shape; sanity
     // check that our match handled the right kind.
     debug_assert!(
       matches!(
         spec.kind,
-        ValueKind::U32 | ValueKind::F32 | ValueKind::Bool | ValueKind::KvCacheType | ValueKind::Str
+        ValueKind::U32
+          | ValueKind::F32
+          | ValueKind::Bool
+          | ValueKind::KvCacheType
+          | ValueKind::SplitMode
+          | ValueKind::Str
       ),
       "ValueKind exhaustiveness drift"
     );
@@ -432,6 +440,9 @@ fn try_inherit_field(into: &mut TypedKnobs, from: &TypedKnobs, field: KnobField)
     KnobField::RopeFreqScale => copy_some(&mut into.rope_freq_scale, from.rope_freq_scale),
     KnobField::Keep => copy_some(&mut into.keep, from.keep),
     KnobField::Device => copy_some_clone(&mut into.device, &from.device),
+    KnobField::TensorSplit => copy_some_clone(&mut into.tensor_split, &from.tensor_split),
+    KnobField::MainGpu => copy_some(&mut into.main_gpu, from.main_gpu),
+    KnobField::SplitMode => copy_some_clone(&mut into.split_mode, &from.split_mode),
   }
 }
 
@@ -627,6 +638,9 @@ mod tests {
       rope_freq_scale: Some(1.0),
       keep: Some(128),
       device: None,
+      tensor_split: Some("3,1".into()),
+      main_gpu: Some(0),
+      split_mode: Some("layer".into()),
     };
     let argv = strs(&argvify(&knobs));
     assert_eq!(
@@ -636,6 +650,12 @@ mod tests {
         "99",
         "--n-cpu-moe",
         "12",
+        "--tensor-split",
+        "3,1",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "layer",
         "--threads",
         "8",
         "--cache-type-k",

@@ -14,7 +14,9 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use crate::config::TypedKnobs;
-use crate::launch::flag_aliases::{KnobField, KV_CACHE_TYPES};
+use crate::launch::flag_aliases::{
+  knob_display_groups, knob_row_visible, KnobField, KV_CACHE_TYPES, SPLIT_MODES,
+};
 use crate::launch::params::LayerLabel;
 
 /// Pre-canned context-length presets surfaced as quick picks. Custom
@@ -30,14 +32,17 @@ pub enum PickerField {
   Extras,
 }
 
-/// Lazily-built navigation order — every knob in `knob_specs()`
-/// order (ctx, reasoning, n_gpu_layers, …), followed by `Extras`.
-/// Built once on first access so per-keypress navigation does no
-/// allocation.
+/// Lazily-built navigation order — every knob in editor **display**
+/// order (the flattened [`knob_display_groups`], which clusters knobs
+/// by function and is distinct from the pinned argv order), followed
+/// by `Extras`. Built once on first access so per-keypress navigation
+/// does no allocation.
 static ALL_FIELDS: LazyLock<Box<[PickerField]>> = LazyLock::new(|| {
   let mut v: Vec<PickerField> = Vec::new();
-  for spec in crate::launch::flag_aliases::knob_specs() {
-    v.push(PickerField::Knob(spec.field));
+  for group in knob_display_groups() {
+    for field in group.fields {
+      v.push(PickerField::Knob(*field));
+    }
   }
   v.push(PickerField::Extras);
   v.into_boxed_slice()
@@ -77,7 +82,10 @@ impl PickerField {
         | KnobField::RopeFreqScale
         | KnobField::CacheTypeK
         | KnobField::CacheTypeV
-        | KnobField::Device => true,
+        | KnobField::Device
+        | KnobField::TensorSplit
+        | KnobField::MainGpu
+        | KnobField::SplitMode => true,
       },
     }
   }
@@ -233,12 +241,19 @@ impl LaunchPickerState {
       KnobField::BatchSize => self.cycle_u32(field, &[256, 512, 1024, 2048, 4096], forward),
       KnobField::UbatchSize => self.cycle_u32(field, &[128, 256, 512, 1024], forward),
       KnobField::Keep => self.cycle_u32(field, &[0, 64, 128, 256, 512, 1024], forward),
+      KnobField::MainGpu => self.cycle_u32(field, &[0, 1, 2, 3], forward),
       KnobField::RopeFreqScale => self.cycle_f32(field, &[0.5, 1.0, 2.0, 4.0], forward),
-      KnobField::CacheTypeK | KnobField::CacheTypeV => self.cycle_enum(field, forward),
+      KnobField::CacheTypeK | KnobField::CacheTypeV => {
+        self.cycle_str_set(field, KV_CACHE_TYPES, forward)
+      }
+      KnobField::SplitMode => self.cycle_str_set(field, SPLIT_MODES, forward),
       KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => {
         self.cycle_bool(field, forward)
       }
       KnobField::Device => self.cycle_device(field, forward),
+      // Free-form ratio with no natural preset set — edited via `e`.
+      // ←/→ is a deliberate no-op (there's nothing to cycle through).
+      KnobField::TensorSplit => {}
     }
   }
 
@@ -254,7 +269,9 @@ impl LaunchPickerState {
     self.set_user_f32(field, next);
   }
 
-  fn cycle_enum(&mut self, field: KnobField, forward: bool) {
+  /// Cycle a constrained-string knob (`cache_type_*`, `split_mode`)
+  /// through its allowed `set`.
+  fn cycle_str_set(&mut self, field: KnobField, set: &'static [&'static str], forward: bool) {
     // Find the current user-set value inside the `&'static [&'static str]`
     // catalog so cycle_through's `T = &'static str` lifetime detaches
     // from `&self` — that lets us call `set_user_str(&mut self, ...)`
@@ -262,8 +279,8 @@ impl LaunchPickerState {
     // `Vec<String>` + `Vec<&str>` allocation pair on every keypress.
     let current: Option<&'static str> = self
       .user_value_str(field)
-      .and_then(|s| KV_CACHE_TYPES.iter().copied().find(|t| *t == s));
-    let next = cycle_through(current, KV_CACHE_TYPES, forward);
+      .and_then(|s| set.iter().copied().find(|t| *t == s));
+    let next = cycle_through(current, set, forward);
     self.set_user_str(field, next.map(|s| s.to_string()));
   }
 
@@ -346,12 +363,14 @@ impl LaunchPickerState {
     self.device_catalog.len() > 1
   }
 
-  /// Whether a row is currently shown / navigable. Only the `device`
-  /// row is conditional — gated on [`Self::multi_device`].
+  /// Whether a row is currently shown / navigable. The Multi-GPU
+  /// placement knobs (`device`, `tensor_split`, `main_gpu`,
+  /// `split_mode`) are gated on [`Self::multi_device`]; everything
+  /// else is always shown. Delegates to the single-source group table.
   pub fn field_visible(&self, field: PickerField) -> bool {
     match field {
-      PickerField::Knob(KnobField::Device) => self.multi_device(),
-      _ => true,
+      PickerField::Knob(k) => knob_row_visible(k, self.multi_device()),
+      PickerField::Extras => true,
     }
   }
 
@@ -448,6 +467,9 @@ impl LaunchPickerState {
       KnobField::RopeFreqScale => self.user_knobs.rope_freq_scale.is_some(),
       KnobField::Keep => self.user_knobs.keep.is_some(),
       KnobField::Device => self.user_knobs.device.is_some(),
+      KnobField::TensorSplit => self.user_knobs.tensor_split.is_some(),
+      KnobField::MainGpu => self.user_knobs.main_gpu.is_some(),
+      KnobField::SplitMode => self.user_knobs.split_mode.is_some(),
     }
   }
 
@@ -461,6 +483,7 @@ impl LaunchPickerState {
       KnobField::BatchSize => self.user_knobs.batch_size,
       KnobField::UbatchSize => self.user_knobs.ubatch_size,
       KnobField::Keep => self.user_knobs.keep,
+      KnobField::MainGpu => self.user_knobs.main_gpu,
       _ => None,
     }
   }
@@ -477,6 +500,8 @@ impl LaunchPickerState {
       KnobField::CacheTypeK => self.user_knobs.cache_type_k.as_deref(),
       KnobField::CacheTypeV => self.user_knobs.cache_type_v.as_deref(),
       KnobField::Device => self.user_knobs.device.as_deref(),
+      KnobField::TensorSplit => self.user_knobs.tensor_split.as_deref(),
+      KnobField::SplitMode => self.user_knobs.split_mode.as_deref(),
       _ => None,
     }
   }
@@ -501,6 +526,7 @@ impl LaunchPickerState {
       KnobField::BatchSize => self.resolved.batch_size,
       KnobField::UbatchSize => self.resolved.ubatch_size,
       KnobField::Keep => self.resolved.keep,
+      KnobField::MainGpu => self.resolved.main_gpu,
       _ => None,
     }
   }
@@ -517,6 +543,8 @@ impl LaunchPickerState {
       KnobField::CacheTypeK => self.resolved.cache_type_k.as_deref(),
       KnobField::CacheTypeV => self.resolved.cache_type_v.as_deref(),
       KnobField::Device => self.resolved.device.as_deref(),
+      KnobField::TensorSplit => self.resolved.tensor_split.as_deref(),
+      KnobField::SplitMode => self.resolved.split_mode.as_deref(),
       _ => None,
     }
   }
@@ -541,6 +569,7 @@ impl LaunchPickerState {
       KnobField::BatchSize => self.user_knobs.batch_size = value,
       KnobField::UbatchSize => self.user_knobs.ubatch_size = value,
       KnobField::Keep => self.user_knobs.keep = value,
+      KnobField::MainGpu => self.user_knobs.main_gpu = value,
       _ => {}
     }
   }
@@ -556,6 +585,8 @@ impl LaunchPickerState {
       KnobField::CacheTypeK => self.user_knobs.cache_type_k = value,
       KnobField::CacheTypeV => self.user_knobs.cache_type_v = value,
       KnobField::Device => self.user_knobs.device = value,
+      KnobField::TensorSplit => self.user_knobs.tensor_split = value,
+      KnobField::SplitMode => self.user_knobs.split_mode = value,
       _ => {}
     }
   }
@@ -709,7 +740,7 @@ mod tests {
     let all = PickerField::all();
     assert!(
       all.len() > 14,
-      "should cover ctx + reasoning + 12 knobs + extras"
+      "should cover every typed knob (ctx, reasoning, offload, placement, …) + extras"
     );
     for expected in all.iter().skip(1).chain(std::iter::once(&all[0])) {
       s.next_field();
@@ -718,19 +749,30 @@ mod tests {
   }
 
   #[test]
-  fn navigation_skips_device_row_on_single_gpu() {
-    // Default picker has an empty catalog → the device row is hidden,
-    // so neither next_field nor prev_field ever lands on it.
+  fn navigation_skips_multi_gpu_rows_on_single_gpu() {
+    // Default picker has an empty catalog → the whole Multi-GPU
+    // placement group is hidden, so neither next_field nor prev_field
+    // ever lands on any of its rows.
     let mut s = LaunchPickerState::for_model("qwen");
     assert!(!s.multi_device());
+    let hidden = [
+      KnobField::Device,
+      KnobField::TensorSplit,
+      KnobField::MainGpu,
+      KnobField::SplitMode,
+    ];
     let n = PickerField::all().len();
     for _ in 0..n {
       s.next_field();
-      assert_ne!(s.field, PickerField::Knob(KnobField::Device));
+      for f in hidden {
+        assert_ne!(s.field, PickerField::Knob(f), "landed on hidden {f:?}");
+      }
     }
     for _ in 0..n {
       s.prev_field();
-      assert_ne!(s.field, PickerField::Knob(KnobField::Device));
+      for f in hidden {
+        assert_ne!(s.field, PickerField::Knob(f), "landed on hidden {f:?}");
+      }
     }
   }
 

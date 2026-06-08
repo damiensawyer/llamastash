@@ -15,16 +15,16 @@
 │────────────────────────────────────────────────────────────────────────────││ ────────────────────────────────────── │
 │m/x                                                                         ││ Running launch                         │
 │ ★ mistral-7b                                llama    Q4_K    8.0k    4.0G  ││   launch          L1                   │
-│m/y                                                                         ││   ctx             default              │
-│   phi-3                                     phi      Q4_K    8.0k    3.9G  ││   reasoning       default              │
+│m/y                                                                         ││   ── Context                           │
+│   phi-3                                     phi      Q4_K    8.0k    3.9G  ││   ctx             default              │
+│                                                                            ││   reasoning       default              │
+│                                                                            ││   ── GPU / CPU offload                 │
 │                                                                            ││   n_gpu_layers    default              │
 │                                                                            ││   n_cpu_moe       default              │
-│                                                                            ││   threads         default              │
+│                                                                            ││   ── Attention & KV cache              │
+│                                                                            ││   flash_attn      default              │
 │                                                                            ││   cache_type_k    default              │
 │                                                                            ││   cache_type_v    default              │
-│                                                                            ││   parallel        default              │
-│                                                                            ││   flash_attn      default              │
-│                                                                            ││   mlock           default              │
-│                                                                            ││   no_mmap         default              │
-│                                                                            ││   batch_size      default              │
+│                                                                            ││   ── Throughput                        │
+│                                                                            ││   threads         default              │
 └ ◌ launching · ◐ loading · ● ready · ▲ error · ○ stopped · ⇪ external ──────┘└ e:edit for launch · s:stop · ↑↓:scroll ┘

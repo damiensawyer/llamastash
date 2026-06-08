@@ -385,6 +385,11 @@ keybindings: {}
 #     n_cpu_moe: 12                  # → --n-cpu-moe (MoE layers on CPU)
 #     threads: 8                     # → --threads (CPU)
 #     flash_attn: true               # → --flash-attn
+#     # ── Multi-GPU placement (only meaningful with >1 GPU) ──
+#     tensor_split: "3,1"            # → --tensor-split (75% GPU0 / 25% GPU1)
+#     main_gpu: 0                    # → --main-gpu (primary GPU)
+#     split_mode: layer              # → --split-mode (none|layer|row)
+#     # device: Vulkan0              # → --device (pin to one selector)
 #     # ── KV cache quantisation ─────────────────────────────
 #     cache_type_k: q8_0             # → --cache-type-k
 #     cache_type_v: q8_0             # → --cache-type-v

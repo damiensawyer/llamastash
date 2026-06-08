@@ -95,6 +95,9 @@ fn merge(over: Option<TypedKnobs>, under: TypedKnobs) -> TypedKnobs {
     rope_freq_scale: over.rope_freq_scale.or(under.rope_freq_scale),
     keep: over.keep.or(under.keep),
     device: over.device.or(under.device),
+    tensor_split: over.tensor_split.or(under.tensor_split),
+    main_gpu: over.main_gpu.or(under.main_gpu),
+    split_mode: over.split_mode.or(under.split_mode),
   }
 }
 

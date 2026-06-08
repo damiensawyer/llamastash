@@ -343,6 +343,23 @@ pub struct App {
   pub(crate) last_proxy_status: Option<String>,
 }
 
+/// Fully-resolved launch request shared by `WriterCmd::StartModel`
+/// and [`ConfirmAction::LaunchDuplicate`]. `ctx` / `reasoning` are
+/// projected out of `knobs` for the wire payload's backward-compat
+/// top-level fields. Boxed in both enums so the large `TypedKnobs`
+/// payload doesn't bloat every other (tiny) variant — the imbalance
+/// `clippy::large_enum_variant` flags.
+#[derive(Debug, Clone)]
+pub struct StartModelArgs {
+  pub model_path: PathBuf,
+  pub ctx: Option<u32>,
+  pub reasoning: Option<bool>,
+  pub knobs: crate::config::TypedKnobs,
+  pub extras: Vec<String>,
+  pub mode: Option<crate::launch::mode::LaunchMode>,
+  pub prefer_port: Option<u16>,
+}
+
 /// Action awaiting user confirmation in the modal popup. Captured
 /// at the moment the user presses the trigger key, applied when
 /// they confirm with `y` / Enter.
@@ -381,13 +398,9 @@ pub enum ConfirmAction {
     /// Existing managed instance count, surfaced in the popup
     /// body so the user understands what they're piling on top of.
     active_instances: usize,
-    model_path: PathBuf,
-    ctx: Option<u32>,
-    reasoning: Option<bool>,
-    knobs: crate::config::TypedKnobs,
-    extras: Vec<String>,
-    mode: Option<crate::launch::mode::LaunchMode>,
-    prefer_port: Option<u16>,
+    /// The launch to dispatch on confirm — boxed and shared with
+    /// `WriterCmd::StartModel`.
+    args: Box<StartModelArgs>,
   },
 }
 

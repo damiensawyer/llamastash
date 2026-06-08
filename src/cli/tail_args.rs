@@ -10,7 +10,7 @@ use std::ffi::OsString;
 use crate::cli::exit_codes::{CliExit, USAGE};
 use crate::config::TypedKnobs;
 use crate::launch::flag_aliases::KnobField;
-use crate::launch::flag_aliases::{recognise, ValueKind, KV_CACHE_TYPES};
+use crate::launch::flag_aliases::{recognise, ValueKind, KV_CACHE_TYPES, SPLIT_MODES};
 
 /// Walk `tokens` and split into (TypedKnobs, extras). Last-occurrence
 /// wins for repeated knob flags.
@@ -128,6 +128,13 @@ fn apply_knob(
     (KnobField::Device, ValueKind::Str) => {
       knobs.device = value.map(str::to_string);
     }
+    (KnobField::TensorSplit, ValueKind::Str) => {
+      knobs.tensor_split = Some(parse_tensor_split(flag, value)?)
+    }
+    (KnobField::MainGpu, ValueKind::U32) => knobs.main_gpu = Some(parse_u32(flag, value)?),
+    (KnobField::SplitMode, ValueKind::SplitMode) => {
+      knobs.split_mode = Some(parse_split_mode(flag, value)?)
+    }
     _ => {
       // Drift guard: the spec/field tables disagreed. The
       // `apply_knob_handles_every_spec_in_the_alias_table` test
@@ -174,6 +181,54 @@ fn parse_f32(flag: &str, value: Option<&str>) -> Result<f32, CliExit> {
   let v = value.ok_or_else(|| CliExit::new(USAGE, format!("{flag}: expected float")))?;
   v.parse::<f32>()
     .map_err(|_| CliExit::new(USAGE, format!("{flag}: expected float, got {v:?}")))
+}
+
+/// Parse `--split-mode` against the allowed set (`none|layer|row`).
+fn parse_split_mode(flag: &str, value: Option<&str>) -> Result<String, CliExit> {
+  let v = value.ok_or_else(|| {
+    CliExit::new(
+      USAGE,
+      format!("{flag}: expected one of {}", SPLIT_MODES.join(", ")),
+    )
+  })?;
+  if SPLIT_MODES.contains(&v) {
+    Ok(v.to_string())
+  } else {
+    Err(CliExit::new(
+      USAGE,
+      format!(
+        "{flag}: expected one of {}, got {v:?}",
+        SPLIT_MODES.join(", ")
+      ),
+    ))
+  }
+}
+
+/// Parse `--tensor-split` — a comma-separated list of proportions
+/// (`"3,1"`, `"0.6,0.4"`). Validated to comma-separated numbers so a
+/// typo fails loudly at the CLI instead of inside llama-server, then
+/// stored verbatim for the child.
+fn parse_tensor_split(flag: &str, value: Option<&str>) -> Result<String, CliExit> {
+  let v = value
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+    .ok_or_else(|| {
+      CliExit::new(
+        USAGE,
+        format!("{flag}: expected comma-separated numbers (e.g. 3,1)"),
+      )
+    })?;
+  let all_numeric = v
+    .split(',')
+    .all(|part| !part.trim().is_empty() && part.trim().parse::<f32>().is_ok());
+  if all_numeric {
+    Ok(v.to_string())
+  } else {
+    Err(CliExit::new(
+      USAGE,
+      format!("{flag}: expected comma-separated numbers (e.g. 3,1), got {v:?}"),
+    ))
+  }
 }
 
 fn parse_kv_cache(flag: &str, value: Option<&str>) -> Result<String, CliExit> {
@@ -226,6 +281,47 @@ mod tests {
     assert!(extras.is_empty());
     let (alias, _) = parse_tail_args(&osvec(&["-ncmoe", "8"])).unwrap();
     assert_eq!(alias.n_cpu_moe, Some(8));
+  }
+
+  #[test]
+  fn placement_knobs_parse_canonical_and_alias() {
+    let (k, extras) = parse_tail_args(&osvec(&[
+      "--tensor-split",
+      "3,1",
+      "--main-gpu",
+      "0",
+      "--split-mode",
+      "row",
+    ]))
+    .unwrap();
+    assert_eq!(k.tensor_split.as_deref(), Some("3,1"));
+    assert_eq!(k.main_gpu, Some(0));
+    assert_eq!(k.split_mode.as_deref(), Some("row"));
+    assert!(extras.is_empty());
+    let (alias, _) =
+      parse_tail_args(&osvec(&["-ts", "2,1,1", "-mg", "1", "-sm", "layer"])).unwrap();
+    assert_eq!(alias.tensor_split.as_deref(), Some("2,1,1"));
+    assert_eq!(alias.main_gpu, Some(1));
+    assert_eq!(alias.split_mode.as_deref(), Some("layer"));
+  }
+
+  #[test]
+  fn split_mode_validates_set() {
+    let err = parse_tail_args(&osvec(&["--split-mode", "diagonal"])).unwrap_err();
+    assert_eq!(err.code, USAGE);
+    let msg = err.to_string();
+    assert!(msg.contains("none, layer, row"), "{msg}");
+  }
+
+  #[test]
+  fn tensor_split_rejects_non_numeric() {
+    let err = parse_tail_args(&osvec(&["--tensor-split", "3,x"])).unwrap_err();
+    assert_eq!(err.code, USAGE);
+    let msg = err.to_string();
+    assert!(msg.contains("--tensor-split"), "{msg}");
+    // A valid ratio round-trips verbatim.
+    let (k, _) = parse_tail_args(&osvec(&["--tensor-split", "0.6,0.4"])).unwrap();
+    assert_eq!(k.tensor_split.as_deref(), Some("0.6,0.4"));
   }
 
   #[test]
@@ -366,13 +462,16 @@ mod tests {
   /// generic "internal type mismatch" `USAGE` error at runtime.
   #[test]
   fn apply_knob_handles_every_spec_in_the_alias_table() {
-    use crate::launch::flag_aliases::{knob_specs, KV_CACHE_TYPES};
+    use crate::launch::flag_aliases::{knob_specs, KV_CACHE_TYPES, SPLIT_MODES};
     for spec in knob_specs() {
       let value: Option<&str> = match spec.kind {
         ValueKind::U32 => Some("1"),
         ValueKind::F32 => Some("1.0"),
         ValueKind::KvCacheType => Some(KV_CACHE_TYPES[0]),
+        ValueKind::SplitMode => Some(SPLIT_MODES[0]),
         ValueKind::Bool => None,
+        // `0` is a valid one-element tensor-split and a non-empty
+        // device selector, so both Str knobs mutate from this sample.
         ValueKind::Str => Some("0"),
       };
       let mut knobs = TypedKnobs::default();

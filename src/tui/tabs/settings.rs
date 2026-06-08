@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::launch::flag_aliases::{knob_specs, KnobField};
+use crate::launch::flag_aliases::{knob_display_groups, KnobField};
 use crate::theme::Palette;
 use crate::tui::app::App;
 use crate::tui::keybindings::{Action, Focus};
@@ -39,18 +39,22 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
       // miss all three and render `default` for a running launch that
       // is actually pinned to a real number.
       let resolved_ctx = last.and_then(|p| p.ctx).or(persisted_knobs.ctx);
-      for spec in knob_specs() {
-        // Match the editable form: no device row on single-GPU hosts.
-        if spec.field == KnobField::Device && !app.multi_device() {
+      for group in knob_display_groups() {
+        // Match the editable form: the whole Multi-GPU placement group
+        // is hidden on single-GPU / CPU-only hosts.
+        if group.multi_device_only && !app.multi_device() {
           continue;
         }
-        let value = match spec.field {
-          KnobField::Ctx => resolved_ctx
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "default".into()),
-          _ => format_persisted_knob_value(persisted_knobs, spec.field),
-        };
-        lines.push(kv(knob_label(spec.field), value, palette));
+        lines.push(group_header(group.title, palette));
+        for field in group.fields {
+          let value = match field {
+            KnobField::Ctx => resolved_ctx
+              .map(|v| v.to_string())
+              .unwrap_or_else(|| "default".into()),
+            _ => format_persisted_knob_value(persisted_knobs, *field),
+          };
+          lines.push(kv(knob_label(*field), value, palette));
+        }
       }
       let extras: String = last
         .map(|p| p.extras.join(" "))
@@ -112,7 +116,6 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     },
     palette,
   ));
-  lines.push(kv("model", picker_view.model_name.clone(), palette));
 
   // Duplicate-launch heads-up. Surfaces at the top of the panel so
   // it remains visible even when the typed-knob list (12 rows) pushes
@@ -145,44 +148,56 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   let mut focused_line: Option<u16> = None;
 
   // Every typed knob — including ctx and reasoning — flows through
-  // the same `value (chip)` shape. Empty rows render `default` as
-  // the value; the chip names the layer that would supply it.
-  for spec in knob_specs() {
-    let field = spec.field;
-    // The device row is hidden on single-GPU / CPU-only hosts so the
-    // editor isn't cluttered with a control that can only hold
-    // `default`. Navigation skips it too (see `field_visible`).
-    if !picker_view.field_visible(PickerField::Knob(field)) {
+  // the same `value (chip)` shape, grouped by function with a header
+  // per cluster (display order is distinct from argv order). Empty
+  // rows render `default` as the value; the chip names the layer that
+  // would supply it.
+  for group in knob_display_groups() {
+    // Skip the whole group — header included — when every row in it is
+    // hidden (the Multi-GPU placement group on single-GPU / CPU-only
+    // hosts, where each control can only ever hold `default`).
+    if !group
+      .fields
+      .iter()
+      .any(|f| picker_view.field_visible(PickerField::Knob(*f)))
+    {
       continue;
     }
-    let focused = row_for(PickerField::Knob(field));
-    if focused {
-      focused_line = Some(lines.len() as u16);
-    }
-    if picker_view.inline_edit.is_open()
-      && picker_view.inline_edit.field == Some(PickerField::Knob(field))
-    {
-      lines.push(inline_edit_row(
-        knob_label(field),
-        picker_view.inline_edit.input.buffer(),
-        focused,
-        palette,
-      ));
-      if let Some(err) = &picker_view.inline_edit.error {
-        lines.push(inline_warning_row(err, palette));
+    lines.push(group_header(group.title, palette));
+    for field in group.fields {
+      let field = *field;
+      if !picker_view.field_visible(PickerField::Knob(field)) {
+        continue;
       }
-    } else {
-      let value = format_knob_value(picker_view, field);
-      let source = picker_view.source_for(field).label();
-      lines.push(kv_focused(
-        knob_label(field),
-        value,
-        Some(source),
-        focused,
-        true,
-        palette,
-        show_source,
-      ));
+      let focused = row_for(PickerField::Knob(field));
+      if focused {
+        focused_line = Some(lines.len() as u16);
+      }
+      if picker_view.inline_edit.is_open()
+        && picker_view.inline_edit.field == Some(PickerField::Knob(field))
+      {
+        lines.push(inline_edit_row(
+          knob_label(field),
+          picker_view.inline_edit.input.buffer(),
+          focused,
+          palette,
+        ));
+        if let Some(err) = &picker_view.inline_edit.error {
+          lines.push(inline_warning_row(err, palette));
+        }
+      } else {
+        let value = format_knob_value(picker_view, field);
+        let source = picker_view.source_for(field).label();
+        lines.push(kv_focused(
+          knob_label(field),
+          value,
+          Some(source),
+          focused,
+          true,
+          palette,
+          show_source,
+        ));
+      }
     }
   }
 
@@ -314,6 +329,9 @@ fn knob_label(field: KnobField) -> &'static str {
     KnobField::RopeFreqScale => "rope_freq_scale",
     KnobField::Keep => "keep",
     KnobField::Device => "device",
+    KnobField::TensorSplit => "tensor_split",
+    KnobField::MainGpu => "main_gpu",
+    KnobField::SplitMode => "split_mode",
   }
 }
 
@@ -378,6 +396,20 @@ fn format_persisted_knob_value(knobs: &crate::config::TypedKnobs, field: KnobFie
       .filter(|v| !v.is_empty())
       .map(str::to_string)
       .unwrap_or_else(|| "default".into()),
+    KnobField::MainGpu => knobs
+      .main_gpu
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::TensorSplit => knobs
+      .tensor_split
+      .clone()
+      .filter(|v| !v.is_empty())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::SplitMode => knobs
+      .split_mode
+      .clone()
+      .filter(|v| !v.is_empty())
+      .unwrap_or_else(|| "default".into()),
   }
 }
 
@@ -398,7 +430,8 @@ fn format_knob_value(state: &LaunchPickerState, field: KnobField) -> String {
     | KnobField::Parallel
     | KnobField::BatchSize
     | KnobField::UbatchSize
-    | KnobField::Keep => state
+    | KnobField::Keep
+    | KnobField::MainGpu => state
       .effective_u32(field)
       .map(|v| v.to_string())
       .unwrap_or_else(|| "default".into()),
@@ -406,7 +439,10 @@ fn format_knob_value(state: &LaunchPickerState, field: KnobField) -> String {
       .effective_f32(field)
       .map(|v| format!("{v}"))
       .unwrap_or_else(|| "default".into()),
-    KnobField::CacheTypeK | KnobField::CacheTypeV => state
+    KnobField::CacheTypeK
+    | KnobField::CacheTypeV
+    | KnobField::TensorSplit
+    | KnobField::SplitMode => state
       .effective_str(field)
       .unwrap_or_else(|| "default".into()),
     KnobField::Device => state.device_value_display(),
@@ -426,6 +462,16 @@ fn heading<'a>(text: &'a str, palette: &Palette) -> Line<'a> {
     Style::default()
       .fg(palette.highlight)
       .add_modifier(Modifier::BOLD),
+  ))
+}
+
+/// Quiet divider above each knob cluster — `── Title`, indented to
+/// align with the rows below it and painted in the muted tone so it
+/// reads as a separator, not a value row.
+fn group_header(title: &str, palette: &Palette) -> Line<'static> {
+  Line::from(Span::styled(
+    format!("  ── {title}"),
+    palette.muted_style().add_modifier(Modifier::BOLD),
   ))
 }
 

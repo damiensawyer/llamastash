@@ -36,6 +36,12 @@ pub enum KnobField {
   RopeFreqScale,
   Keep,
   Device,
+  /// Proportional model split across GPUs (`--tensor-split 3,1`).
+  TensorSplit,
+  /// Primary GPU holding non-split tensors (`--main-gpu`).
+  MainGpu,
+  /// How llama-server splits across GPUs (`--split-mode none|layer|row`).
+  SplitMode,
 }
 
 /// What the parser expects after the flag head. Bool consumes no
@@ -48,7 +54,9 @@ pub enum ValueKind {
   Bool,
   /// `cache_type_k` / `cache_type_v` allowed set.
   KvCacheType,
-  /// Free-form string (e.g. device selector).
+  /// `split_mode` allowed set (`none|layer|row`).
+  SplitMode,
+  /// Free-form string (e.g. device selector, tensor-split ratio).
   Str,
 }
 
@@ -69,6 +77,10 @@ pub struct KnobSpec {
 /// Allowed values for `cache_type_k` / `cache_type_v` (matches
 /// llama-server's documented k/v cache quant types).
 pub const KV_CACHE_TYPES: &[&str] = &["f16", "q8_0", "q4_0"];
+
+/// Allowed values for `split_mode` (matches llama-server's
+/// `--split-mode` choices). `layer` is llama-server's own default.
+pub const SPLIT_MODES: &[&str] = &["none", "layer", "row"];
 
 /// Canonical emission order. Pinned by the plan's Risks & Dependencies
 /// table to keep argv diffs readable across releases. `Ctx` and
@@ -107,6 +119,27 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--device",
     aliases: &["-d"],
     kind: ValueKind::Str,
+    fallback_label: LayerLabel::ServerDefault,
+  },
+  KnobSpec {
+    field: KnobField::TensorSplit,
+    canonical: "--tensor-split",
+    aliases: &["-ts"],
+    kind: ValueKind::Str,
+    fallback_label: LayerLabel::ServerDefault,
+  },
+  KnobSpec {
+    field: KnobField::MainGpu,
+    canonical: "--main-gpu",
+    aliases: &["-mg"],
+    kind: ValueKind::U32,
+    fallback_label: LayerLabel::ServerDefault,
+  },
+  KnobSpec {
+    field: KnobField::SplitMode,
+    canonical: "--split-mode",
+    aliases: &["-sm"],
+    kind: ValueKind::SplitMode,
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -252,6 +285,99 @@ pub fn token_matches(token: &str, field: KnobField) -> bool {
   spec.canonical == head || spec.aliases.iter().any(|a| *a == head)
 }
 
+/// One titled cluster of knobs in the Settings editor's **display**
+/// order. This is deliberately distinct from [`knob_specs`] (which is
+/// the pinned *argv* emission order): the editor groups knobs by what
+/// they do and surfaces the most-changed clusters first, while argv
+/// order stays stable so recorded launch argv / goldens don't churn
+/// when the UI is reorganised.
+pub struct KnobGroup {
+  /// Header rendered above the group's rows.
+  pub title: &'static str,
+  /// Knobs in this group, top-to-bottom.
+  pub fields: &'static [KnobField],
+  /// When true, the whole group (header + rows) is hidden unless the
+  /// host exposes more than one selectable device — these knobs are
+  /// meaningless on single-GPU / CPU-only hosts.
+  pub multi_device_only: bool,
+}
+
+/// Editor display groups, ordered by how often a typical user touches
+/// them. Every [`KnobField`] appears exactly once across the groups
+/// (drift-guarded by a test). The flat concatenation of `fields` is
+/// also the vertical navigation order (see
+/// `crate::tui::launch_picker::PickerField::all`).
+const DISPLAY_GROUPS: &[KnobGroup] = &[
+  KnobGroup {
+    title: "Context",
+    fields: &[KnobField::Ctx, KnobField::Reasoning],
+    multi_device_only: false,
+  },
+  KnobGroup {
+    title: "GPU / CPU offload",
+    fields: &[KnobField::NGpuLayers, KnobField::NCpuMoe],
+    multi_device_only: false,
+  },
+  KnobGroup {
+    title: "Multi-GPU placement",
+    fields: &[
+      KnobField::Device,
+      KnobField::TensorSplit,
+      KnobField::MainGpu,
+      KnobField::SplitMode,
+    ],
+    multi_device_only: true,
+  },
+  KnobGroup {
+    title: "Attention & KV cache",
+    fields: &[
+      KnobField::FlashAttn,
+      KnobField::CacheTypeK,
+      KnobField::CacheTypeV,
+    ],
+    multi_device_only: false,
+  },
+  KnobGroup {
+    title: "Throughput",
+    fields: &[
+      KnobField::Threads,
+      KnobField::Parallel,
+      KnobField::BatchSize,
+      KnobField::UbatchSize,
+    ],
+    multi_device_only: false,
+  },
+  KnobGroup {
+    title: "Memory loading",
+    fields: &[KnobField::Mlock, KnobField::NoMmap],
+    multi_device_only: false,
+  },
+  KnobGroup {
+    title: "Advanced",
+    fields: &[KnobField::RopeFreqScale, KnobField::Keep],
+    multi_device_only: false,
+  },
+];
+
+/// Editor display groups in render / navigation order.
+pub fn knob_display_groups() -> &'static [KnobGroup] {
+  DISPLAY_GROUPS
+}
+
+/// Whether a knob row is shown / navigable for the given host. Only
+/// the `multi_device_only` groups are conditional — gated on the host
+/// exposing more than one selectable device. Unknown fields (should
+/// never happen — the drift test covers every field) default to
+/// visible.
+pub fn knob_row_visible(field: KnobField, multi_device: bool) -> bool {
+  for group in DISPLAY_GROUPS {
+    if group.fields.contains(&field) {
+      return !group.multi_device_only || multi_device;
+    }
+  }
+  true
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -318,6 +444,9 @@ mod tests {
         "--n-gpu-layers",
         "--n-cpu-moe",
         "--device",
+        "--tensor-split",
+        "--main-gpu",
+        "--split-mode",
         "--threads",
         "--cache-type-k",
         "--cache-type-v",
@@ -331,6 +460,59 @@ mod tests {
         "--keep",
       ]
     );
+  }
+
+  #[test]
+  fn recognise_new_placement_knobs_canonical_and_alias() {
+    assert_eq!(
+      recognise("--tensor-split").unwrap().field,
+      KnobField::TensorSplit
+    );
+    assert_eq!(recognise("-ts").unwrap().field, KnobField::TensorSplit);
+    assert_eq!(recognise("--main-gpu").unwrap().field, KnobField::MainGpu);
+    assert_eq!(recognise("-mg").unwrap().field, KnobField::MainGpu);
+    assert_eq!(
+      recognise("--split-mode").unwrap().field,
+      KnobField::SplitMode
+    );
+    assert_eq!(recognise("-sm").unwrap().field, KnobField::SplitMode);
+  }
+
+  #[test]
+  fn display_groups_cover_every_knob_field_exactly_once() {
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut count = 0usize;
+    for group in knob_display_groups() {
+      for f in group.fields {
+        assert!(
+          seen.insert(spec_for(*f).canonical),
+          "{:?} appears in more than one display group",
+          f
+        );
+        count += 1;
+      }
+    }
+    assert_eq!(
+      count,
+      knob_specs().len(),
+      "display groups must cover every knob in knob_specs() exactly once"
+    );
+  }
+
+  #[test]
+  fn multi_gpu_placement_knobs_hidden_on_single_device() {
+    for field in [
+      KnobField::Device,
+      KnobField::TensorSplit,
+      KnobField::MainGpu,
+      KnobField::SplitMode,
+    ] {
+      assert!(!knob_row_visible(field, false), "{field:?} on single GPU");
+      assert!(knob_row_visible(field, true), "{field:?} on multi GPU");
+    }
+    // A non-placement knob is always visible.
+    assert!(knob_row_visible(KnobField::Ctx, false));
   }
 
   #[test]

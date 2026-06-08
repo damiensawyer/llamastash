@@ -92,17 +92,11 @@ pub enum Event {
 pub enum WriterCmd {
   /// `start_model` — launch the focused model with the picker's
   /// ctx / reasoning / typed-knob overrides / extras / mode fields.
-  /// `reasoning: None` means "omit the field"; the daemon then falls
-  /// back to whatever the model's metadata implies.
-  StartModel {
-    model_path: PathBuf,
-    ctx: Option<u32>,
-    reasoning: Option<bool>,
-    knobs: crate::config::TypedKnobs,
-    extras: Vec<String>,
-    mode: Option<crate::launch::mode::LaunchMode>,
-    prefer_port: Option<u16>,
-  },
+  /// `reasoning: None` (inside `args`) means "omit the field"; the
+  /// daemon then falls back to whatever the model's metadata implies.
+  /// Boxed (shared with `ConfirmAction::LaunchDuplicate`) so the large
+  /// `TypedKnobs` payload doesn't bloat the other tiny variants.
+  StartModel(Box<crate::tui::app::StartModelArgs>),
   /// `stop_model` — graceful shutdown of the supplied launch.
   /// Dispatched by the `s` hotkey when the cursor sits on a
   /// running managed row.
@@ -404,7 +398,8 @@ fn open_focused_inline_edit(app: &mut App) {
         | KnobField::Parallel
         | KnobField::BatchSize
         | KnobField::UbatchSize
-        | KnobField::Keep => picker
+        | KnobField::Keep
+        | KnobField::MainGpu => picker
           .effective_u32(field)
           .map(|v| v.to_string())
           .unwrap_or_default(),
@@ -412,9 +407,11 @@ fn open_focused_inline_edit(app: &mut App) {
           .effective_f32(field)
           .map(|v| format!("{v}"))
           .unwrap_or_default(),
-        KnobField::CacheTypeK | KnobField::CacheTypeV | KnobField::Device => {
-          picker.effective_str(field).unwrap_or_default()
-        }
+        KnobField::CacheTypeK
+        | KnobField::CacheTypeV
+        | KnobField::Device
+        | KnobField::TensorSplit
+        | KnobField::SplitMode => picker.effective_str(field).unwrap_or_default(),
         // Booleans are filtered out by the `is_editable` guard above.
         // The match has to stay exhaustive on `KnobField`; reaching
         // this arm means `is_editable` and `KnobField` drifted apart.
@@ -444,7 +441,7 @@ fn open_focused_inline_edit(app: &mut App) {
 /// Commit the open inline edit. Returns true when a commit closed
 /// the editor — caller can then proceed to a `Submit` action.
 fn commit_inline_edit(app: &mut App) -> bool {
-  use crate::launch::flag_aliases::{KnobField, KV_CACHE_TYPES};
+  use crate::launch::flag_aliases::{KnobField, KV_CACHE_TYPES, SPLIT_MODES};
   use crate::tui::launch_picker::PickerField;
   let Some(picker) = app.launch_picker.as_mut() else {
     return false;
@@ -495,7 +492,8 @@ fn commit_inline_edit(app: &mut App) -> bool {
       | KnobField::Parallel
       | KnobField::BatchSize
       | KnobField::UbatchSize
-      | KnobField::Keep => match buffer.parse::<u32>() {
+      | KnobField::Keep
+      | KnobField::MainGpu => match buffer.parse::<u32>() {
         Ok(v) => {
           picker.set_user_u32(k, Some(v));
           Ok(())
@@ -515,6 +513,27 @@ fn commit_inline_edit(app: &mut App) -> bool {
           Ok(())
         } else {
           Err(format!("expected one of {}", KV_CACHE_TYPES.join(", ")))
+        }
+      }
+      KnobField::SplitMode => {
+        if SPLIT_MODES.iter().any(|t| *t == buffer) {
+          picker.set_user_str(k, Some(buffer.clone()));
+          Ok(())
+        } else {
+          Err(format!("expected one of {}", SPLIT_MODES.join(", ")))
+        }
+      }
+      KnobField::TensorSplit => {
+        // Comma-separated proportions (`3,1`). Validate so a typo
+        // surfaces under the row instead of inside llama-server.
+        let ok = buffer
+          .split(',')
+          .all(|p| !p.trim().is_empty() && p.trim().parse::<f32>().is_ok());
+        if ok {
+          picker.set_user_str(k, Some(buffer.clone()));
+          Ok(())
+        } else {
+          Err("expected comma-separated numbers (e.g. 3,1)".into())
         }
       }
       KnobField::Device => {
@@ -1380,27 +1399,8 @@ fn apply_confirmed(app: &mut App, action: ConfirmAction, writer: Option<&mpsc::S
         }
       }
     }
-    ConfirmAction::LaunchDuplicate {
-      name,
-      model_path,
-      ctx,
-      reasoning,
-      knobs,
-      extras,
-      mode,
-      prefer_port,
-      ..
-    } => {
-      let cmd = WriterCmd::StartModel {
-        model_path,
-        ctx,
-        reasoning,
-        knobs,
-        extras,
-        mode,
-        prefer_port,
-      };
-      dispatch_launch(app, writer, cmd, name);
+    ConfirmAction::LaunchDuplicate { name, args, .. } => {
+      dispatch_launch(app, writer, WriterCmd::StartModel(args), name);
     }
   }
 }
@@ -1724,34 +1724,28 @@ fn apply_launch_submit(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) 
   // ctx and reasoning ride inside `knobs` now; the wire payload also
   // carries dedicated top-level fields for backward compat with
   // scripted clients, so project them out of `knobs` for the call.
-  let cmd = WriterCmd::StartModel {
-    model_path: path.clone(),
-    ctx: knobs.ctx,
-    reasoning: knobs.reasoning,
-    knobs: knobs.clone(),
-    extras: extras.clone(),
-    mode,
-    prefer_port: picker.prefer_port,
-  };
-
   let name = app.display_name_for(&path);
   let active_instances = app.managed.iter().filter(|m| m.path == path).count();
+  let args = Box::new(crate::tui::app::StartModelArgs {
+    ctx: knobs.ctx,
+    reasoning: knobs.reasoning,
+    model_path: path,
+    knobs,
+    extras,
+    mode,
+    prefer_port: picker.prefer_port,
+  });
+
   if active_instances > 0 {
     app.confirm_dialog = Some(ConfirmAction::LaunchDuplicate {
       name,
       active_instances,
-      model_path: path,
-      ctx: knobs.ctx,
-      reasoning: knobs.reasoning,
-      knobs,
-      extras,
-      mode,
-      prefer_port: picker.prefer_port,
+      args,
     });
     return;
   }
 
-  dispatch_launch(app, writer, cmd, name);
+  dispatch_launch(app, writer, WriterCmd::StartModel(args), name);
 }
 
 /// Send a fully-assembled `StartModel` payload via the writer
@@ -2002,15 +1996,16 @@ async fn handle_restart_daemon(
 
 fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
   match cmd {
-    WriterCmd::StartModel {
-      model_path,
-      ctx,
-      reasoning,
-      knobs,
-      extras,
-      mode,
-      prefer_port,
-    } => {
+    WriterCmd::StartModel(args) => {
+      let crate::tui::app::StartModelArgs {
+        model_path,
+        ctx,
+        reasoning,
+        knobs,
+        extras,
+        mode,
+        prefer_port,
+      } = *args;
       let mode_str = mode.map(|m| match m {
         crate::launch::mode::LaunchMode::Chat => "chat",
         crate::launch::mode::LaunchMode::Embedding => "embedding",
@@ -4199,16 +4194,11 @@ mod tests {
 
     let cmd = rx.try_recv().expect("writer must receive start_model");
     match cmd {
-      WriterCmd::StartModel {
-        model_path,
-        ctx,
-        reasoning,
-        ..
-      } => {
-        assert_eq!(model_path, PathBuf::from("/m/qwen.gguf"));
-        assert_eq!(ctx, expected_ctx);
+      WriterCmd::StartModel(args) => {
+        assert_eq!(args.model_path, PathBuf::from("/m/qwen.gguf"));
+        assert_eq!(args.ctx, expected_ctx);
         assert_eq!(
-          reasoning,
+          args.reasoning,
           Some(true),
           "On reasoning must serialise as Some(true)"
         );
@@ -5085,7 +5075,7 @@ mod tests {
       Some(&tx),
     );
     let cmd = rx.try_recv().expect("writer must receive start_model");
-    assert!(matches!(cmd, WriterCmd::StartModel { .. }));
+    assert!(matches!(cmd, WriterCmd::StartModel(_)));
     assert!(
       app.confirm_dialog.is_none(),
       "popup must clear after confirm"
@@ -5123,7 +5113,7 @@ mod tests {
     let (tx, mut rx) = mpsc::channel::<WriterCmd>(8);
     pump_input_with_writer(&mut app, key(KeyCode::Enter, KeyModifiers::NONE), Some(&tx));
     let cmd = rx.try_recv().expect("writer must receive start_model");
-    assert!(matches!(cmd, WriterCmd::StartModel { .. }));
+    assert!(matches!(cmd, WriterCmd::StartModel(_)));
     assert!(app.confirm_dialog.is_none(), "no confirm popup expected");
   }
 
@@ -5151,7 +5141,7 @@ mod tests {
     let (tx, mut rx) = mpsc::channel::<WriterCmd>(8);
     pump_input_with_writer(&mut app, key(KeyCode::Enter, KeyModifiers::NONE), Some(&tx));
     let cmd = rx.try_recv().expect("Enter must dispatch StartModel");
-    assert!(matches!(cmd, WriterCmd::StartModel { .. }));
+    assert!(matches!(cmd, WriterCmd::StartModel(_)));
   }
 
   #[test]

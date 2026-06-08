@@ -28,7 +28,7 @@ LlamaStash reads `$XDG_CONFIG_HOME/llamastash/config.yaml` on Linux (fallback `~
 
 Resolution order (highest wins): `--config <PATH>` → `LLAMASTASH_CONFIG` env var → the platform path above.
 
-All keys are optional; missing keys fall back to defaults. Unknown top-level keys are ignored (forward-compat); unknown *values* within a known key — and unknown keys inside a `deny_unknown_fields` block like `[proxy]` — are rejected **loudly**: the command prints `config error: …` to stderr and exits `64` (`USAGE`) rather than silently using defaults. `init` (which rewrites the file) and `doctor` (which diagnoses setup) are exempt so a broken config can always be repaired. A *missing* config file is not an error.
+All keys are optional; missing keys fall back to defaults. Unknown top-level keys are ignored (forward-compat); unknown _values_ within a known key — and unknown keys inside a `deny_unknown_fields` block like `[proxy]` — are rejected **loudly**: the command prints `config error: …` to stderr and exits `64` (`USAGE`) rather than silently using defaults. `init` (which rewrites the file) and `doctor` (which diagnoses setup) are exempt so a broken config can always be repaired. A _missing_ config file is not an error.
 
 ### Schema
 
@@ -60,34 +60,35 @@ custom_theme:
   status_stopped: "#565F89"
   status_external: "#7DCFFF"
 
-model_paths:                # Extra dirs to scan. Repeatable on the CLI as -p/--model-path.
+model_paths: # Extra dirs to scan. Repeatable on the CLI as -p/--model-path.
   - /opt/llms
 
-port_range:                 # Default 41100..=41300. Inclusive.
+port_range: # Default 41100..=41300. Inclusive.
   start: 41100
   end: 41300
 
-llama_server_path: /usr/local/bin/llama-server  # Overridable by --llama-server / env var.
+llama_server_path: /usr/local/bin/llama-server # Overridable by --llama-server / env var.
 
-disable_scan: false         # Equivalent to LLAMASTASH_NO_SCAN=1.
+disable_scan: false # Equivalent to LLAMASTASH_NO_SCAN=1.
 disable_default_cache_paths:
   huggingface: false
   ollama: false
   lm_studio: false
 
-probe_timeout_secs: 120     # Per-launch health-probe deadline.
+probe_timeout_secs: 120 # Per-launch health-probe deadline.
 
-mouse_focus: false          # Opt into mouse capture for click-to-focus / click-to-tab. Default off keeps native terminal text selection.
+mouse_focus: false # Opt into mouse capture for click-to-focus / click-to-tab. Default off keeps native terminal text selection.
 
-proxy:                      # OpenAI-compat proxy router. See §"Proxy
-  enabled: true             # (OpenAI-compatible listener)" below for
-  ollama_compat: false      # Opt in for full Ollama drop-in identity
-                            # ("Ollama is running" on `GET /`, default
-                            # port 11434). Off → "LlamaStash is
-                            # running", default port 11435.
+proxy: # OpenAI-compat proxy router. See §"Proxy
+  enabled: true # (OpenAI-compatible listener)" below for
+  ollama_compat:
+    false # Opt in for full Ollama drop-in identity
+    # ("Ollama is running" on `GET /`, default
+    # port 11434). Off → "LlamaStash is
+    # running", default port 11435.
   # port: 11435             # Pin to override the mode default.
 
-keybindings:                # Action-name → key-spec overrides.
+keybindings: # Action-name → key-spec overrides.
   quit: ctrl+q
   cycle_theme: T
   toggle_help: f1
@@ -97,19 +98,19 @@ keybindings:                # Action-name → key-spec overrides.
 
 Set `theme: custom` and define a `custom_theme:` block to ship a personal palette. The slot list mirrors the internal `Palette` struct so every visible region is rebindable:
 
-| Slot | What it paints |
-|---|---|
-| `bg` | Panel background (the root paint between bordered Blocks) |
-| `fg` | Primary text |
-| `accent` | Panel borders + active tab strip |
-| `on_accent` | Text drawn on top of `accent` (title bar). Pin to a dark colour on mono-style themes where `bg` is `reset`. |
-| `panel_title` | Block-title text — ` Host `, ` Daemon `, ` Models ` |
-| `label` | In-panel label prefixes (`CPU`, `socket`, …) and list group headers (`★ Favorites`, folder paths) |
-| `muted` | Secondary text + hint separators |
-| `selection` | Reserved surface tone (used by future overlays) |
-| `highlight` | Selected-row background in the Models list. Set to `reset` to fall back to `Modifier::REVERSED`. |
-| `success` / `warning` / `error` | Per-state row colours + gauge tiers |
-| `status_loading` / `status_ready` / `status_error` / `status_stopped` / `status_external` | Status-glyph colours in the model list |
+| Slot                                                                                      | What it paints                                                                                              |
+| ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `bg`                                                                                      | Panel background (the root paint between bordered Blocks)                                                   |
+| `fg`                                                                                      | Primary text                                                                                                |
+| `accent`                                                                                  | Panel borders + active tab strip                                                                            |
+| `on_accent`                                                                               | Text drawn on top of `accent` (title bar). Pin to a dark colour on mono-style themes where `bg` is `reset`. |
+| `panel_title`                                                                             | Block-title text — `Host`, `Daemon`, `Models`                                                               |
+| `label`                                                                                   | In-panel label prefixes (`CPU`, `socket`, …) and list group headers (`★ Favorites`, folder paths)           |
+| `muted`                                                                                   | Secondary text + hint separators                                                                            |
+| `selection`                                                                               | Reserved surface tone (used by future overlays)                                                             |
+| `highlight`                                                                               | Selected-row background in the Models list. Set to `reset` to fall back to `Modifier::REVERSED`.            |
+| `success` / `warning` / `error`                                                           | Per-state row colours + gauge tiers                                                                         |
+| `status_loading` / `status_ready` / `status_error` / `status_stopped` / `status_external` | Status-glyph colours in the model list                                                                      |
 
 Colour syntax (case-insensitive):
 
@@ -138,58 +139,58 @@ The keybinding scheme follows two policies:
 
 Bare letters are for tool actions (`f` favorite, `e` edit, `u/c/p` yank, `t` theme, `q` quit).
 
-| Action name | Default key(s) | Where it fires |
-|---|---|---|
-| `quit` | `q` · `ctrl+c` | Nav focuses |
-| `toggle_help` | `?` | Nav focuses |
-| `cycle_theme` | `t` | Nav focuses |
-| `cycle_theme_prev` | `shift+t` | Nav focuses — walks the theme list in reverse |
-| `restart_daemon` | `ctrl+r` | Nav focuses — confirmation popup |
-| `kill_daemon` | `ctrl+k` | List — confirmation popup |
-| `stop_model` | `ctrl+s` | Nav focuses — confirmation popup |
-| `delete_model` | `ctrl+d` | List — confirmation popup (refuses on a running launch) |
-| `cancel_download` | `ctrl+x` | Nav focuses — confirmation popup |
-| `move_up` / `move_down` | `↑` · `k`, `↓` · `j` | Nav focuses, HF dialog |
-| `page_up` / `page_down` | `PgUp` / `PgDn` | List |
-| `go_top` / `go_bottom` | `g` · `Home`, `G` · `End` | List |
-| `open_filter` | `/` | List |
-| `clear_filter` | `Esc` | Filter input |
-| `toggle_favorite` | `f` | List |
-| `open_launch_picker` | `Enter` | List |
-| `open_hf_dialog` | `shift+p` | List — "Pull" mnemonic |
-| `submit` | `Enter` | Filter, right pane, embed, rerank, confirm popup, HF dialog |
-| `cancel` | `Esc` | Confirm popup, HF dialog |
-| `yank_url` / `yank_curl` / `yank_path` | `u`, `c` · `y`, `p` | Nav focuses — `y` is a vi-style alias for `c` |
-| `next_focus` / `prev_focus` | `Tab` · `l`, `Shift+Tab` · `h` | Universal pane cycle (TUI focuses); vi aliases are nav-only |
-| `focus_list` | `Esc` · `Shift+M` | Right pane / tab inputs |
-| `focus_logs_tab` | `Shift+L` | Nav focuses — gated on a running model |
-| `focus_chat_tab` | `Shift+C` · `Shift+E` · `Shift+R` | Nav focuses — picks mode-appropriate tab (Chat / Embed / Rerank), gated on running |
-| `focus_settings_tab` | `Shift+S` | Nav focuses — always available |
-| `next_field` / `prev_field` | `↓` / `↑` | Rerank input — cycles Query / Candidate |
-| `cycle_value_next` / `cycle_value_prev` | `→` / `←` | Right pane (Settings) — cycles the focused row's value |
-| `enter_edit` / `exit_edit` | `e` / `Esc` | Right pane → tab input |
-| `send_chat` | `Enter` | Chat input |
-| `insert_newline` | `Shift+Enter` | All input focuses (kitty-protocol terminals only) |
-| `toggle_think_collapse` | `r` | Right pane (Chat tab) |
-| `toggle_auto_scroll` | `s` | Right pane (Logs) |
+| Action name                             | Default key(s)                    | Where it fires                                                                     |
+| --------------------------------------- | --------------------------------- | ---------------------------------------------------------------------------------- |
+| `quit`                                  | `q` · `ctrl+c`                    | Nav focuses                                                                        |
+| `toggle_help`                           | `?`                               | Nav focuses                                                                        |
+| `cycle_theme`                           | `t`                               | Nav focuses                                                                        |
+| `cycle_theme_prev`                      | `shift+t`                         | Nav focuses — walks the theme list in reverse                                      |
+| `restart_daemon`                        | `ctrl+r`                          | Nav focuses — confirmation popup                                                   |
+| `kill_daemon`                           | `ctrl+k`                          | List — confirmation popup                                                          |
+| `stop_model`                            | `ctrl+s`                          | Nav focuses — confirmation popup                                                   |
+| `delete_model`                          | `ctrl+d`                          | List — confirmation popup (refuses on a running launch)                            |
+| `cancel_download`                       | `ctrl+x`                          | Nav focuses — confirmation popup                                                   |
+| `move_up` / `move_down`                 | `↑` · `k`, `↓` · `j`              | Nav focuses, HF dialog                                                             |
+| `page_up` / `page_down`                 | `PgUp` / `PgDn`                   | List                                                                               |
+| `go_top` / `go_bottom`                  | `g` · `Home`, `G` · `End`         | List                                                                               |
+| `open_filter`                           | `/`                               | List                                                                               |
+| `clear_filter`                          | `Esc`                             | Filter input                                                                       |
+| `toggle_favorite`                       | `f`                               | List                                                                               |
+| `open_launch_picker`                    | `Enter`                           | List                                                                               |
+| `open_hf_dialog`                        | `shift+p`                         | List — "Pull" mnemonic                                                             |
+| `submit`                                | `Enter`                           | Filter, right pane, embed, rerank, confirm popup, HF dialog                        |
+| `cancel`                                | `Esc`                             | Confirm popup, HF dialog                                                           |
+| `yank_url` / `yank_curl` / `yank_path`  | `u`, `c` · `y`, `p`               | Nav focuses — `y` is a vi-style alias for `c`                                      |
+| `next_focus` / `prev_focus`             | `Tab` · `l`, `Shift+Tab` · `h`    | Universal pane cycle (TUI focuses); vi aliases are nav-only                        |
+| `focus_list`                            | `Esc` · `Shift+M`                 | Right pane / tab inputs                                                            |
+| `focus_logs_tab`                        | `Shift+L`                         | Nav focuses — gated on a running model                                             |
+| `focus_chat_tab`                        | `Shift+C` · `Shift+E` · `Shift+R` | Nav focuses — picks mode-appropriate tab (Chat / Embed / Rerank), gated on running |
+| `focus_settings_tab`                    | `Shift+S`                         | Nav focuses — always available                                                     |
+| `next_field` / `prev_field`             | `↓` / `↑`                         | Rerank input — cycles Query / Candidate                                            |
+| `cycle_value_next` / `cycle_value_prev` | `→` / `←`                         | Right pane (Settings) — cycles the focused row's value                             |
+| `enter_edit` / `exit_edit`              | `e` / `Esc`                       | Right pane → tab input                                                             |
+| `send_chat`                             | `Enter`                           | Chat input                                                                         |
+| `insert_newline`                        | `Shift+Enter`                     | All input focuses (kitty-protocol terminals only)                                  |
+| `toggle_think_collapse`                 | `r`                               | Right pane (Chat tab)                                                              |
+| `toggle_auto_scroll`                    | `s`                               | Right pane (Logs)                                                                  |
 
 The "nav focuses" alias means `List` + `RightPane`; "input focuses" means `ChatInput` + `EmbedInput` + `RerankInput`; "TUI focuses" is both groups combined.
 
 ### Environment variables
 
-| Variable | Purpose |
-|---|---|
-| `LLAMASTASH_CONFIG` | Override config-file path (single-file knob; the daemon writes here) |
-| `LLAMASTASH_CONFIG_DIR` | Override the directory `paths::config_dir()` resolves to; `user_config_file()` becomes `<dir>/config.yaml`. Empty value = unset |
-| `LLAMASTASH_STATE_DIR` | Override the directory `paths::state_dir()` resolves to (state.json, daemon.pid, init_snapshot.json, runtime.json). Empty value = unset |
-| `LLAMASTASH_CACHE_DIR` | Override the directory `paths::cache_dir()` resolves to; `log_dir()` inherits as `<dir>/logs`. Empty value = unset |
-| `LLAMASTASH_LLAMA_SERVER` | Path to `llama-server` |
-| `LLAMASTASH_NO_SCAN` | Skip filesystem scanning |
-| `LLAMASTASH_IPC_URL` | Point a CLI/TUI at a non-default daemon control plane (verbatim URL, e.g. `http://127.0.0.1:48134`). Must be set together with `LLAMASTASH_IPC_TOKEN`; partial overrides are rejected. Bypasses `runtime.json` lookup entirely. |
-| `LLAMASTASH_IPC_TOKEN` | Bearer token for the control-plane URL. See `LLAMASTASH_IPC_URL`. |
-| `LLAMASTASH_OFFLINE` | Refuse any outbound network from `init` / `pull` / `recommend` (equivalent to `--offline` on those subcommands). Truthy values `1` / `true` / `yes` (case-insensitive) enable it; `0`, an empty value, and unset leave it off. |
-| `HF_HOME` | Honored by `init::download::hf_cache_dir()` per HuggingFace convention; controls where pulled GGUFs land |
-| `NO_COLOR` | Any non-empty value disables ANSI styling on every human-readable output (per [no-color.org](https://no-color.org/)). An empty value (`NO_COLOR=`) does **not** disable. |
+| Variable                            | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LLAMASTASH_CONFIG`                 | Override config-file path (single-file knob; the daemon writes here)                                                                                                                                                                                                                                                                                                                                                                            |
+| `LLAMASTASH_CONFIG_DIR`             | Override the directory `paths::config_dir()` resolves to; `user_config_file()` becomes `<dir>/config.yaml`. Empty value = unset                                                                                                                                                                                                                                                                                                                 |
+| `LLAMASTASH_STATE_DIR`              | Override the directory `paths::state_dir()` resolves to (state.json, daemon.pid, init_snapshot.json, runtime.json). Empty value = unset                                                                                                                                                                                                                                                                                                         |
+| `LLAMASTASH_CACHE_DIR`              | Override the directory `paths::cache_dir()` resolves to; `log_dir()` inherits as `<dir>/logs`. Empty value = unset                                                                                                                                                                                                                                                                                                                              |
+| `LLAMASTASH_LLAMA_SERVER`           | Path to `llama-server`                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `LLAMASTASH_NO_SCAN`                | Skip filesystem scanning                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `LLAMASTASH_IPC_URL`                | Point a CLI/TUI at a non-default daemon control plane (verbatim URL, e.g. `http://127.0.0.1:48134`). Must be set together with `LLAMASTASH_IPC_TOKEN`; partial overrides are rejected. Bypasses `runtime.json` lookup entirely.                                                                                                                                                                                                                 |
+| `LLAMASTASH_IPC_TOKEN`              | Bearer token for the control-plane URL. See `LLAMASTASH_IPC_URL`.                                                                                                                                                                                                                                                                                                                                                                               |
+| `LLAMASTASH_OFFLINE`                | Refuse any outbound network from `init` / `pull` / `recommend` (equivalent to `--offline` on those subcommands). Truthy values `1` / `true` / `yes` (case-insensitive) enable it; `0`, an empty value, and unset leave it off.                                                                                                                                                                                                                  |
+| `HF_HOME`                           | Honored by `init::download::hf_cache_dir()` per HuggingFace convention; controls where pulled GGUFs land                                                                                                                                                                                                                                                                                                                                        |
+| `NO_COLOR`                          | Any non-empty value disables ANSI styling on every human-readable output (per [no-color.org](https://no-color.org/)). An empty value (`NO_COLOR=`) does **not** disable.                                                                                                                                                                                                                                                                        |
 | `LLAMASTASH_BENCH_DISABLE_DEFAULTS` | **Maintainer / bench-internal.** When set to `"1"`, the launch-knob resolver skips presets, last-used, yaml-arch, and compiled-in arch defaults — only knobs the caller explicitly supplied land on the wire. Used by `scripts/bench/` to make `llamastash start` produce byte-identical argv to raw `llama-server` for fair Suite-A overhead comparison. **Do not set in normal use** — it disables the auto-tuning the launcher exists to do. |
 
 The three `LLAMASTASH_*_DIR` overrides make it possible to run side-by-side daemons (each writes its own `runtime.json` under its state dir) without colliding on state / cache / config paths.
@@ -367,11 +368,11 @@ The proxy resolves `body.model` against the same fuzzy matcher `llamastash start
 
 The official `ollama` CLI (and other Ollama-Go-based clients) issue a `HEAD /` handshake before any `/api/*` call and bail when the body isn't the literal `"Ollama is running"`. Default mode answers that probe with `"LlamaStash is running"` so the identity is honest; opt in to full Ollama impersonation when the goal is "this tool that natively speaks Ollama just works":
 
-| Source | Form |
-|---|---|
-| CLI | `llamastash daemon start --ollama-compat` |
+| Source | Form                                         |
+| ------ | -------------------------------------------- |
+| CLI    | `llamastash daemon start --ollama-compat`    |
 | Config | `proxy.ollama_compat: true` in `config.yaml` |
-| Env | `LLAMASTASH_OLLAMA_COMPAT=1` |
+| Env    | `LLAMASTASH_OLLAMA_COMPAT=1`                 |
 
 The three are OR-ed; any one of them turns compat mode on. Effects:
 
@@ -385,12 +386,12 @@ Default mode (no compat) is fine when clients reach `/api/tags` directly without
 
 Set the OpenAI base URL to `http://127.0.0.1:11435/v1` (default mode) or `http://127.0.0.1:11434/v1` (Ollama-compat mode) and use any string as the API key — the proxy ignores authentication. The base-URL pattern works with any OpenAI-compatible client; the standard env var names across the ecosystem are:
 
-| Client | Env var(s) |
-|---|---|
-| OpenAI SDK (Python, Node) | `OPENAI_BASE_URL` (Python) / `OPENAI_API_BASE` (legacy) and `OPENAI_API_KEY` |
-| OpenCode | `OPENAI_API_BASE` and `OPENAI_API_KEY`, or the equivalent `openai.api_base` field in its config file |
-| Pi (pi.dev) | `OPENAI_API_BASE_URL` and `OPENAI_API_KEY` (their "OpenAI-compatible" guide) |
-| Cline / llm-cli | `OPENAI_BASE_URL` (or their tool-specific equivalent) and any key |
+| Client                    | Env var(s)                                                                                           |
+| ------------------------- | ---------------------------------------------------------------------------------------------------- |
+| OpenAI SDK (Python, Node) | `OPENAI_BASE_URL` (Python) / `OPENAI_API_BASE` (legacy) and `OPENAI_API_KEY`                         |
+| OpenCode                  | `OPENAI_API_BASE` and `OPENAI_API_KEY`, or the equivalent `openai.api_base` field in its config file |
+| Pi (pi.dev)               | `OPENAI_API_BASE_URL` and `OPENAI_API_KEY` (their "OpenAI-compatible" guide)                         |
+| Cline / llm-cli           | `OPENAI_BASE_URL` (or their tool-specific equivalent) and any key                                    |
 
 Verify the exact env var name against the client's current docs if you're automating — names drift. The manual smoke runbook at [`tests/proxy_real_client_smoke.md`](https://github.com/llamastash/llamastash/blob/main/tests/proxy_real_client_smoke.md) carries the maintainer's verified OpenCode + Pi sequences.
 
@@ -458,18 +459,18 @@ The same block is on the IPC `status` method response. The TUI's Daemon info pan
 
 The proxy speaks HTTP/1.1 only on `127.0.0.1:<port>` (no h2c upgrade, no ALPN-negotiated HTTP/2 — the underlying hyper build is feature-gated to `http1`). It answers exactly the surfaces below. Anything else — including `/v1/messages`, MCP, websocket transports, or native llama.cpp routes like `/completion` — returns 404.
 
-| Method | Path | Behavior |
-|---|---|---|
-| `GET` | `/health` | `{"status":"ok","models_loaded":<N>,"models_discovered":<M>}`. Cheap liveness probe; counts come from the supervisor registry (`models_loaded` = Ready) and the catalog (`models_discovered`). **Always returns 200** — the listener being up is the only signal this endpoint encodes. It does NOT report degraded states (zero Ready models, partial supervisor failures, etc.); poll `/v1/models` or `llamastash status --json` if you need that. |
-| `GET` | `/v1/models` | OpenAI-shape `{"object":"list","data":[…]}` listing every discovered model. Each row carries `id` (the discovered display name), `object: "model"`, `created: 0` (no stable epoch — the catalog has no creation timestamp; documented choice), `owned_by: "llamastash"`. Sorted by `id` so the output is byte-stable across calls. |
-| `POST` | `/v1/chat/completions` | OpenAI chat completions. Streaming (`stream: true`) is byte-piped end-to-end — SSE chunks reach the agent in the same order with the same framing the upstream `llama-server` emitted. |
-| `POST` | `/v1/completions` | OpenAI text completions. Same forwarding semantics. |
-| `POST` | `/v1/embeddings` | OpenAI embeddings. JSON pass-through. |
-| `POST` | `/v1/rerank` | llama.cpp's rerank endpoint (also exposed under the `/v1/` prefix for client uniformity). JSON pass-through. |
-| `GET` | `/api/tags` | **Ollama compat — discovery.** Ollama-shape `{"models":[{name, model, modified_at, size, digest, details:{format,family,parameter_size,quantization_level,…}}]}` projection of the discovered catalog. Sorted alphabetically by `name`. Empty catalog → `{"models":[]}`. See [Ollama-compat surface](#ollama-compat-surface). |
-| `GET` | `/api/version` | **Ollama compat.** `{"version":"<crate-version>"}` — same value `status.daemon.build` surfaces. |
-| `GET` | `/api/ps` | **Ollama compat.** Currently-Ready supervisors in Ollama's running-list shape (`{models:[…{expires_at, size_vram, …}]}`). `expires_at` is a far-future placeholder until idle-TTL eviction lands (R34 deferred); `size_vram` is `0` until per-PID VRAM attribution lands. |
-| `POST` | `/api/show` | **Ollama compat.** `{"model":"<name>"}` or `{"name":"<name>"}` body → per-model metadata in Ollama shape (`{modelfile, parameters, template, details, model_info, capabilities}`). Same fuzzy resolver as `/v1/chat/completions`. |
+| Method | Path                   | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------ | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/health`              | `{"status":"ok","models_loaded":<N>,"models_discovered":<M>}`. Cheap liveness probe; counts come from the supervisor registry (`models_loaded` = Ready) and the catalog (`models_discovered`). **Always returns 200** — the listener being up is the only signal this endpoint encodes. It does NOT report degraded states (zero Ready models, partial supervisor failures, etc.); poll `/v1/models` or `llamastash status --json` if you need that. |
+| `GET`  | `/v1/models`           | OpenAI-shape `{"object":"list","data":[…]}` listing every discovered model. Each row carries `id` (the discovered display name), `object: "model"`, `created: 0` (no stable epoch — the catalog has no creation timestamp; documented choice), `owned_by: "llamastash"`. Sorted by `id` so the output is byte-stable across calls.                                                                                                                   |
+| `POST` | `/v1/chat/completions` | OpenAI chat completions. Streaming (`stream: true`) is byte-piped end-to-end — SSE chunks reach the agent in the same order with the same framing the upstream `llama-server` emitted.                                                                                                                                                                                                                                                               |
+| `POST` | `/v1/completions`      | OpenAI text completions. Same forwarding semantics.                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `POST` | `/v1/embeddings`       | OpenAI embeddings. JSON pass-through.                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `POST` | `/v1/rerank`           | llama.cpp's rerank endpoint (also exposed under the `/v1/` prefix for client uniformity). JSON pass-through.                                                                                                                                                                                                                                                                                                                                         |
+| `GET`  | `/api/tags`            | **Ollama compat — discovery.** Ollama-shape `{"models":[{name, model, modified_at, size, digest, details:{format,family,parameter_size,quantization_level,…}}]}` projection of the discovered catalog. Sorted alphabetically by `name`. Empty catalog → `{"models":[]}`. See [Ollama-compat surface](#ollama-compat-surface).                                                                                                                        |
+| `GET`  | `/api/version`         | **Ollama compat.** `{"version":"<crate-version>"}` — same value `status.daemon.build` surfaces.                                                                                                                                                                                                                                                                                                                                                      |
+| `GET`  | `/api/ps`              | **Ollama compat.** Currently-Ready supervisors in Ollama's running-list shape (`{models:[…{expires_at, size_vram, …}]}`). `expires_at` is a far-future placeholder until idle-TTL eviction lands (R34 deferred); `size_vram` is `0` until per-PID VRAM attribution lands.                                                                                                                                                                            |
+| `POST` | `/api/show`            | **Ollama compat.** `{"model":"<name>"}` or `{"name":"<name>"}` body → per-model metadata in Ollama shape (`{modelfile, parameters, template, details, model_info, capabilities}`). Same fuzzy resolver as `/v1/chat/completions`.                                                                                                                                                                                                                    |
 
 Request body cap: **2 MiB**, enforced via `http-body-util::Limited` before forwarding. Anything larger returns HTTP 413. OpenAI chat completion requests are typically well under 1 MiB even with long histories; the cap is intentional rather than implicit.
 
@@ -477,11 +478,11 @@ Request body cap: **2 MiB**, enforced via `http-body-util::Limited` before forwa
 
 The four `/api/*` endpoints above let Ollama-shape discovery libraries — `ollama-python`'s default code path, IDE plugins that probe `GET /api/tags` to detect Ollama, `OLLAMA_HOST`-based env discovery in agent frameworks — recognise llamastash as Ollama-compatible. Once recognised, clients fall through to the OpenAI-compat surface (`/v1/chat/completions` etc.) for actual inference, which already works against llamastash without further changes. This unlocks OOB compatibility with anything that "speaks Ollama" for discovery but uses OpenAI shape for completions — the most common pattern in the agent ecosystem.
 
-The Ollama **inference** endpoints (`POST /api/chat`, `POST /api/generate`, `POST /api/embed`) are **not** implemented in v1. They emit a different request/response shape than OpenAI compat (newline-delimited JSON streaming, different field names) and would require request/response body translation — incompatible with the proxy's current byte-pure forward path. Tracked in TODO §R2 as a brainstorm/plan item. For now, point Ollama-shape *inference* clients at `OLLAMA_HOST=http://127.0.0.1:11434` and they will discover models via `/api/tags`, then fall through to the OpenAI-compat completion endpoints on those same client libraries that support both shapes (most do).
+The Ollama **inference** endpoints (`POST /api/chat`, `POST /api/generate`, `POST /api/embed`) are **not** implemented in v1. They emit a different request/response shape than OpenAI compat (newline-delimited JSON streaming, different field names) and would require request/response body translation — incompatible with the proxy's current byte-pure forward path. Tracked in TODO §R2 as a brainstorm/plan item. For now, point Ollama-shape _inference_ clients at `OLLAMA_HOST=http://127.0.0.1:11434` and they will discover models via `/api/tags`, then fall through to the OpenAI-compat completion endpoints on those same client libraries that support both shapes (most do).
 
 A few field-level details where llamastash's projection diverges from Ollama's:
 
-- **`digest`** — Ollama uses `sha256:<hex>`; llamastash uses `blake3:<hex>` derived from the canonical path string of the discovered file. The value is stable across `/api/tags` and `/api/ps` for the same model — both endpoints hash the same path — so clients can join the two endpoints by digest. It is **not** the GGUF header BLAKE3 that `ModelId` carries internally; re-reading the header on every `/api/tags` row would brick discovery, and the catalog doesn't cache the header hash today. Lifting the digest to the truthful header BLAKE3 is tracked in [TODO §R2](https://github.com/llamastash/llamastash/blob/main/TODO.md) ("Ollama-compat digest from cached header BLAKE3"). Clients that round-trip the digest opaquely keep working; clients that *validate* the algorithm see the truthful `blake3:` tag rather than a misleading `sha256:` prefix on a non-SHA-256 hash.
+- **`digest`** — Ollama uses `sha256:<hex>`; llamastash uses `blake3:<hex>` derived from the canonical path string of the discovered file. The value is stable across `/api/tags` and `/api/ps` for the same model — both endpoints hash the same path — so clients can join the two endpoints by digest. It is **not** the GGUF header BLAKE3 that `ModelId` carries internally; re-reading the header on every `/api/tags` row would brick discovery, and the catalog doesn't cache the header hash today. Lifting the digest to the truthful header BLAKE3 is tracked in [TODO §R2](https://github.com/llamastash/llamastash/blob/main/TODO.md) ("Ollama-compat digest from cached header BLAKE3"). Clients that round-trip the digest opaquely keep working; clients that _validate_ the algorithm see the truthful `blake3:` tag rather than a misleading `sha256:` prefix on a non-SHA-256 hash.
 - **`size`** — Ollama returns the on-disk file size; llamastash returns `weights_bytes` (the GGUF tensor footprint), typically within a few KiB of the full file size. `0` when discovery couldn't parse the header.
 - **`modified_at`** — llamastash doesn't track file mtime in the catalog. Emits `"1970-01-01T00:00:00Z"` (Unix epoch) as a placeholder so clients displaying this see a clearly-not-now sentinel.
 - **`/api/ps` `expires_at`** — far-future placeholder (`"9999-12-31T23:59:59Z"`) while idle-TTL eviction is deferred (R34).
@@ -495,33 +496,41 @@ Hop-by-hop headers (`Connection`, `Keep-Alive`, `Transfer-Encoding`, `Upgrade`, 
 
 On the happy path no `x-llamastash-*` headers are emitted; the response is byte-equivalent to what the upstream `llama-server` returned. The fallback path (launch failed → served from a different Ready model) tags the response with two headers so clients can audit:
 
-| Header | Value |
-|---|---|
-| `x-llamastash-served-by` | The display name of the model that actually answered (e.g. `qwen2-7b-instruct-q4_k_m`). Only emitted on the fallback branch. |
-| `x-llamastash-fallback-reason` | Stable wire label. v1 emits `launch_failed` for **in-family** substitution (the picked supervisor's arch matches the requested model's arch — graceful degradation, response shape is what the client asked for) and `family_mismatch` for **cross-arch** fallback (the picked supervisor's arch differs from the request, or one side has no arch metadata — response shape is *not* what the client asked for; embedding / rerank requests answered by a chat model will return chat-shaped output). Clients that care about output-shape parity should branch on this header. |
+| Header                         | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `x-llamastash-served-by`       | The display name of the model that actually answered (e.g. `qwen2-7b-instruct-q4_k_m`). Only emitted on the fallback branch.                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `x-llamastash-fallback-reason` | Stable wire label. v1 emits `launch_failed` for **in-family** substitution (the picked supervisor's arch matches the requested model's arch — graceful degradation, response shape is what the client asked for) and `family_mismatch` for **cross-arch** fallback (the picked supervisor's arch differs from the request, or one side has no arch metadata — response shape is _not_ what the client asked for; embedding / rerank requests answered by a chat model will return chat-shaped output). Clients that care about output-shape parity should branch on this header. |
 
-Family selection prefers the *requested* model's `general.architecture` (matched exactly against running models' arch metadata), then falls through to any-MRU among Ready models. A model without arch metadata (synthetic GGUFs, etc.) skips the family-prefer step and goes straight to any-MRU, but the fallback reason still surfaces as `family_mismatch` so the client sees that the arch comparison was not satisfied.
+Family selection prefers the _requested_ model's `general.architecture` (matched exactly against running models' arch metadata), then falls through to any-MRU among Ready models. A model without arch metadata (synthetic GGUFs, etc.) skips the family-prefer step and goes straight to any-MRU, but the fallback reason still surfaces as `family_mismatch` so the client sees that the arch comparison was not satisfied.
 
 ### Error envelope
 
 Every non-2xx response carries an OpenAI-shaped JSON body:
 
 ```json
-{"error": {"type": "<wire-label>", "code": "<sub-discriminator>", "message": "<human-readable>", "matches": ["..."], "running": ["..."]}}
+{
+  "error": {
+    "type": "<wire-label>",
+    "code": "<sub-discriminator>",
+    "message": "<human-readable>",
+    "matches": ["..."],
+    "running": ["..."]
+  }
+}
 ```
 
 `code` is present only when the sub-discriminator adds information beyond `type`. `matches` appears on disambiguation errors; `running` appears on `launch_failed` 503s. Other fields are omitted from the JSON when unset.
 
-| HTTP | `type` | When |
-|---|---|---|
-| 400 | `invalid_request` (`code: model_required`, `param: "model"`) | `body.model` missing or empty. |
-| 400 | `ambiguous_model` | Fuzzy match returned >1 candidate. `matches` lists the candidate names; the client retries with a tighter reference. |
-| 400 | `invalid_request` | Request body wasn't valid JSON, or the HTTP method couldn't be translated for forwarding. |
-| 404 | `model_not_found` | Fuzzy match returned zero candidates. `matches` is omitted from the body when empty (the field is `Option`-shaped and serialised with `skip_serializing_if`). |
-| 404 | `not_found` | No such route (unknown path *or* wrong HTTP method on a known path — e.g. `GET /v1/chat/completions`). |
-| 413 | `payload_too_large` | Request body exceeded 2 MiB. |
-| 502 | `upstream_unreachable` | The model was Ready a moment ago but the connect to `llama-server` failed (process exited between snapshot and forward, kernel-level refusal, …). The agent sees this rather than a hanging socket. |
-| 503 | `launch_failed` | Auto-start failed and no Ready models exist for fallback. `running: []` is always present on this arm. The list reflects models that were **in `Ready` state at the moment the proxy snapshotted the supervisor registry for fallback** — models in `Launching` / `Loading` are not included, so an empty list does not mean "the daemon has nothing alive," only "no candidate was available for instant fallback." Retry once the slow launch completes. |
+| HTTP | `type`                                                       | When                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ---- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400  | `invalid_request` (`code: model_required`, `param: "model"`) | `body.model` missing or empty.                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| 400  | `ambiguous_model`                                            | Fuzzy match returned >1 candidate. `matches` lists the candidate names; the client retries with a tighter reference.                                                                                                                                                                                                                                                                                                                                       |
+| 400  | `invalid_request`                                            | Request body wasn't valid JSON, or the HTTP method couldn't be translated for forwarding.                                                                                                                                                                                                                                                                                                                                                                  |
+| 404  | `model_not_found`                                            | Fuzzy match returned zero candidates. `matches` is omitted from the body when empty (the field is `Option`-shaped and serialised with `skip_serializing_if`).                                                                                                                                                                                                                                                                                              |
+| 404  | `not_found`                                                  | No such route (unknown path _or_ wrong HTTP method on a known path — e.g. `GET /v1/chat/completions`).                                                                                                                                                                                                                                                                                                                                                     |
+| 413  | `payload_too_large`                                          | Request body exceeded 2 MiB.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 502  | `upstream_unreachable`                                       | The model was Ready a moment ago but the connect to `llama-server` failed (process exited between snapshot and forward, kernel-level refusal, …). The agent sees this rather than a hanging socket.                                                                                                                                                                                                                                                        |
+| 503  | `launch_failed`                                              | Auto-start failed and no Ready models exist for fallback. `running: []` is always present on this arm. The list reflects models that were **in `Ready` state at the moment the proxy snapshotted the supervisor registry for fallback** — models in `Launching` / `Loading` are not included, so an empty list does not mean "the daemon has nothing alive," only "no candidate was available for instant fallback." Retry once the slow launch completes. |
 
 Upstream non-2xx responses (e.g. `llama-server` returns 500 for a malformed completion request) are passed through verbatim — same status code, same body bytes; the OpenAI-shape envelope above only covers errors the proxy itself emits. Mid-stream upstream death: once headers are sent the routing decision is committed; if the upstream stream errors after that point, the proxy closes its connection to the agent (the agent sees a truncated SSE / chunked body) — no retry, no fallback.
 
@@ -529,16 +538,18 @@ Upstream non-2xx responses (e.g. `llama-server` returns 500 for a malformed comp
 
 ```yaml
 proxy:
-  enabled: true          # Default true. false => the daemon runs but no
-                         # listener is bound; status.proxy.status = "disabled".
-  ollama_compat: false   # Default false. true => GET / returns "Ollama is running"
-                         # (Go-client handshake) and the default port shifts to
-                         # 11434. See "Ollama drop-in mode" above. CLI: --ollama-compat;
-                         # env: LLAMASTASH_OLLAMA_COMPAT=1. All three sources are OR-ed.
+  enabled:
+    true # Default true. false => the daemon runs but no
+    # listener is bound; status.proxy.status = "disabled".
+  ollama_compat:
+    false # Default false. true => GET / returns "Ollama is running"
+    # (Go-client handshake) and the default port shifts to
+    # 11434. See "Ollama drop-in mode" above. CLI: --ollama-compat;
+    # env: LLAMASTASH_OLLAMA_COMPAT=1. All three sources are OR-ed.
   # port: 11435          # Pin to override the mode default. Omitted = derived from
-                         # ollama_compat (11434 when true, 11435 when false).
-                         # Loopback only — there is no `host` knob; LAN binding is
-                         # a deferred follow-up.
+  # ollama_compat (11434 when true, 11435 when false).
+  # Loopback only — there is no `host` knob; LAN binding is
+  # a deferred follow-up.
 ```
 
 Unknown keys inside `[proxy]` are **rejected loudly** (`#[serde(deny_unknown_fields)]`) — a typo never silently falls back to defaults. The top-level config still tolerates unknown keys for forward-compat. There is no `host`, no `api_key`, no `tls_*`, no fallback-tuning knob; these are all deferred per the plan's Scope Boundaries.
@@ -562,16 +573,16 @@ llamastash init [--recommended] [--yes] [--json] [--offline]
                [--config-step <CHOICE>]
 ```
 
-| Flag | Effect |
-|---|---|
-| `--recommended` | Accept the hardware-aware default for every prompt; no prompts fire. Canonical form. |
-| `--yes` | Hidden alias for `--recommended`. Preserved for script and agent compatibility. |
-| `--json` | Emit a structured summary (schema: `schema_version`, `steps_ran`, `steps_skipped`, `install`, `model`, `config`, `smoke`, `hardware`) and skip all human prose. |
-| `--offline` | Refuse outbound network. Useful for `--only config` / `--only server` reruns where the model and snapshot are already cached. `LLAMASTASH_OFFLINE=1` is equivalent. |
-| `--only <STEPS>` | Comma-separated list of `server,models,config` (other names rejected). Only the listed steps run. |
-| `--skip <STEPS>` | Inverse of `--only`. Mutually exclusive with it (clap refuses both). |
-| `--install <CHOICE>` | Pre-answer the install-method prompt. Values: `brew`, `gh-releases`, `existing`, `custom:<PATH>`. Override beats `--recommended`. |
-| `--model <CHOICE>` | Pre-answer the model-pick prompt. Values: `recommended`, `none`, `<owner>/<repo>[:<filename>.gguf]`. |
+| Flag                     | Effect                                                                                                                                                                  |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--recommended`          | Accept the hardware-aware default for every prompt; no prompts fire. Canonical form.                                                                                    |
+| `--yes`                  | Hidden alias for `--recommended`. Preserved for script and agent compatibility.                                                                                         |
+| `--json`                 | Emit a structured summary (schema: `schema_version`, `steps_ran`, `steps_skipped`, `install`, `model`, `config`, `smoke`, `hardware`) and skip all human prose.         |
+| `--offline`              | Refuse outbound network. Useful for `--only config` / `--only server` reruns where the model and snapshot are already cached. `LLAMASTASH_OFFLINE=1` is equivalent.     |
+| `--only <STEPS>`         | Comma-separated list of `server,models,config` (other names rejected). Only the listed steps run.                                                                       |
+| `--skip <STEPS>`         | Inverse of `--only`. Mutually exclusive with it (clap refuses both).                                                                                                    |
+| `--install <CHOICE>`     | Pre-answer the install-method prompt. Values: `brew`, `gh-releases`, `existing`, `custom:<PATH>`. Override beats `--recommended`.                                       |
+| `--model <CHOICE>`       | Pre-answer the model-pick prompt. Values: `recommended`, `none`, `<owner>/<repo>[:<filename>.gguf]`.                                                                    |
 | `--config-step <CHOICE>` | Pre-answer the config-write confirm. Values: `write`, `skip`. (Named `--config-step` rather than `--config` because the top-level `--config <PATH>` is already global.) |
 
 The three per-step flags are **advisory, not authoritative**: supplying `--install brew` for a step that `--skip server` already excludes emits one stderr warning and proceeds. Conflicting axes don't abort.
@@ -598,12 +609,12 @@ Shortcut for `init --only models` that ranks the top picks for this hardware and
 llamastash recommend [--json] [--offline] [--model <CHOICE>] [--revision <SHA>]
 ```
 
-| Flag | Effect |
-|---|---|
-| `--json` | Same `{"steps_ran": ["detect","models"], "model": {...}, "recommendations": [...], ...}` shape as `init --only models --json`. |
+| Flag               | Effect                                                                                                                                   |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `--json`           | Same `{"steps_ran": ["detect","models"], "model": {...}, "recommendations": [...], ...}` shape as `init --only models --json`.           |
 | `--model <CHOICE>` | Pre-answer the picker. Values: `recommended` (auto-pick top entry), `none`, `<owner>/<repo>`. Omit to get the interactive top-10 picker. |
-| `--revision <SHA>` | Pin the HF revision; honored only on `<owner>/<repo>` paste branch. |
-| `--offline` | Refused — recommend always needs network. Kept for `init` parity. |
+| `--revision <SHA>` | Pin the HF revision; honored only on `<owner>/<repo>` paste branch.                                                                      |
+| `--offline`        | Refused — recommend always needs network. Kept for `init` parity.                                                                        |
 
 ### `llamastash pull <repo>`
 
@@ -621,20 +632,20 @@ llamastash pull <repo> [--json] [--offline]
 
 Source of truth: `src/cli/exit_codes.rs`. Codes are part of the public CLI contract; pin against them rather than parsing human error strings.
 
-| Code | Constant | Meaning |
-|---|---|---|
-| `0` | `SUCCESS` | Success |
-| `64` | `USAGE` | Bad CLI usage — missing required arg, invalid flag combination, or config-load error. Clap also emits this on its own. |
-| `65` | `DAEMON_UNREACHABLE` | Daemon socket missing, peer hung up, or call timed out |
-| `66` | `MODEL_NOT_FOUND` | Model reference matched zero or multiple catalog rows; stderr carries a disambiguation hint |
-| `67` | `LAUNCH_FAILED` | Daemon accepted `start_model` but the supervisor failed (probe timeout, port allocation, etc.) |
-| `68` | `STOP_FAILED` | `stop` couldn't reach the target (daemon error or process gone) |
-| `69` | `PULL_FAILED` | `pull` couldn't complete (network, integrity, disk space) |
-| `70` | `BINARY_NOT_FOUND` | `llama-server` not on PATH, no `--llama-server` flag, `LLAMASTASH_LLAMA_SERVER` unset |
-| `71` | `UNKNOWN` | Catch-all for unexpected errors that don't map to a documented class |
-| `72` | `INIT_ABORTED` | `init` aborted before smoke — integrity check failed, archive defenses tripped, user declined confirm, or non-TTY config step without explicit consent |
-| `73` | `INIT_DOWNLOAD_FAILED` | `init`'s model-download step failed (distinct from `PULL_FAILED` so agents branch on cause) |
-| `74` | `INIT_SMOKE_FAILED` | `init`'s smoke phase failed (binary doesn't run cleanly under `--version`) |
+| Code | Constant               | Meaning                                                                                                                                                |
+| ---- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `0`  | `SUCCESS`              | Success                                                                                                                                                |
+| `64` | `USAGE`                | Bad CLI usage — missing required arg, invalid flag combination, or config-load error. Clap also emits this on its own.                                 |
+| `65` | `DAEMON_UNREACHABLE`   | Daemon socket missing, peer hung up, or call timed out                                                                                                 |
+| `66` | `MODEL_NOT_FOUND`      | Model reference matched zero or multiple catalog rows; stderr carries a disambiguation hint                                                            |
+| `67` | `LAUNCH_FAILED`        | Daemon accepted `start_model` but the supervisor failed (probe timeout, port allocation, etc.)                                                         |
+| `68` | `STOP_FAILED`          | `stop` couldn't reach the target (daemon error or process gone)                                                                                        |
+| `69` | `PULL_FAILED`          | `pull` couldn't complete (network, integrity, disk space)                                                                                              |
+| `70` | `BINARY_NOT_FOUND`     | `llama-server` not on PATH, no `--llama-server` flag, `LLAMASTASH_LLAMA_SERVER` unset                                                                  |
+| `71` | `UNKNOWN`              | Catch-all for unexpected errors that don't map to a documented class                                                                                   |
+| `72` | `INIT_ABORTED`         | `init` aborted before smoke — integrity check failed, archive defenses tripped, user declined confirm, or non-TTY config step without explicit consent |
+| `73` | `INIT_DOWNLOAD_FAILED` | `init`'s model-download step failed (distinct from `PULL_FAILED` so agents branch on cause)                                                            |
+| `74` | `INIT_SMOKE_FAILED`    | `init`'s smoke phase failed (binary doesn't run cleanly under `--version`)                                                                             |
 
 `doctor` always exits `0` — severity lives in the findings array.
 
@@ -644,25 +655,25 @@ These are the defaults. Override any binding via the `keybindings:` block in `co
 
 ### Global / list focus
 
-| Key | Action |
-|---|---|
-| `q` / `Ctrl+C` | Quit |
-| `↑` / `k`, `↓` / `j` | Navigate |
-| `PgUp` / `PgDn` | Page |
-| `g` / `G` | Top / bottom |
-| `/` | Open filter (predicate applies live as you type; `Enter` drills into the focused result by opening the launch picker; `Esc` walks back: exit edit → clear → close) |
-| `f` | Toggle favorite on focused model |
-| `Enter` | Open launch picker on focused model |
-| `u` / `c` / `p` | Yank URL / curl / model path. `y` is a vi-style alias for `c`. |
-| `t` / `Shift+T` | Cycle theme forward / backward |
-| `Tab` / `Shift+Tab` | Move focus across panes (`h` / `l` do the same — Left/Right arrows are intentionally unbound on Models to avoid an asymmetric pane-jump) |
-| `Shift+M` / `Shift+L` / `Shift+C` / `Shift+S` | Jump focus to Models / Logs / Chat / Settings respectively. `L` and `C` only fire when the focused model is running. |
-| `Shift+P` | Open the HuggingFace pull dialog (Models list focus only — search + sort + paginate, download via the pinned status strip). "P" for Pull. |
-| `Ctrl+S` | Stop the focused running launch (any nav focus; opens a confirmation popup) |
-| `Ctrl+R` | Restart the daemon (any nav focus; opens a confirmation popup) |
-| `Ctrl+K` | Kill the daemon entirely (List focus; opens a confirmation popup) |
-| `Ctrl+D` | Delete the focused model from disk (idle rows only: `NotLaunched` / `Stopped` — opens a confirmation popup; HF-cache models remove the entire `models--<owner>--<repo>` directory to reclaim blob bytes) |
-| `Ctrl+X` | Cancel the currently-active HF download (any focus; opens a confirmation popup; queued pulls stay in line — press again on the next promoted pull) |
+| Key                                           | Action                                                                                                                                                                                                   |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `q` / `Ctrl+C`                                | Quit                                                                                                                                                                                                     |
+| `↑` / `k`, `↓` / `j`                          | Navigate                                                                                                                                                                                                 |
+| `PgUp` / `PgDn`                               | Page                                                                                                                                                                                                     |
+| `g` / `G`                                     | Top / bottom                                                                                                                                                                                             |
+| `/`                                           | Open filter (predicate applies live as you type; `Enter` drills into the focused result by opening the launch picker; `Esc` walks back: exit edit → clear → close)                                       |
+| `f`                                           | Toggle favorite on focused model                                                                                                                                                                         |
+| `Enter`                                       | Open launch picker on focused model                                                                                                                                                                      |
+| `u` / `c` / `p`                               | Yank URL / curl / model path. `y` is a vi-style alias for `c`.                                                                                                                                           |
+| `t` / `Shift+T`                               | Cycle theme forward / backward                                                                                                                                                                           |
+| `Tab` / `Shift+Tab`                           | Move focus across panes (`h` / `l` do the same — Left/Right arrows are intentionally unbound on Models to avoid an asymmetric pane-jump)                                                                 |
+| `Shift+M` / `Shift+L` / `Shift+C` / `Shift+S` | Jump focus to Models / Logs / Chat / Settings respectively. `L` and `C` only fire when the focused model is running.                                                                                     |
+| `Shift+P`                                     | Open the HuggingFace pull dialog (Models list focus only — search + sort + paginate, download via the pinned status strip). "P" for Pull.                                                                |
+| `Ctrl+S`                                      | Stop the focused running launch (any nav focus; opens a confirmation popup)                                                                                                                              |
+| `Ctrl+R`                                      | Restart the daemon (any nav focus; opens a confirmation popup)                                                                                                                                           |
+| `Ctrl+K`                                      | Kill the daemon entirely (List focus; opens a confirmation popup)                                                                                                                                        |
+| `Ctrl+D`                                      | Delete the focused model from disk (idle rows only: `NotLaunched` / `Stopped` — opens a confirmation popup; HF-cache models remove the entire `models--<owner>--<repo>` directory to reclaim blob bytes) |
+| `Ctrl+X`                                      | Cancel the currently-active HF download (any focus; opens a confirmation popup; queued pulls stay in line — press again on the next promoted pull)                                                       |
 
 ### Mouse focus (opt-in)
 
@@ -675,29 +686,29 @@ The CLI flag and the config knob are OR-ed; either source is sufficient. There's
 
 When enabled, left-click moves focus and the wheel replays the `↑`/`↓` action in the current focus — i.e. whatever pressing `k` / `j` (or arrows) would do right now. Drag / Up / Moved are filtered out at the input thread so a user holding the terminal's bypass modifier (Shift on iTerm2 / Alacritty / foot / wezterm, Option on Apple Terminal) can still highlight text for native copy.
 
-| Gesture | Action |
-|---|---|
-| Left-click on the Models list | Focus → `List` |
-| Left-click on the right pane (body, not a tab label) | Focus → `RightPane` (keyboard still drives `e` to enter Chat/Embed/Rerank text input) |
-| Left-click on a tab label (`Settings`/`Logs`/`Chat`/`Embed`/`Rerank`) | Switch `right_tab` + focus → `RightPane` |
-| Wheel up/down | Same as pressing `↑`/`↓`: moves the list cursor in `List` focus, scrolls the active buffer in Logs / Chat / Embed / Rerank, cycles fields in the Settings form (scrolls the read-only running view). To scroll Logs without leaving an input, click the right pane first to land focus there. |
-| Drag / Up / Moved | Filtered out — preserves terminal text selection during drag and prevents mouse-motion events from saturating the event channel. |
-| Any mouse event while a modal owns input (HF dialog, confirm popup, help overlay) | Ignored — modals own their own dismissal contract; a stray click cannot confirm a destructive action. |
+| Gesture                                                                           | Action                                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Left-click on the Models list                                                     | Focus → `List`                                                                                                                                                                                                                                                                                |
+| Left-click on the right pane (body, not a tab label)                              | Focus → `RightPane` (keyboard still drives `e` to enter Chat/Embed/Rerank text input)                                                                                                                                                                                                         |
+| Left-click on a tab label (`Settings`/`Logs`/`Chat`/`Embed`/`Rerank`)             | Switch `right_tab` + focus → `RightPane`                                                                                                                                                                                                                                                      |
+| Wheel up/down                                                                     | Same as pressing `↑`/`↓`: moves the list cursor in `List` focus, scrolls the active buffer in Logs / Chat / Embed / Rerank, cycles fields in the Settings form (scrolls the read-only running view). To scroll Logs without leaving an input, click the right pane first to land focus there. |
+| Drag / Up / Moved                                                                 | Filtered out — preserves terminal text selection during drag and prevents mouse-motion events from saturating the event channel.                                                                                                                                                              |
+| Any mouse event while a modal owns input (HF dialog, confirm popup, help overlay) | Ignored — modals own their own dismissal contract; a stray click cannot confirm a destructive action.                                                                                                                                                                                         |
 
 ### HuggingFace pull dialog (`Focus::HfDialog`, `Shift+P` from the Models list)
 
 Three-stage modal: **Search → File picker → Confirm**. Search runs live against the public `/api/models` endpoint (300 ms debounce); paste an `owner/repo[:filename]` slug + Enter to bypass search.
 
-| Key | Action |
-|---|---|
-| `e` | Enter edit mode on the search field (auto-enabled on dialog open). Resting Esc clears the buffer; a further Esc closes the dialog. |
-| (alphanumerics / Backspace) | Mutate the search query while editing |
-| `↑` / `↓` | Move the row cursor |
-| `o` | Cycle sort (Downloads → Likes → Recently Updated → Trending). Resets to page 1. Only fires while the search field is resting. |
-| `n` / `p` | Next / previous page (only fires while the search field is resting; `‹›` chevrons next to `page N` indicate when they're available) |
-| `Enter` | Search → drill into the focused repo's files; FilePicker → confirm the chosen file; Confirm → enqueue the pull on the download strip |
-| `Esc` | Walk back one layer: editing → exit edit · resting+content → clear · resting+empty → close (in-flight downloads keep running). In the FilePicker / Confirm stages, Esc steps back to the previous stage. |
-| `Ctrl+X` | Cancel the currently-active HF download (also reachable from anywhere outside the dialog) |
+| Key                         | Action                                                                                                                                                                                                   |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `e`                         | Enter edit mode on the search field (auto-enabled on dialog open). Resting Esc clears the buffer; a further Esc closes the dialog.                                                                       |
+| (alphanumerics / Backspace) | Mutate the search query while editing                                                                                                                                                                    |
+| `↑` / `↓`                   | Move the row cursor                                                                                                                                                                                      |
+| `o`                         | Cycle sort (Downloads → Likes → Recently Updated → Trending). Resets to page 1. Only fires while the search field is resting.                                                                            |
+| `n` / `p`                   | Next / previous page (only fires while the search field is resting; `‹›` chevrons next to `page N` indicate when they're available)                                                                      |
+| `Enter`                     | Search → drill into the focused repo's files; FilePicker → confirm the chosen file; Confirm → enqueue the pull on the download strip                                                                     |
+| `Esc`                       | Walk back one layer: editing → exit edit · resting+content → clear · resting+empty → close (in-flight downloads keep running). In the FilePicker / Confirm stages, Esc steps back to the previous stage. |
+| `Ctrl+X`                    | Cancel the currently-active HF download (also reachable from anywhere outside the dialog)                                                                                                                |
 
 ### Launch picker (Settings tab)
 
@@ -706,21 +717,41 @@ the resolved value plus a `(source)` chip indicating where the value
 came from in the precedence chain (`(user)`, `(last used)`, `(arch
 default)`, `(built-in)`, `(model default)`).
 
-| Key | Action |
-|---|---|
-| `↑` / `↓` | Move between editor rows |
-| `←` / `→` | Cycle the focused row's value through its preset list |
-| `e` | Open inline edit on a numeric / enum / extras row |
-| `Enter` | Commit an open inline edit; otherwise dispatch `start_model` |
-| `Esc` | Cancel an open inline edit, or return focus to the Models list |
+| Key       | Action                                                         |
+| --------- | -------------------------------------------------------------- |
+| `↑` / `↓` | Move between editor rows                                       |
+| `←` / `→` | Cycle the focused row's value through its preset list          |
+| `e`       | Open inline edit on a numeric / enum / extras row              |
+| `Enter`   | Commit an open inline edit; otherwise dispatch `start_model`   |
+| `Esc`     | Cancel an open inline edit, or return focus to the Models list |
 
-Knob set: `n_gpu_layers`, `threads`, `cache_type_k`, `cache_type_v`,
-`flash_attn`, `mlock`, `no_mmap`, `parallel`, `batch_size`,
-`ubatch_size`, `rope_freq_scale`, `keep`, `device`. Booleans cycle
+Knob set, grouped into labelled clusters in display order:
+
+| Group                                        | Knobs                                              |
+| -------------------------------------------- | -------------------------------------------------- |
+| Context                                      | `ctx`, `reasoning`                                 |
+| GPU / CPU offload                            | `n_gpu_layers`, `n_cpu_moe`                        |
+| Multi-GPU placement _(multi-GPU hosts only)_ | `device`, `tensor_split`, `main_gpu`, `split_mode` |
+| Attention & KV cache                         | `flash_attn`, `cache_type_k`, `cache_type_v`       |
+| Throughput                                   | `threads`, `parallel`, `batch_size`, `ubatch_size` |
+| Memory loading                               | `mlock`, `no_mmap`                                 |
+| Advanced                                     | `rope_freq_scale`, `keep`, `extras`                |
+
+Groups are ordered by how often a knob is typically changed; related
+knobs sit together. (This display order is independent of the order
+flags are emitted on the `llama-server` argv.) Booleans cycle
 `default ↔ on ↔ off`; enums cycle their allowed set (`f16` / `q8_0`
-/ `q4_0` for cache types). `e` enters free-form numeric / enum edit
-mode for any row whose preset list doesn't cover the value the user
-wants.
+/ `q4_0` for cache types, `none` / `layer` / `row` for `split_mode`).
+`e` enters free-form numeric / enum / text edit mode for any row whose
+preset list doesn't cover the value the user wants.
+
+**GPU/CPU offload split.** `n_gpu_layers` offloads N layers to the GPU
+(rest on CPU); `n_cpu_moe` keeps the first N layers' MoE expert weights
+on CPU — the lever for big MoE models that don't fit VRAM. On
+multi-GPU hosts, `tensor_split` (e.g. `3,1`) sets an uneven split
+across heterogeneous cards, `main_gpu` picks the primary GPU, and
+`split_mode` chooses `none|layer|row`. For per-tensor placement beyond
+these, `--override-tensor` works through the `extras` row.
 
 The `device` row (`--device` / `-d`) pins a model to one GPU instead of
 letting `llama-server` split it across every visible card. It cycles
@@ -732,10 +763,11 @@ Backspace resets to `default`. The selector is passed through to
 are offered — on a multi-vendor box, run a Vulkan-capable build to see
 every card.
 
-The `device` row — and the matching `Device` column in the model list
-— appear **only when more than one GPU device is detected**. Single-GPU
-and CPU-only hosts never see them, so the launcher stays uncluttered
-when there's no device choice to make. The bottom `extras` row holds the free-form argv tail for
+The whole **Multi-GPU placement** group (`device`, `tensor_split`,
+`main_gpu`, `split_mode`) — and the matching `Device` column in the
+model list — appear **only when more than one GPU device is detected**.
+Single-GPU and CPU-only hosts never see them, so the launcher stays
+uncluttered when there's no device choice to make. The bottom `extras` row holds the free-form argv tail for
 flags the typed editor doesn't model; forbidden flags
 (`--host`, `--listen`, `--bind`, `--api-key`, `--ssl-*`) surface a
 red inline warning with secret values redacted.
@@ -759,45 +791,45 @@ inheritance is visible at the row level.
 
 ### Right pane
 
-| Key | Action |
-|---|---|
-| `Tab` / `Shift+Tab` | Cycle pane focus (universal across the TUI; `l` / `h` are vi aliases) |
-| `↑` / `↓` (or `k` / `j`) | Settings tab: move between editor rows. Logs tab: scroll the buffer. |
-| `←` / `→` | Settings tab: cycle the focused row's value through its preset list (no-op on other tabs) |
-| `Esc` / `Shift+M` | Return focus to the Models list |
-| `Shift+L` / `Shift+C` / `Shift+S` / `Shift+E` / `Shift+R` | Jump to Logs / Chat / Settings tab. `L` and `C/E/R` are gated on a running model. |
-| `s` | Toggle Logs auto-scroll |
-| `c` (or `y`) | Logs tab: copy the full log buffer to clipboard |
-| `r` | Chat tab: toggle `<think>` block collapse (reasoning trace) |
-| `Ctrl+S` | Stop the focused running launch (confirmation popup) |
-| `e` | Enter edit mode on the active tab's input field |
+| Key                                                       | Action                                                                                    |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `Tab` / `Shift+Tab`                                       | Cycle pane focus (universal across the TUI; `l` / `h` are vi aliases)                     |
+| `↑` / `↓` (or `k` / `j`)                                  | Settings tab: move between editor rows. Logs tab: scroll the buffer.                      |
+| `←` / `→`                                                 | Settings tab: cycle the focused row's value through its preset list (no-op on other tabs) |
+| `Esc` / `Shift+M`                                         | Return focus to the Models list                                                           |
+| `Shift+L` / `Shift+C` / `Shift+S` / `Shift+E` / `Shift+R` | Jump to Logs / Chat / Settings tab. `L` and `C/E/R` are gated on a running model.         |
+| `s`                                                       | Toggle Logs auto-scroll                                                                   |
+| `c` (or `y`)                                              | Logs tab: copy the full log buffer to clipboard                                           |
+| `r`                                                       | Chat tab: toggle `<think>` block collapse (reasoning trace)                               |
+| `Ctrl+S`                                                  | Stop the focused running launch (confirmation popup)                                      |
+| `e`                                                       | Enter edit mode on the active tab's input field                                           |
 
 ### Chat tab (`Focus::ChatInput`)
 
-| Key | Action |
-|---|---|
-| (alphanumerics / Backspace) | Edit prompt buffer |
-| `Enter` | Send prompt |
-| `Shift+Enter` | Insert newline (only on kitty-protocol terminals; collapses to send elsewhere) |
+| Key                         | Action                                                                         |
+| --------------------------- | ------------------------------------------------------------------------------ |
+| (alphanumerics / Backspace) | Edit prompt buffer                                                             |
+| `Enter`                     | Send prompt                                                                    |
+| `Shift+Enter`               | Insert newline (only on kitty-protocol terminals; collapses to send elsewhere) |
 
 ### Embed tab (`Focus::EmbedInput`)
 
-| Key | Action |
-|---|---|
-| (alphanumerics / Backspace) | Edit input |
-| `Enter` | Call `/v1/embeddings` |
-| `Shift+Enter` | Insert newline (kitty-protocol terminals only) |
-| `Tab` / `Shift+Tab` | Cycle pane focus |
+| Key                         | Action                                         |
+| --------------------------- | ---------------------------------------------- |
+| (alphanumerics / Backspace) | Edit input                                     |
+| `Enter`                     | Call `/v1/embeddings`                          |
+| `Shift+Enter`               | Insert newline (kitty-protocol terminals only) |
+| `Tab` / `Shift+Tab`         | Cycle pane focus                               |
 
 ### Rerank tab (`Focus::RerankInput`)
 
-| Key | Action |
-|---|---|
-| (alphanumerics / Backspace) | Edit current field |
-| `↓` / `↑` | Cycle Query ↔ Candidate field |
-| `Enter` | Query field → call `/v1/rerank`. Candidate field → stage the buffer onto the candidate list. |
-| `Shift+Enter` | Insert newline (kitty-protocol terminals only) |
-| `Tab` / `Shift+Tab` | Cycle pane focus (universal; not field cycle) |
+| Key                         | Action                                                                                       |
+| --------------------------- | -------------------------------------------------------------------------------------------- |
+| (alphanumerics / Backspace) | Edit current field                                                                           |
+| `↓` / `↑`                   | Cycle Query ↔ Candidate field                                                                |
+| `Enter`                     | Query field → call `/v1/rerank`. Candidate field → stage the buffer onto the candidate list. |
+| `Shift+Enter`               | Insert newline (kitty-protocol terminals only)                                               |
+| `Tab` / `Shift+Tab`         | Cycle pane focus (universal; not field cycle)                                                |
 
 ## Toasts
 
