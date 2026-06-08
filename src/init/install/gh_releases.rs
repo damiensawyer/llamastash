@@ -107,8 +107,17 @@ pub fn pick_asset_suffix(hw: &HardwareSnapshot) -> Option<String> {
 
 /// Determine whether `asset_name` matches `suffix`. `suffix` may
 /// contain a single `*` glob (used for ROCm version drift).
+///
+/// Only assets whose names start with `llama-` are considered. This
+/// excludes supplementary packages shipped alongside the main binary
+/// (e.g. `cudart-llama-bin-win-cuda-*-x64.zip`, which contains CUDA
+/// runtime DLLs but no `llama-server.exe` and therefore shares the
+/// Windows CUDA suffix pattern without being the install target).
 pub fn asset_matches(asset_name: &str, suffix: &str) -> bool {
   let lower_name = asset_name.to_ascii_lowercase();
+  if !lower_name.starts_with("llama-") {
+    return false;
+  }
   let lower_suffix = suffix.to_ascii_lowercase();
   if let Some((head, tail)) = lower_suffix.split_once('*') {
     return lower_name.ends_with(&tail) && lower_name.contains(head);
@@ -378,6 +387,24 @@ mod tests {
     ));
     assert!(!asset_matches(
       "llama-b9219-bin-ubuntu-vulkan-x64.tar.gz",
+      suffix
+    ));
+  }
+
+  #[test]
+  fn asset_matches_rejects_cudart_supplementary_package() {
+    // Regression: `cudart-llama-bin-win-cuda-12.4-x64.zip` ends with the
+    // same suffix pattern as the real Windows CUDA binary but is a CUDA
+    // runtime DLL bundle that does not contain `llama-server.exe`.
+    // asset_matches must reject it so pick_release_with_asset never
+    // hands it to safe_extract_zip.
+    let suffix = "win-cuda-*-x64.zip";
+    assert!(!asset_matches(
+      "cudart-llama-bin-win-cuda-12.4-x64.zip",
+      suffix
+    ));
+    assert!(asset_matches(
+      "llama-b9553-bin-win-cuda-12.4-x64.zip",
       suffix
     ));
   }
