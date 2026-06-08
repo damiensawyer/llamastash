@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use tokio::sync::{Mutex, RwLock};
 
 use super::protocol::{ErrorCode, ErrorObject, Request, Response, JSONRPC_VERSION};
+use crate::backend::{Backend, LaunchPlan};
 use crate::config::loader::PortRange;
 use crate::daemon::host_metrics::{HostMetricsSnapshot, SamplerHandles};
 use crate::daemon::orphans::ExternalProcess;
@@ -1350,14 +1351,23 @@ pub(crate) async fn start_model_inner(
     None => env.binary.clone(),
   };
 
+  // Translate the resolved knob IR into a launch plan via the backend.
+  // The backend is selected from the model (Phase 1: always llama.cpp).
+  // The orchestrator owns the branch on plan shape; the process-per-model
+  // arm feeds the supervisor. When Phase 2 adds a managed-multiplexer
+  // `LaunchPlan` variant this irrefutable `let` becomes a refutable
+  // pattern — a compile error that forces us to handle the new arm here.
+  let inference_backend = crate::backend::select_backend(&launch_params.model_path);
+  let LaunchPlan::SpawnProcess(launch_spec) =
+    inference_backend.prepare_launch(&launch_params, port, launch_binary, scaled_probe);
+
   let spawn_result = supervisor_spawn(ManagedSpawn {
     id: id.clone(),
-    binary: launch_binary,
     params: launch_params.clone(),
     port,
     mode,
     log_path: log_path.clone(),
-    probe: scaled_probe,
+    plan: launch_spec,
     origin,
   })
   .await;

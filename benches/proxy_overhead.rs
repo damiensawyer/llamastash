@@ -55,6 +55,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use llamastash::backend::llama_cpp::LlamaCppBackend;
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::registry::SupervisorRegistry;
 use llamastash::daemon::shutdown::ShutdownToken;
@@ -150,17 +151,23 @@ fn build_harness() -> Harness {
       path: PathBuf::from(&catalog_path),
       header_blake3: [0u8; 32],
     };
-    let supervisor = supervisor_spawn(ManagedSpawn {
-      id: model_id.clone(),
-      binary: PathBuf::from(env!("CARGO_BIN_EXE_fake_llama_server")),
-      params: LaunchParams::new(PathBuf::from(&catalog_path), LaunchMode::Chat),
-      port: upstream_port,
-      mode: LaunchMode::Chat,
-      log_path: workdir.join("fake.log"),
-      probe: ProbeOptions {
+    let params = LaunchParams::new(PathBuf::from(&catalog_path), LaunchMode::Chat);
+    let plan = LlamaCppBackend::new().process_spec(
+      &params,
+      upstream_port,
+      PathBuf::from(env!("CARGO_BIN_EXE_fake_llama_server")),
+      ProbeOptions {
         interval: Duration::from_millis(20),
         timeout: Duration::from_secs(5),
       },
+    );
+    let supervisor = supervisor_spawn(ManagedSpawn {
+      id: model_id.clone(),
+      params,
+      port: upstream_port,
+      mode: LaunchMode::Chat,
+      log_path: workdir.join("fake.log"),
+      plan,
       origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
     })
     .await

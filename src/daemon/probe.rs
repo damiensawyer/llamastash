@@ -78,14 +78,21 @@ impl ProbeOptions {
   }
 }
 
-/// Poll `/health` on the supplied port until 200 OK or the timeout
-/// fires.
-pub async fn poll_until_ready(port: u16, opts: ProbeOptions) -> ProbeOutcome {
+/// Poll `path` on the supplied port until `ready_status` is observed or
+/// the timeout fires. The endpoint + ready status are supplied by the
+/// backend's `Readiness` declaration (llama.cpp = `/health` + `200`) so
+/// the probe is no longer hardwired to llama-server's surface.
+pub async fn poll_until_ready(
+  port: u16,
+  opts: ProbeOptions,
+  path: &str,
+  ready_status: u16,
+) -> ProbeOutcome {
   let deadline = Instant::now() + opts.timeout;
   let mut last_status: Option<u16> = None;
   loop {
-    match probe_once(port, opts.interval).await {
-      Ok(200) => return ProbeOutcome::Ready,
+    match probe_once(port, opts.interval, path).await {
+      Ok(status) if status == ready_status => return ProbeOutcome::Ready,
       Ok(status) => last_status = Some(status),
       Err(_) => {
         // Connect refused / read error keeps the previous
@@ -103,13 +110,13 @@ pub async fn poll_until_ready(port: u16, opts: ProbeOptions) -> ProbeOutcome {
 
 /// One probe attempt. Returns the HTTP status code on success;
 /// connect / read errors come back as `Err`.
-async fn probe_once(port: u16, op_timeout: Duration) -> std::io::Result<u16> {
+async fn probe_once(port: u16, op_timeout: Duration, path: &str) -> std::io::Result<u16> {
   let connect = TcpStream::connect(("127.0.0.1", port));
   let mut sock = tokio::time::timeout(op_timeout, connect)
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timeout"))??;
-  let req = b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-  let write = sock.write_all(req);
+  let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+  let write = sock.write_all(req.as_bytes());
   tokio::time::timeout(op_timeout, write)
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "write timeout"))??;
@@ -199,7 +206,7 @@ mod tests {
       timeout: Duration::from_millis(120),
     };
     // Pick a port unlikely to be open — 1 is privileged on Linux.
-    let outcome = poll_until_ready(1, opts).await;
+    let outcome = poll_until_ready(1, opts, "/health", 200).await;
     match outcome {
       ProbeOutcome::Timeout { last_status } => {
         assert!(

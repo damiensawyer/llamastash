@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use llamastash::backend::llama_cpp::LlamaCppBackend;
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::supervisor::{spawn, ManagedSpawn, ManagedState};
 use llamastash::gguf::identity::ModelId;
@@ -67,14 +68,15 @@ async fn wait_for_state<P: Fn(&ManagedState) -> bool>(
 async fn launching_to_loading_to_ready_within_a_second() {
   let dir = unique_temp("happy");
   let port = allocate_port();
+  let params = LaunchParams::new(PathBuf::from("/fixture/m.gguf"), LaunchMode::Chat);
+  let plan = LlamaCppBackend::new().process_spec(&params, port, fake_binary(), fast_probe());
   let model = spawn(ManagedSpawn {
     id: fake_id(1),
-    binary: fake_binary(),
-    params: LaunchParams::new(PathBuf::from("/fixture/m.gguf"), LaunchMode::Chat),
+    params,
     port,
     mode: LaunchMode::Chat,
     log_path: dir.join("launch.log"),
-    probe: fast_probe(),
+    plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
   })
   .await
@@ -104,14 +106,14 @@ async fn embedding_mode_records_correctly() {
   let port = allocate_port();
   let mut params = LaunchParams::new(PathBuf::from("/fixture/m.gguf"), LaunchMode::Embedding);
   params.mode = LaunchMode::Embedding;
+  let plan = LlamaCppBackend::new().process_spec(&params, port, fake_binary(), fast_probe());
   let model = spawn(ManagedSpawn {
     id: fake_id(2),
-    binary: fake_binary(),
     params,
     port,
     mode: LaunchMode::Embedding,
     log_path: dir.join("launch.log"),
-    probe: fast_probe(),
+    plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
   })
   .await
@@ -132,14 +134,15 @@ async fn log_file_and_ring_buffer_capture_child_output() {
   let dir = unique_temp("logs");
   let log_path = dir.join("launch.log");
   let port = allocate_port();
+  let params = LaunchParams::new(PathBuf::from("/fixture/m.gguf"), LaunchMode::Chat);
+  let plan = LlamaCppBackend::new().process_spec(&params, port, fake_binary(), fast_probe());
   let model = spawn(ManagedSpawn {
     id: fake_id(3),
-    binary: fake_binary(),
-    params: LaunchParams::new(PathBuf::from("/fixture/m.gguf"), LaunchMode::Chat),
+    params,
     port,
     mode: LaunchMode::Chat,
     log_path: log_path.clone(),
-    probe: fast_probe(),
+    plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
   })
   .await
@@ -187,17 +190,22 @@ async fn probe_timeout_triggers_error_state_and_releases_child() {
     std::ffi::OsString::from("--health-delay-ms"),
     std::ffi::OsString::from("5000"),
   ];
+  let plan = LlamaCppBackend::new().process_spec(
+    &params,
+    port,
+    fake_binary(),
+    ProbeOptions {
+      interval: Duration::from_millis(50),
+      timeout: Duration::from_millis(400),
+    },
+  );
   let model = spawn(ManagedSpawn {
     id: fake_id(4),
-    binary: fake_binary(),
     params,
     port,
     mode: LaunchMode::Chat,
     log_path: dir.join("launch.log"),
-    probe: ProbeOptions {
-      interval: Duration::from_millis(50),
-      timeout: Duration::from_millis(400),
-    },
+    plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
   })
   .await
@@ -228,14 +236,14 @@ async fn sigterm_trapping_child_gets_sigkilled_after_grace() {
   let port = allocate_port();
   let mut params = LaunchParams::new(PathBuf::from("/fixture/m.gguf"), LaunchMode::Chat);
   params.extras = vec![std::ffi::OsString::from("--trap-sigterm")];
+  let plan = LlamaCppBackend::new().process_spec(&params, port, fake_binary(), fast_probe());
   let model = spawn(ManagedSpawn {
     id: fake_id(5),
-    binary: fake_binary(),
     params,
     port,
     mode: LaunchMode::Chat,
     log_path: dir.join("launch.log"),
-    probe: fast_probe(),
+    plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
   })
   .await

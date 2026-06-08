@@ -24,6 +24,7 @@ use std::{
   time::Duration,
 };
 
+use llamastash::backend::llama_cpp::LlamaCppBackend;
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::registry::SupervisorRegistry;
 use llamastash::daemon::shutdown::ShutdownToken;
@@ -568,14 +569,15 @@ async fn pre_launch(
     path: catalog_path.to_path_buf(),
     header_blake3: [0u8; 32],
   };
+  let params = LaunchParams::new(catalog_path.to_path_buf(), mode);
+  let plan = LlamaCppBackend::new().process_spec(&params, port, fake_binary(), fast_probe());
   let model = supervisor_spawn(ManagedSpawn {
     id,
-    binary: fake_binary(),
-    params: LaunchParams::new(catalog_path.to_path_buf(), mode),
+    params,
     port,
     mode,
     log_path: log_dir.join("ollama-ps.log"),
-    probe: fast_probe(),
+    plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
   })
   .await

@@ -114,6 +114,8 @@ async fn drive_to_ready_port() -> (u16, tokio::task::JoinHandle<()>, PathBuf) {
       // about the supervisor itself.
       timeout: Duration::from_secs(30),
     },
+    "/health",
+    200,
   )
   .await
   {

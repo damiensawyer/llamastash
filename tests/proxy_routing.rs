@@ -24,6 +24,7 @@ use std::{
   time::Duration,
 };
 
+use llamastash::backend::llama_cpp::LlamaCppBackend;
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::registry::SupervisorRegistry;
 use llamastash::daemon::shutdown::ShutdownToken;
@@ -125,14 +126,15 @@ async fn spawn_fake_supervisor(
     path: PathBuf::from(catalog_path),
     header_blake3: [0u8; 32],
   };
+  let params = LaunchParams::new(PathBuf::from(catalog_path), mode);
+  let plan = LlamaCppBackend::new().process_spec(&params, port, fake_binary(), fast_probe());
   let model = supervisor_spawn(ManagedSpawn {
     id: id.clone(),
-    binary: fake_binary(),
-    params: LaunchParams::new(PathBuf::from(catalog_path), mode),
+    params,
     port,
     mode,
     log_path: log_dir.join("fake.log"),
-    probe: fast_probe(),
+    plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
   })
   .await

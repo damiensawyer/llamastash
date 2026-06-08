@@ -1,5 +1,8 @@
-//! Spawn and shepherd a `llama-server` child for one user-requested
-//! launch. Owns the state machine
+//! Spawn and shepherd one supervised child process for a user-requested
+//! launch. Backend-agnostic: the binary, argv, env strip, and readiness
+//! check all arrive in the [`ProcessLaunchSpec`] the backend produced
+//! (see [`crate::backend`]); for llama.cpp that child is `llama-server`.
+//! Owns the state machine
 //! `Launching → Loading → Ready | Error{cause} → Stopping → Stopped`,
 //! plus the stdout/stderr tee to a rotating log file and an
 //! in-memory ring buffer (for the TUI Logs tab).
@@ -16,8 +19,9 @@
 //! 2. Spawn one tokio task per stream that tees lines to the log
 //!    file (rotating at 10 MiB, max 5 files per launch) and to a
 //!    bounded ring buffer of the last 4096 lines.
-//! 3. Hand the (pid, port) to `probe::poll_until_ready`; on 200,
-//!    transition Loading → Ready. Timeout → Error.
+//! 3. Hand the (pid, port) to `probe::poll_until_ready` with the
+//!    backend's readiness endpoint; on the ready status, transition
+//!    Loading → Ready. Timeout → Error.
 //! 4. `stop()` sends SIGTERM, waits 5 s, sends SIGKILL if still
 //!    alive. State transitions reflect each step.
 
@@ -37,10 +41,11 @@ const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 /// Keep this many rotated segments (`<base>.1` … `<base>.N`).
 const LOG_KEEP_SEGMENTS: usize = 5;
 
-use crate::daemon::probe::{self, ProbeOptions, ProbeOutcome};
+use crate::backend::{ProcessLaunchSpec, Readiness};
+use crate::daemon::probe::{self, ProbeOutcome};
 use crate::gguf::identity::ModelId;
 use crate::launch::mode::LaunchMode;
-use crate::launch::params::{compose, LaunchParams};
+use crate::launch::params::LaunchParams;
 
 /// Snapshot the state-machine state of a managed model. Public so
 /// the IPC `status` handler can serialise it.
@@ -133,12 +138,18 @@ impl Drop for InflightGuard {
 #[derive(Debug, Clone)]
 pub struct ManagedSpawn {
   pub id: ModelId,
-  pub binary: PathBuf,
+  /// Resolved launch params, retained for introspection (the `params()`
+  /// accessor, status projection). The argv actually spawned comes from
+  /// `plan` — both are built from the same resolved params, so they
+  /// agree by construction.
   pub params: LaunchParams,
   pub port: u16,
   pub mode: LaunchMode,
   pub log_path: PathBuf,
-  pub probe: ProbeOptions,
+  /// The backend-produced process launch spec: binary, argv, env strip,
+  /// readiness, and probe budget. The supervisor is backend-agnostic —
+  /// it executes this spec without knowing which engine produced it.
+  pub plan: ProcessLaunchSpec,
   /// How this launch entered the supervisor. Defaults to `Manual`
   /// (safe — never evicted) for callers that don't care.
   pub origin: LaunchOrigin,
@@ -341,48 +352,29 @@ impl ManagedModel {
 /// it stamps the `ready_at` field and on a probe timeout flips to
 /// `Error{cause}`.
 pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
-  // `input.params.knobs.device` already holds a real `--device`
-  // selector (`Vulkan0`, `CUDA0`, …) resolved against `input.binary`'s
-  // own `--list-devices`, so compose emits it verbatim — no backend
-  // formatting needed here.
-  let argv = compose(&input.params, input.port);
-  let mut cmd = Command::new(&input.binary);
+  // The binary, argv, env-strip set, and readiness all come from the
+  // backend's `prepare_launch` (see `crate::backend`). The supervisor is
+  // backend-agnostic: it spawns `plan.binary` with `plan.argv`, removes
+  // `plan.env_remove`, and probes `plan.readiness` — without knowing
+  // which engine produced the spec. For llama.cpp `plan.argv` is exactly
+  // `params::compose`'s output (pinned by parity tests).
+  let mut cmd = Command::new(&input.plan.binary);
   cmd
-    .args(&argv)
+    .args(&input.plan.argv)
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
-  // Strip llama-server's environment-variable overrides before spawn.
-  // llama-server reads `LLAMA_ARG_*` for every CLI flag (e.g.
-  // `LLAMA_ARG_HOST=0.0.0.0` overrides the `--host 127.0.0.1` we
-  // pass in argv on some flag-parsing builds), so an inherited env
-  // var would silently defeat the loopback-only contract that
-  // `FORBIDDEN_ADVANCED_PREFIXES` enforces for argv.
+  // Strip the backend-declared environment-variable bypass vectors
+  // before spawn. For llama.cpp this is `LLAMA_ARG_*` (an inherited
+  // `LLAMA_ARG_HOST=0.0.0.0` would silently defeat the loopback-only
+  // argv contract) and `HF_*` (llamastash's own pull credentials, which
+  // the child has no reason to see). The list + its full rationale live
+  // with the backend at `crate::backend::llama_cpp::LLAMA_ENV_STRIP`.
   //
-  // `HF_TOKEN` / `HF_HOME` / `HUGGING_FACE_HUB_TOKEN` are stripped
-  // because llamastash itself reads them (init + pull surfaces) and
-  // there is no reason for `llama-server` — which does not pull from
-  // HuggingFace during a launch — to see them. Leaking them into a
-  // supervised child widens the credential blast radius (child log
-  // capture, child crash dumps, child env enumeration via /proc) for
-  // no functional benefit.
-  //
-  // Strip the specific bypass vectors rather than `env_clear()` so
-  // PATH / HOME / library-search-path env vars the child legitimately
-  // needs (CUDA, Metal, ROCm, BLAS) survive.
-  for var in [
-    "LLAMA_ARG_HOST",
-    "LLAMA_ARG_PORT",
-    "LLAMA_ARG_BIND",
-    "LLAMA_ARG_LISTEN",
-    "LLAMA_ARG_API_KEY",
-    "LLAMA_ARG_SSL_KEY_FILE",
-    "LLAMA_ARG_SSL_CERT_FILE",
-    "HF_TOKEN",
-    "HUGGING_FACE_HUB_TOKEN",
-    "HF_HOME",
-    "HF_ENDPOINT",
-  ] {
+  // Strip the specific vectors rather than `env_clear()` so PATH / HOME /
+  // library-search-path vars the child legitimately needs (CUDA, Metal,
+  // ROCm, BLAS) survive.
+  for var in &input.plan.env_remove {
     cmd.env_remove(var);
   }
   // Stamp an inheritance marker so a future daemon — possibly a
@@ -493,12 +485,23 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
     ),
   );
 
-  // Transition to Loading and kick off the probe.
+  // Transition to Loading and kick off the probe. The endpoint + ready
+  // status come from the backend's readiness declaration, not a
+  // hardcoded `/health`.
   model.transition(ManagedState::Loading).await;
   let probe_model = model.clone();
-  let probe_opts = input.probe;
+  let probe_opts = input.plan.probe;
+  let (ready_path, ready_status) = match &input.plan.readiness {
+    Readiness::HttpPoll { path, ready_status } => (path.clone(), *ready_status),
+  };
   spawn_supervised("probe", async move {
-    let outcome = probe::poll_until_ready(probe_model.inner.port, probe_opts).await;
+    let outcome = probe::poll_until_ready(
+      probe_model.inner.port,
+      probe_opts,
+      &ready_path,
+      ready_status,
+    )
+    .await;
     match outcome {
       ProbeOutcome::Ready => {
         let secs = SystemTime::now()

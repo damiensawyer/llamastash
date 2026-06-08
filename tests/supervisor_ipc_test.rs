@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use llamastash::backend::llama_cpp::LlamaCppBackend;
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::registry::SupervisorRegistry;
 use llamastash::daemon::supervisor::{spawn, ManagedSpawn, ManagedState};
@@ -57,20 +58,26 @@ async fn status_lists_active_supervised_model() {
 
   // Spin up a ManagedModel and stash it under a known LaunchId.
   let port = allocate_port();
+  let params = LaunchParams::new(PathBuf::from("/fixture/m.gguf"), LaunchMode::Chat);
+  let plan = LlamaCppBackend::new().process_spec(
+    &params,
+    port,
+    fake_binary(),
+    ProbeOptions {
+      interval: Duration::from_millis(40),
+      timeout: Duration::from_secs(5),
+    },
+  );
   let model = spawn(ManagedSpawn {
     id: ModelId {
       path: PathBuf::from("/fixture/m.gguf"),
       header_blake3: [7u8; 32],
     },
-    binary: fake_binary(),
-    params: LaunchParams::new(PathBuf::from("/fixture/m.gguf"), LaunchMode::Chat),
+    params,
     port,
     mode: LaunchMode::Chat,
     log_path: logs.join("launch.log"),
-    probe: ProbeOptions {
-      interval: Duration::from_millis(40),
-      timeout: Duration::from_secs(5),
-    },
+    plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
   })
   .await

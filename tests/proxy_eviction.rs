@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use llamastash::backend::llama_cpp::LlamaCppBackend;
 use llamastash::config::loader::PortRange;
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::registry::SupervisorRegistry;
@@ -82,14 +83,15 @@ async fn pre_launch(
     path: PathBuf::from(format!("/tmp/ls-pe-{port}.gguf")),
     header_blake3: [0u8; 32],
   };
+  let params = LaunchParams::new(PathBuf::from("/tmp/ls-pe.gguf"), LaunchMode::Chat);
+  let plan = LlamaCppBackend::new().process_spec(&params, port, fake_binary(), fast_probe());
   let model = supervisor_spawn(ManagedSpawn {
     id,
-    binary: fake_binary(),
-    params: LaunchParams::new(PathBuf::from("/tmp/ls-pe.gguf"), LaunchMode::Chat),
+    params,
     port,
     mode: LaunchMode::Chat,
     log_path: log_dir.join("evict.log"),
-    probe: fast_probe(),
+    plan,
     origin,
   })
   .await

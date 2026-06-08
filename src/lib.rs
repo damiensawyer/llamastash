@@ -10,6 +10,7 @@
 // landed all of its consumers yet, narrow the allow to that item
 // (`#[allow(dead_code)] fn …`) rather than re-blanketing the crate.
 
+pub mod backend;
 pub mod banner;
 pub mod cli;
 pub mod config;

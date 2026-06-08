@@ -307,7 +307,7 @@ Unit 1 (contract) ──► Unit 2 (llama.cpp impl + parity) ──► Unit 3 (w
                                                                                                          (Unit 4 may land with Unit 3)
 ```
 
-- [ ] **Unit 1: Define the `Backend` contract and `LaunchPlan` types (no behavior)**
+- [x] **Unit 1: Define the `Backend` contract and `LaunchPlan` types (no behavior)**
 
 **Goal:** Land the abstraction's types and trait with zero call-site changes — pure
 addition. Establish, via a written Lemonade-mapping walkthrough, that the contract does
@@ -356,7 +356,7 @@ not assume process-per-model or local-GGUF identity.
 
 ---
 
-- [ ] **Unit 2: Implement `LlamaCppBackend` as the reference impl + golden parity tests**
+- [x] **Unit 2: Implement `LlamaCppBackend` as the reference impl + golden parity tests**
 
 **Goal:** Implement the trait for llama.cpp by delegating to existing launch logic, and
 prove the produced launch spec is byte-identical to today's `compose()` output.
@@ -412,7 +412,7 @@ prove the produced launch spec is byte-identical to today's `compose()` output.
 
 ---
 
-- [ ] **Unit 3: Route `start_model_inner` + `supervisor::spawn` through the backend**
+- [x] **Unit 3: Route `start_model_inner` + `supervisor::spawn` through the backend**
 
 **Goal:** Replace the direct `compose()` + hardcoded-env-strip calls with the backend's
 `LaunchPlan`. This is the actual decoupling. Behavior must stay identical.
@@ -485,7 +485,7 @@ guard; do not modify them to make the refactor pass.
 
 ---
 
-- [ ] **Unit 4: Minimal backend registry + capability seam (enumerable, one backend)**
+- [x] **Unit 4: Minimal backend registry + capability seam (enumerable, one backend)**
 
 **Goal:** Make backends enumerable and make backend selection explicit (always llama.cpp
 in Phase 1), and expose the capability set to the knob-resolution path — without any
