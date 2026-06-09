@@ -13,6 +13,7 @@
 
 pub mod catalog;
 pub mod known_caches;
+pub mod lemonade;
 pub mod lm_studio;
 pub mod metadata_cache;
 pub mod ollama;
@@ -117,8 +118,10 @@ pub enum ModelSource {
   Ollama,
   /// An LM Studio models directory.
   LmStudio,
-  // A backend-registry source (e.g. a managed-multiplexer engine) adds a
-  // variant here + arms in `label` / `backend_id`.
+  /// A model the Lemonade umbrella serves from its own registry — no
+  /// local GGUF file. Populated by the opt-in Lemonade discovery source
+  /// ([`lemonade`]).
+  Lemonade,
 }
 
 impl ModelSource {
@@ -128,16 +131,18 @@ impl ModelSource {
       ModelSource::HuggingFace => "huggingface",
       ModelSource::Ollama => "ollama",
       ModelSource::LmStudio => "lm-studio",
+      ModelSource::Lemonade => "lemonade",
     }
   }
 
   /// The id of the backend that serves models from this source (R13/R14).
   ///
   /// Disk sources (user / HF / Ollama / LM Studio) are all local GGUF files
-  /// served by the direct llama.cpp backend. A backend-registry source adds
-  /// its own arm returning that backend's id.
+  /// served by the direct llama.cpp backend; the Lemonade source is served
+  /// by the Lemonade managed-multiplexer.
   pub fn backend_id(&self) -> &'static str {
     match self {
+      ModelSource::Lemonade => crate::backend::lemonade::LEMONADE_BACKEND_ID,
       ModelSource::UserPath
       | ModelSource::HuggingFace
       | ModelSource::Ollama

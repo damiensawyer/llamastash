@@ -41,7 +41,7 @@ use self::{
   shutdown::{install_signal_handlers, ShutdownToken},
   state_store::{load as load_state, RunningSnapshot},
 };
-use crate::config::loader::{PortRange, ProxyConfig};
+use crate::config::loader::{LemonadeConfig, PortRange, ProxyConfig};
 use crate::daemon::probe::ProbeOptions;
 use crate::discovery::ModelCatalog;
 use crate::ipc::methods::{LaunchEnv, MethodContext, PersistedState};
@@ -107,6 +107,12 @@ pub struct DaemonOptions {
   /// unprivileged port and is best-effort (bind failure is
   /// non-fatal).
   pub proxy: ProxyConfig,
+  /// Lemonade backend config (opt-in enable + the user's `lemond` path +
+  /// port). Sourced from the `[lemonade]` section, OR-ed with the
+  /// `--lemonade` flag / `LLAMASTASH_LEMONADE` env. When `lemonade.enabled`
+  /// is false (the default) the daemon never runs Lemonade discovery,
+  /// supervises the umbrella, or routes to it.
+  pub lemonade: LemonadeConfig,
   /// Control-plane HTTP listener port. Phase A of the Windows+HTTP-IPC
   /// plan: the bearer-token-authed JSON-RPC server binds here. `0`
   /// means "let the kernel pick" (used by tests for collision
@@ -140,6 +146,7 @@ impl DaemonOptions {
       // from the test's standpoint. Tests that *do* want the proxy
       // off can flip `enabled` after construction.
       proxy: ProxyConfig::default(),
+      lemonade: LemonadeConfig::default(),
       // Port `0` makes every test pick an ephemeral free slot — no
       // cross-test contention on the
       // [`control_plane::DEFAULT_CONTROL_PORT`] the production CLI
@@ -170,6 +177,7 @@ impl DaemonOptions {
       arch_defaults: std::collections::BTreeMap::new(),
       propagated_cli_args: Vec::new(),
       proxy: ProxyConfig::default(),
+      lemonade: LemonadeConfig::default(),
       control_plane_port: control_plane::DEFAULT_CONTROL_PORT,
     })
   }
@@ -221,7 +229,13 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // produces a working daemon with an empty catalog — `list_models`
   // returns `{"models": []}`.
   let catalog = ModelCatalog::new();
-  let _discovery = discovery_task::spawn(catalog.clone(), opts.discovery.clone());
+  // Lemonade discovery is opt-in and off by default, so a standard install
+  // never contacts `lemond`. Only an enabled backend threads its port in.
+  let mut discovery_opts = opts.discovery.clone();
+  if opts.lemonade.enabled {
+    discovery_opts.lemonade_port = Some(opts.lemonade.port);
+  }
+  let _discovery = discovery_task::spawn(catalog.clone(), discovery_opts);
 
   // 5. Persisted state — favorites, presets, last_params, running.
   // A parse failure does NOT block daemon start: the file is moved
@@ -714,6 +728,12 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
   if opts.proxy.insecure_no_auth {
     cmd.arg("--insecure-no-auth");
   }
+  // Carry the opt-in Lemonade enable through the re-exec so a
+  // `daemon start --lemonade` (detached) keeps the backend on in the child.
+  // The env var alone isn't reliable across a detached re-exec.
+  if opts.lemonade.enabled {
+    cmd.arg("--lemonade");
+  }
   cmd
     .stdin(Stdio::null())
     .stdout(Stdio::null())
@@ -826,6 +846,12 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
   }
   if opts.proxy.insecure_no_auth {
     cmd.arg("--insecure-no-auth");
+  }
+  // Carry the opt-in Lemonade enable through the re-exec so a
+  // `daemon start --lemonade` (detached) keeps the backend on in the child.
+  // The env var alone isn't reliable across a detached re-exec.
+  if opts.lemonade.enabled {
+    cmd.arg("--lemonade");
   }
   cmd
     .stdin(Stdio::null())

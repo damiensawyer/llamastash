@@ -39,6 +39,7 @@ pub async fn handle(action: DaemonAction, cli: &Cli, config: &Config) -> Result<
       no_proxy_fallback,
       proxy_host,
       insecure_no_auth,
+      lemonade,
     } => {
       handle_start(
         foreground,
@@ -48,6 +49,7 @@ pub async fn handle(action: DaemonAction, cli: &Cli, config: &Config) -> Result<
         no_proxy_fallback,
         proxy_host,
         insecure_no_auth,
+        lemonade,
         cli,
         config,
       )
@@ -73,6 +75,7 @@ async fn handle_start(
   no_proxy_fallback: bool,
   proxy_host: Option<IpAddr>,
   insecure_no_auth: bool,
+  lemonade: bool,
   cli: &Cli,
   config: &Config,
 ) -> Result<()> {
@@ -83,6 +86,7 @@ async fn handle_start(
     no_proxy_fallback,
     proxy_host,
     insecure_no_auth,
+    lemonade,
     cli,
     config,
   )?;
@@ -381,6 +385,7 @@ pub(crate) fn build_options(
   no_proxy_fallback_cli: bool,
   proxy_host: Option<IpAddr>,
   insecure_no_auth_cli: bool,
+  lemonade_cli: bool,
   cli: &Cli,
   config: &Config,
 ) -> Result<DaemonOptions> {
@@ -520,6 +525,14 @@ pub(crate) fn build_options(
   if no_proxy_fallback_cli || env_no_fallback {
     opts.proxy.fallback_enabled = false;
   }
+  // Lemonade opt-in: OR of (config field, `--lemonade` CLI flag,
+  // `LLAMASTASH_LEMONADE` env var). Off unless one of the three turns it
+  // on — the default install never runs Lemonade discovery or routes to the
+  // umbrella. The user's `binary` path + `port` ride along from the config
+  // layer (llamastash never installs `lemond`).
+  opts.lemonade = config.lemonade.clone();
+  let env_lemonade = env_flag_truthy("LLAMASTASH_LEMONADE");
+  opts.lemonade.enabled = opts.lemonade.enabled || lemonade_cli || env_lemonade;
   opts.propagated_cli_args = propagated_cli_args(cli);
   Ok(opts)
 }
@@ -965,8 +978,8 @@ mod tests {
       },
       ..Config::default()
     };
-    let opts =
-      build_options(None, None, false, false, None, false, &cli, &config).expect("build_options");
+    let opts = build_options(None, None, false, false, None, false, false, &cli, &config)
+      .expect("build_options");
     assert_eq!(
       opts.proxy.port,
       Some(22222),
@@ -997,8 +1010,18 @@ mod tests {
       ..Config::default()
     };
     // The CLI override (Some(8080)) beats config.proxy.port.
-    let opts = build_options(None, Some(8080), false, false, None, false, &cli, &config)
-      .expect("build_options");
+    let opts = build_options(
+      None,
+      Some(8080),
+      false,
+      false,
+      None,
+      false,
+      false,
+      &cli,
+      &config,
+    )
+    .expect("build_options");
     assert_eq!(opts.proxy.port, Some(8080), "CLI flag overrides config");
     assert_eq!(opts.proxy.effective_port(), 8080);
     // Other proxy fields still come from config (not reset).
@@ -1014,8 +1037,8 @@ mod tests {
     // 11435 (default mode) when nothing pins `port` explicitly.
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
-    let opts =
-      build_options(None, None, false, false, None, false, &cli, &config).expect("build_options");
+    let opts = build_options(None, None, false, false, None, false, false, &cli, &config)
+      .expect("build_options");
     assert_eq!(opts.proxy.port, None);
     assert_eq!(opts.proxy.effective_port(), 11435);
     assert!(!opts.proxy.ollama_compat);
@@ -1026,8 +1049,8 @@ mod tests {
     let _env = crate::cli::test_lock::serialize();
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
-    let opts =
-      build_options(None, None, true, false, None, false, &cli, &config).expect("build_options");
+    let opts = build_options(None, None, true, false, None, false, false, &cli, &config)
+      .expect("build_options");
     assert!(opts.proxy.ollama_compat);
     // Port stays None at the schema level — the CLI flag drives the
     // mode bool, and `effective_port()` derives the runtime port.
@@ -1047,19 +1070,49 @@ mod tests {
       },
       ..Config::default()
     };
-    let opts_config = build_options(None, None, false, false, None, false, &cli, &config_compat)
-      .expect("build_options");
+    let opts_config = build_options(
+      None,
+      None,
+      false,
+      false,
+      None,
+      false,
+      false,
+      &cli,
+      &config_compat,
+    )
+    .expect("build_options");
     assert!(opts_config.proxy.ollama_compat);
 
     // CLI-only: config has compat=false, CLI flag on → enabled.
     let config_off = Config::default();
-    let opts_cli = build_options(None, None, true, false, None, false, &cli, &config_off)
-      .expect("build_options");
+    let opts_cli = build_options(
+      None,
+      None,
+      true,
+      false,
+      None,
+      false,
+      false,
+      &cli,
+      &config_off,
+    )
+    .expect("build_options");
     assert!(opts_cli.proxy.ollama_compat);
 
     // Both off (neither config nor CLI) → disabled.
-    let opts_neither = build_options(None, None, false, false, None, false, &cli, &config_off)
-      .expect("build_options");
+    let opts_neither = build_options(
+      None,
+      None,
+      false,
+      false,
+      None,
+      false,
+      false,
+      &cli,
+      &config_off,
+    )
+    .expect("build_options");
     assert!(!opts_neither.proxy.ollama_compat);
   }
 
@@ -1081,6 +1134,7 @@ mod tests {
       false,
       false,
       Some(cli_host),
+      false,
       false,
       &cli,
       &config,
@@ -1105,8 +1159,8 @@ mod tests {
       },
       ..Config::default()
     };
-    let opts =
-      build_options(None, None, false, false, None, false, &cli, &config).expect("build_options");
+    let opts = build_options(None, None, false, false, None, false, false, &cli, &config)
+      .expect("build_options");
     assert_eq!(opts.proxy.host, Some("0.0.0.0".parse().unwrap()));
     assert!(!opts.proxy.effective_host().is_loopback());
   }
@@ -1123,6 +1177,7 @@ mod tests {
       false,
       None,
       true,
+      false,
       &cli,
       &Config::default(),
     )
@@ -1143,6 +1198,7 @@ mod tests {
       false,
       None,
       false,
+      false,
       &cli,
       &config_insecure,
     )
@@ -1155,6 +1211,7 @@ mod tests {
       false,
       false,
       None,
+      false,
       false,
       &cli,
       &Config::default(),
@@ -1177,6 +1234,7 @@ mod tests {
       false,
       false,
       None,
+      false,
       false,
       &cli,
       &Config::default(),
@@ -1221,8 +1279,8 @@ mod tests {
         },
         ..Config::default()
       };
-      let opts =
-        build_options(None, None, false, false, None, false, &cli, &config).expect("build_options");
+      let opts = build_options(None, None, false, false, None, false, false, &cli, &config)
+        .expect("build_options");
       assert_eq!(
         opts.proxy.api_key, None,
         "blank api_key {blank:?} must normalize to None"
@@ -1360,11 +1418,11 @@ mod tests {
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
     // Default is fallback_enabled = true.
-    let baseline = build_options(None, None, false, false, None, false, &cli, &config)
+    let baseline = build_options(None, None, false, false, None, false, false, &cli, &config)
       .expect("build_options baseline");
     assert!(baseline.proxy.fallback_enabled);
     // CLI flag forces it off.
-    let opts = build_options(None, None, false, true, None, false, &cli, &config)
+    let opts = build_options(None, None, false, true, None, false, false, &cli, &config)
       .expect("build_options no-fallback");
     assert!(!opts.proxy.fallback_enabled);
   }
@@ -1388,6 +1446,7 @@ mod tests {
       false,
       None,
       false,
+      false,
       &cli,
       &config_off_fallback,
     )
@@ -1396,14 +1455,63 @@ mod tests {
 
     // CLI-only: config has fallback_enabled=true (default), CLI on → disabled.
     let config_default = Config::default();
-    let opts_cli = build_options(None, None, false, true, None, false, &cli, &config_default)
-      .expect("build_options");
+    let opts_cli = build_options(
+      None,
+      None,
+      false,
+      true,
+      None,
+      false,
+      false,
+      &cli,
+      &config_default,
+    )
+    .expect("build_options");
     assert!(!opts_cli.proxy.fallback_enabled);
 
     // Both off → fallback_enabled stays true (the default).
-    let opts_neither = build_options(None, None, false, false, None, false, &cli, &config_default)
-      .expect("build_options");
+    let opts_neither = build_options(
+      None,
+      None,
+      false,
+      false,
+      None,
+      false,
+      false,
+      &cli,
+      &config_default,
+    )
+    .expect("build_options");
     assert!(opts_neither.proxy.fallback_enabled);
+  }
+
+  #[test]
+  fn build_options_lemonade_is_off_by_default_and_or_combines() {
+    let cli = parse_cli(&["daemon", "start"]);
+    let config = Config::default();
+    // Default: off — a standard install never touches lemond.
+    let baseline = build_options(None, None, false, false, None, false, false, &cli, &config)
+      .expect("build_options baseline");
+    assert!(!baseline.lemonade.enabled);
+
+    // CLI flag forces it on (config off).
+    let opts_cli = build_options(None, None, false, false, None, false, true, &cli, &config)
+      .expect("build_options lemonade");
+    assert!(opts_cli.lemonade.enabled);
+
+    // Config-only on (CLI off) also enables.
+    let config_on = Config {
+      lemonade: crate::config::loader::LemonadeConfig {
+        enabled: true,
+        ..Default::default()
+      },
+      ..Config::default()
+    };
+    let opts_config = build_options(
+      None, None, false, false, None, false, false, &cli, &config_on,
+    )
+    .expect("build_options config-on");
+    assert!(opts_config.lemonade.enabled);
   }
 
   #[test]
@@ -1517,7 +1625,7 @@ mod tests {
     // *why* the daemon refused.
     let cli = parse_cli(&["--no-scan", "daemon", "start"]);
     let config = Config::default();
-    let err = build_options(None, None, false, false, None, false, &cli, &config)
+    let err = build_options(None, None, false, false, None, false, false, &cli, &config)
       .expect_err("--no-scan with zero paths must error");
     let msg = format!("{err:#}");
     assert!(
@@ -1532,7 +1640,7 @@ mod tests {
     let cli = parse_cli(&["--no-scan", "--model-path", "/work/keep", "daemon", "start"]);
     let config = Config::default();
     assert!(
-      build_options(None, None, false, false, None, false, &cli, &config).is_ok(),
+      build_options(None, None, false, false, None, false, false, &cli, &config).is_ok(),
       "--no-scan + --model-path must build cleanly"
     );
   }
@@ -1546,7 +1654,7 @@ mod tests {
       ..Config::default()
     };
     assert!(
-      build_options(None, None, false, false, None, false, &cli, &config).is_ok(),
+      build_options(None, None, false, false, None, false, false, &cli, &config).is_ok(),
       "--no-scan + config model_paths must build cleanly"
     );
   }

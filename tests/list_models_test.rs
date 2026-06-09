@@ -43,6 +43,7 @@ fn fast_discovery_for(root: &Path) -> DiscoveryOptions {
       periodic_rescan: Duration::from_secs(2),
       channel_capacity: 16,
     },
+    lemonade_port: None,
   }
 }
 

@@ -263,6 +263,14 @@ pub enum DaemonAction {
     /// firewalled network. A loud warning prints regardless.
     #[arg(long)]
     insecure_no_auth: bool,
+    /// Enable the opt-in Lemonade (`lemond`) backend for this daemon: run
+    /// Lemonade discovery and supervise/route to the `lemond` umbrella.
+    /// OR-ed with `lemonade.enabled: true` in `config.yaml` and the
+    /// `LLAMASTASH_LEMONADE` env var (`1`/`true`/`yes`/`on`) — any of the
+    /// three turns it on. llamastash never installs `lemond`; set it up
+    /// manually (see `docs/lemonade-setup.md`).
+    #[arg(long)]
+    lemonade: bool,
   },
   /// Stop the running daemon. Running models keep running.
   Stop {
@@ -1355,6 +1363,7 @@ mod tests {
         no_proxy_fallback,
         proxy_host,
         insecure_no_auth,
+        lemonade,
       })) => {
         assert!(!foreground);
         assert!(state_dir.is_none());
@@ -1363,6 +1372,7 @@ mod tests {
         assert!(!no_proxy_fallback);
         assert!(proxy_host.is_none());
         assert!(!insecure_no_auth);
+        assert!(!lemonade);
       }
       other => panic!("expected daemon start, got {other:?}"),
     }
@@ -1400,6 +1410,7 @@ mod tests {
         no_proxy_fallback,
         proxy_host,
         insecure_no_auth,
+        ..
       })) => {
         assert!(!foreground);
         assert_eq!(state_dir, Some(PathBuf::from("/tmp/llamastash-test-state")));
@@ -1422,6 +1433,7 @@ mod tests {
         no_proxy_fallback,
         proxy_host,
         insecure_no_auth,
+        ..
       })) => {
         assert!(!foreground);
         assert!(state_dir.is_none());
@@ -1492,6 +1504,16 @@ mod tests {
         assert!(no_proxy_fallback);
       }
       other => panic!("expected daemon start --no-proxy-fallback, got {other:?}"),
+    }
+
+    // --lemonade flips the opt-in enable bool; build_options OR-merges it
+    // with the config + env.
+    let cli_lemonade = parse(&["daemon", "start", "--lemonade"]);
+    match cli_lemonade.command {
+      Some(Command::Daemon(DaemonAction::Start { lemonade, .. })) => {
+        assert!(lemonade);
+      }
+      other => panic!("expected daemon start --lemonade, got {other:?}"),
     }
 
     let cli_stop = parse(&["daemon", "stop"]);

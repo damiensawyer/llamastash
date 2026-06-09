@@ -31,6 +31,11 @@ pub struct DiscoveryOptions {
   pub scan_roots: Vec<ScanRoot>,
   pub scan: ScanOptions,
   pub watcher: WatcherOptions,
+  /// When `Some(port)`, each rescan also enumerates the `lemond` umbrella
+  /// on that loopback port and merges its models as Lemonade-tagged catalog
+  /// rows (R11, list-only). `None` (the default, and whenever the Lemonade
+  /// backend is disabled) skips it entirely — no `lemond` contact.
+  pub lemonade_port: Option<u16>,
 }
 
 impl DiscoveryOptions {
@@ -48,6 +53,7 @@ impl DiscoveryOptions {
       scan_roots: roots,
       scan,
       watcher: WatcherOptions::default(),
+      lemonade_port: None,
     }
   }
 }
@@ -147,6 +153,12 @@ async fn full_rescan(catalog: &ModelCatalog, opts: &DiscoveryOptions) {
     }
   }
 
+  // Lemonade models (R11, opt-in, list-only). Best-effort: an unreachable
+  // umbrella yields no rows and never aborts the disk scan above.
+  if let Some(port) = opts.lemonade_port {
+    new_models.extend(crate::discovery::lemonade::enumerate(port).await);
+  }
+
   catalog.replace_all(new_models).await;
 }
 
@@ -155,7 +167,11 @@ async fn full_rescan(catalog: &ModelCatalog, opts: &DiscoveryOptions) {
 fn watch_mode_for(source: ModelSource) -> WatchMode {
   match source {
     ModelSource::HuggingFace => WatchMode::Shallow,
-    ModelSource::Ollama | ModelSource::LmStudio | ModelSource::UserPath => WatchMode::Recursive,
+    // Lemonade models come from the `lemond` API, not a filesystem root, so
+    // this is never reached for them in practice; default to recursive.
+    ModelSource::Ollama | ModelSource::LmStudio | ModelSource::UserPath | ModelSource::Lemonade => {
+      WatchMode::Recursive
+    }
   }
 }
 
@@ -208,6 +224,7 @@ mod tests {
       }],
       scan: ScanOptions::default(),
       watcher: fast_watcher(),
+      lemonade_port: None,
     };
     let _task = spawn(catalog.clone(), opts);
 
@@ -238,6 +255,7 @@ mod tests {
       }],
       scan: ScanOptions::default(),
       watcher: fast_watcher(),
+      lemonade_port: None,
     };
     let _task = spawn(catalog.clone(), opts);
 

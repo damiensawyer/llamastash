@@ -92,6 +92,13 @@ pub struct Config {
   /// from the top-level config which tolerates unknown keys for
   /// forward-compat.
   pub proxy: ProxyConfig,
+  /// Lemonade (NPU / multi-engine) managed-multiplexer backend. **Opt-in:**
+  /// disabled by default, so a standard install never runs Lemonade
+  /// discovery or offers the backend. Enable via `lemonade.enabled: true`,
+  /// the `--lemonade` daemon flag, or `LLAMASTASH_LEMONADE=1` (any of the
+  /// three wins — see `cli::daemon::compose_daemon_options`). llamastash
+  /// never installs `lemond`; the user sets it up and points us at it.
+  pub lemonade: LemonadeConfig,
 }
 
 /// OpenAI-compat proxy router configuration.
@@ -269,6 +276,44 @@ impl Default for ProxyConfig {
   }
 }
 
+/// Lemonade backend configuration (R9/R11 opt-in gate).
+///
+/// Off by default. Only when `enabled` is true does the daemon run Lemonade
+/// discovery, supervise the `lemond` umbrella, and route to it. llamastash
+/// never downloads or installs `lemond` — the user sets up Lemonade manually
+/// (see `docs/lemonade-setup.md`). `binary` is an explicit path to the
+/// user's `lemond`; when unset the umbrella launch falls back to a `lemond`
+/// (or `lemonade`) on `PATH`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct LemonadeConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default)]
+  pub binary: Option<PathBuf>,
+  /// Loopback port the `lemond` umbrella binds and that discovery probes
+  /// for the model list. Defaults to Lemonade's own default (`13305`).
+  #[serde(default = "LemonadeConfig::default_port")]
+  pub port: u16,
+}
+
+impl LemonadeConfig {
+  /// Lemonade's documented default port.
+  pub fn default_port() -> u16 {
+    13305
+  }
+}
+
+impl Default for LemonadeConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      binary: None,
+      port: Self::default_port(),
+    }
+  }
+}
+
 /// Typed launch knobs the supervisor argvifies into `llama-server`
 /// flags. Used everywhere a structured per-launch tuning surface is
 /// needed: persistence (`LaunchParams.knobs`), IPC wire shape, the
@@ -390,6 +435,7 @@ impl Default for Config {
       mouse_focus: false,
       arch_defaults: BTreeMap::new(),
       proxy: ProxyConfig::default(),
+      lemonade: LemonadeConfig::default(),
     }
   }
 }
@@ -1069,6 +1115,40 @@ proxy:
     assert_eq!(loaded.config.proxy.port, None);
     assert_eq!(loaded.config.proxy.effective_port(), 11434);
     fs::remove_dir_all(dir).expect("temp test dir should be removed");
+  }
+
+  #[test]
+  fn lemonade_is_off_by_default_and_parses_when_enabled() {
+    // Missing `lemonade:` section → opt-in default (off), no warning.
+    let dir = temp_test_dir("lemonade-default");
+    let path = dir.join("config.yaml");
+    fs::write(&path, "{}\n").expect("write failed");
+    let loaded = load_config_from_path(&path);
+    assert!(loaded.warning.is_none());
+    assert!(
+      !loaded.config.lemonade.enabled,
+      "lemonade backend is opt-in (off unless enabled)"
+    );
+    assert!(loaded.config.lemonade.binary.is_none());
+    assert_eq!(loaded.config.lemonade.port, 13305);
+    fs::remove_dir_all(dir).expect("temp test dir should be removed");
+
+    // Explicit enable + user-provided binary path round-trips.
+    let on_dir = temp_test_dir("lemonade-on");
+    let on_path = on_dir.join("config.yaml");
+    fs::write(
+      &on_path,
+      "lemonade:\n  enabled: true\n  binary: /opt/lemonade/lemond\n",
+    )
+    .expect("write failed");
+    let on_loaded = load_config_from_path(&on_path);
+    assert!(on_loaded.warning.is_none());
+    assert!(on_loaded.config.lemonade.enabled);
+    assert_eq!(
+      on_loaded.config.lemonade.binary.as_deref(),
+      Some(std::path::Path::new("/opt/lemonade/lemond"))
+    );
+    fs::remove_dir_all(on_dir).expect("temp test dir should be removed");
   }
 
   #[test]
