@@ -2,7 +2,7 @@
 name = "llamastash"
 version = "0.0.2"
 authors = ["Deepu K Sasidharan <d4udts@gmail.com>"]
-description = "A fast, keyboard-driven TUI for running local models via llama.cpp"
+description = "A fast, keyboard-driven local-LLM launcher (TUI + CLI + daemon + OpenAI proxy), zero-overhead on llama.cpp with a pluggable backend seam"
 documentation = "https://github.com/llamastash/llamastash"
 categories = ["command-line-utilities"]
 keywords = ["llama-cpp", "llm", "tui", "gguf", "openai"]

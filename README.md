@@ -15,9 +15,9 @@
 
 ![Logo](https://raw.githubusercontent.com/llamastash/llamastash/main/assets/logo-h.jpg)
 
-**Zero-overhead, terminal-native `llama.cpp` launcher.**
+**Zero-overhead, terminal-native local-LLM launcher.**
 
-A fast TUI **and** CLI with init wizard for launching local LLMs via [llama.cpp](https://github.com/ggml-org/llama.cpp). One Rust binary that's a TUI, a CLI, a daemon, and an OpenAI-compatible proxy. Zero overhead vs raw `llama-server`. See [benchmarks](docs/benchmarks.md).
+A fast TUI **and** CLI with init wizard for launching local LLMs. One Rust binary that's a TUI, a CLI, a daemon, and an OpenAI-compatible proxy. [llama.cpp](https://github.com/ggml-org/llama.cpp) is the direct, zero-overhead backend (vs raw `llama-server`), behind a pluggable backend seam so other engines can plug in. See [benchmarks](docs/benchmarks.md).
 
 ## Why
 

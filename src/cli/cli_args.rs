@@ -16,7 +16,7 @@ use crate::banner::BANNER;
 #[command(
   name = "llamastash",
   version,
-  about = "Fast keyboard-driven TUI + CLI for running local models via llama.cpp",
+  about = "Fast keyboard-driven local-LLM launcher: TUI + CLI for llama.cpp, with a pluggable backend seam",
   long_about = None,
   before_help = BANNER,
 )]
