@@ -383,8 +383,12 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // PortInUse / Unbound); Unit 5's IPC `status` handler reads it
   // via the clone attached to `ctx` above (§8).
   if opts.proxy.enabled {
-    let state =
-      proxy::ProxyState::from_context(&ctx, opts.proxy.ollama_compat, opts.proxy.fallback_enabled);
+    let state = proxy::ProxyState::from_context_with_auth(
+      &ctx,
+      opts.proxy.ollama_compat,
+      opts.proxy.fallback_enabled,
+      opts.proxy.api_key.clone(),
+    );
     let addr = proxy::server::loopback_addr(opts.proxy.effective_port());
     let token_for_proxy = token.clone();
     let status_for_proxy = std::sync::Arc::clone(&proxy_status_cell);

@@ -395,6 +395,95 @@ mod tests {
     (bound, token, status, handle)
   }
 
+  /// Like [`spawn_proxy_on_ephemeral_port`] but with bearer auth
+  /// enforced on the data routes via `api_key`.
+  async fn spawn_proxy_with_key(
+    api_key: &str,
+  ) -> (SocketAddr, ShutdownToken, StatusCell, JoinHandle<()>) {
+    let ctx = MethodContext::new(ShutdownToken::new());
+    let state = ProxyState::from_context_with_auth(&ctx, false, true, Some(api_key.to_string()));
+    let token = ctx.shutdown.clone();
+    let status = new_status_cell();
+    let status_for_task = Arc::clone(&status);
+    let token_for_task = token.clone();
+    let bind_addr = loopback_addr(0);
+    let handle = tokio::spawn(async move {
+      serve(state, bind_addr, token_for_task, status_for_task)
+        .await
+        .expect("proxy serve returns Ok even on bind failure");
+    });
+    let bound = wait_for_listening(&status, Duration::from_secs(2))
+      .await
+      .expect("proxy must reach Listening within 2s");
+    (bound, token, status, handle)
+  }
+
+  /// One-shot GET with an optional `Authorization` header on a fresh
+  /// `Connection: close` socket — keeps the auth assertions free of
+  /// keep-alive bookkeeping.
+  async fn http_get_auth(addr: SocketAddr, path: &str, auth: Option<&str>) -> (u16, Vec<u8>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut sock = tokio::net::TcpStream::connect(addr)
+      .await
+      .expect("connect to proxy");
+    let host = addr.to_string();
+    let auth_line = match auth {
+      Some(v) => format!("Authorization: {v}\r\n"),
+      None => String::new(),
+    };
+    let req =
+      format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{auth_line}Connection: close\r\n\r\n");
+    sock.write_all(req.as_bytes()).await.expect("write");
+    let mut buf = Vec::with_capacity(512);
+    let mut tmp = [0u8; 1024];
+    loop {
+      let n = sock.read(&mut tmp).await.expect("read");
+      if n == 0 {
+        break;
+      }
+      buf.extend_from_slice(&tmp[..n]);
+      if let Some(body) = extract_body_when_complete(&buf) {
+        return body;
+      }
+    }
+    extract_body_when_complete(&buf).unwrap_or((0, buf))
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn auth_gates_data_routes_but_not_health_or_identity() {
+    let key = "sk-llamastash-testkey123";
+    let (addr, shutdown, _status, handle) = spawn_proxy_with_key(key).await;
+
+    // Liveness / identity probes stay open with no Authorization.
+    assert_eq!(http_get_auth(addr, "/", None).await.0, 200, "GET / exempt");
+    assert_eq!(
+      http_get_auth(addr, "/health", None).await.0,
+      200,
+      "GET /health exempt"
+    );
+
+    // Data route with no bearer → 401 + OpenAI auth envelope.
+    let (status, body) = http_get_auth(addr, "/v1/models", None).await;
+    assert_eq!(status, 401, "no bearer → 401");
+    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    assert_eq!(parsed["error"]["code"], "invalid_api_key");
+
+    // Wrong bearer → 401.
+    assert_eq!(
+      http_get_auth(addr, "/v1/models", Some("Bearer wrong"))
+        .await
+        .0,
+      401,
+      "wrong bearer → 401"
+    );
+
+    // Correct bearer passes the gate and the route runs (200 + list).
+    let (ok_status, _) = http_get_auth(addr, "/v1/models", Some(&format!("Bearer {key}"))).await;
+    assert_eq!(ok_status, 200, "correct bearer → 200");
+
+    shutdown_proxy(shutdown, handle).await;
+  }
+
   /// Trigger shutdown and join the serve task with a generous budget.
   /// Catches the failure mode where a serve loop never exits — without
   /// this, `drop(handle)` would silently leave a detached task and the
