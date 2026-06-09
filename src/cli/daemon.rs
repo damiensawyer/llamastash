@@ -11,7 +11,7 @@
 //! `status` — connect to the daemon and report PID + uptime; emits "not
 //! running" if the socket is missing or the connection fails.
 
-use std::{path::PathBuf, time::Duration};
+use std::{net::IpAddr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 
@@ -37,6 +37,8 @@ pub async fn handle(action: DaemonAction, cli: &Cli, config: &Config) -> Result<
       proxy_port,
       ollama_compat,
       no_proxy_fallback,
+      proxy_host,
+      insecure_no_auth,
     } => {
       handle_start(
         foreground,
@@ -44,6 +46,8 @@ pub async fn handle(action: DaemonAction, cli: &Cli, config: &Config) -> Result<
         proxy_port,
         ollama_compat,
         no_proxy_fallback,
+        proxy_host,
+        insecure_no_auth,
         cli,
         config,
       )
@@ -67,6 +71,8 @@ async fn handle_start(
   proxy_port: Option<u16>,
   ollama_compat: bool,
   no_proxy_fallback: bool,
+  proxy_host: Option<IpAddr>,
+  insecure_no_auth: bool,
   cli: &Cli,
   config: &Config,
 ) -> Result<()> {
@@ -75,6 +81,8 @@ async fn handle_start(
     proxy_port,
     ollama_compat,
     no_proxy_fallback,
+    proxy_host,
+    insecure_no_auth,
     cli,
     config,
   )?;
@@ -237,11 +245,16 @@ fn force_stop_via_pid(pid: i32, attach_dir: &std::path::Path) -> Result<()> {
 /// `known_caches::default_set`. An empty config + no flags still
 /// produces a working daemon — the daemon just operates with whichever
 /// HF/Ollama/LM Studio caches exist on disk.
+// Same rationale as `handle_start`: each `daemon start` knob costs an
+// argument here. A typed bundle would just relocate the unpack.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_options(
   state_dir: Option<PathBuf>,
   proxy_port: Option<u16>,
   ollama_compat_cli: bool,
   no_proxy_fallback_cli: bool,
+  proxy_host: Option<IpAddr>,
+  insecure_no_auth_cli: bool,
   cli: &Cli,
   config: &Config,
 ) -> Result<DaemonOptions> {
@@ -318,6 +331,36 @@ pub(crate) fn build_options(
   opts.proxy = config.proxy.clone();
   if let Some(p) = proxy_port {
     opts.proxy.port = Some(p);
+  }
+  // Proxy bind host: CLI > env (`LLAMASTASH_PROXY_HOST`) > config.
+  // A bad env value is logged and ignored rather than failing startup
+  // — the config / default host still applies.
+  if let Some(h) = proxy_host {
+    opts.proxy.host = Some(h);
+  } else if let Some(raw) = std::env::var_os("LLAMASTASH_PROXY_HOST") {
+    match raw.to_string_lossy().trim().parse::<IpAddr>() {
+      Ok(h) => opts.proxy.host = Some(h),
+      Err(e) => log::warn!(
+        "ignoring LLAMASTASH_PROXY_HOST={:?}: not a valid IP address ({e})",
+        raw
+      ),
+    }
+  }
+  // Insecure-no-auth opt-out: OR of (config field, `--insecure-no-auth`
+  // CLI flag, `LLAMASTASH_PROXY_INSECURE_NO_AUTH` env var). Any one of
+  // the three waives the LAN auth requirement; the key auto-provision
+  // path and the daemon backstop both read the resolved value.
+  let env_insecure = env_flag_truthy("LLAMASTASH_PROXY_INSECURE_NO_AUTH");
+  opts.proxy.insecure_no_auth = opts.proxy.insecure_no_auth || insecure_no_auth_cli || env_insecure;
+  // Proxy API key env override: `LLAMASTASH_PROXY_API_KEY` wins over
+  // the config value for this process and is never written back to
+  // disk (containers / secret managers). An empty/blank value is
+  // ignored so a stray `export` doesn't accidentally enable auth.
+  if let Some(raw) = std::env::var_os("LLAMASTASH_PROXY_API_KEY") {
+    let key = raw.to_string_lossy().trim().to_string();
+    if !key.is_empty() {
+      opts.proxy.api_key = Some(key);
+    }
   }
   // Ollama-compat: OR of (config field, `--ollama-compat` CLI flag,
   // `LLAMASTASH_OLLAMA_COMPAT` env var). Any one of the three enables
@@ -780,7 +823,8 @@ mod tests {
       },
       ..Config::default()
     };
-    let opts = build_options(None, None, false, false, &cli, &config).expect("build_options");
+    let opts =
+      build_options(None, None, false, false, None, false, &cli, &config).expect("build_options");
     assert_eq!(
       opts.proxy.port,
       Some(22222),
@@ -810,7 +854,8 @@ mod tests {
       ..Config::default()
     };
     // The CLI override (Some(8080)) beats config.proxy.port.
-    let opts = build_options(None, Some(8080), false, false, &cli, &config).expect("build_options");
+    let opts = build_options(None, Some(8080), false, false, None, false, &cli, &config)
+      .expect("build_options");
     assert_eq!(opts.proxy.port, Some(8080), "CLI flag overrides config");
     assert_eq!(opts.proxy.effective_port(), 8080);
     // Other proxy fields still come from config (not reset).
@@ -825,7 +870,8 @@ mod tests {
     // 11435 (default mode) when nothing pins `port` explicitly.
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
-    let opts = build_options(None, None, false, false, &cli, &config).expect("build_options");
+    let opts =
+      build_options(None, None, false, false, None, false, &cli, &config).expect("build_options");
     assert_eq!(opts.proxy.port, None);
     assert_eq!(opts.proxy.effective_port(), 11435);
     assert!(!opts.proxy.ollama_compat);
@@ -835,7 +881,8 @@ mod tests {
   fn build_options_ollama_compat_cli_flag_flips_mode_and_default_port() {
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
-    let opts = build_options(None, None, true, false, &cli, &config).expect("build_options");
+    let opts =
+      build_options(None, None, true, false, None, false, &cli, &config).expect("build_options");
     assert!(opts.proxy.ollama_compat);
     // Port stays None at the schema level — the CLI flag drives the
     // mode bool, and `effective_port()` derives the runtime port.
@@ -854,20 +901,146 @@ mod tests {
       },
       ..Config::default()
     };
-    let opts_config =
-      build_options(None, None, false, false, &cli, &config_compat).expect("build_options");
+    let opts_config = build_options(None, None, false, false, None, false, &cli, &config_compat)
+      .expect("build_options");
     assert!(opts_config.proxy.ollama_compat);
 
     // CLI-only: config has compat=false, CLI flag on → enabled.
     let config_off = Config::default();
-    let opts_cli =
-      build_options(None, None, true, false, &cli, &config_off).expect("build_options");
+    let opts_cli = build_options(None, None, true, false, None, false, &cli, &config_off)
+      .expect("build_options");
     assert!(opts_cli.proxy.ollama_compat);
 
     // Both off (neither config nor CLI) → disabled.
-    let opts_neither =
-      build_options(None, None, false, false, &cli, &config_off).expect("build_options");
+    let opts_neither = build_options(None, None, false, false, None, false, &cli, &config_off)
+      .expect("build_options");
     assert!(!opts_neither.proxy.ollama_compat);
+  }
+
+  #[test]
+  fn build_options_proxy_host_cli_overrides_config() {
+    let cli = parse_cli(&["daemon", "start"]);
+    let config = Config {
+      proxy: crate::config::loader::ProxyConfig {
+        host: Some("1.2.3.4".parse().unwrap()),
+        ..crate::config::loader::ProxyConfig::default()
+      },
+      ..Config::default()
+    };
+    let cli_host: std::net::IpAddr = "9.9.9.9".parse().unwrap();
+    let opts = build_options(
+      None,
+      None,
+      false,
+      false,
+      Some(cli_host),
+      false,
+      &cli,
+      &config,
+    )
+    .expect("build_options");
+    assert_eq!(
+      opts.proxy.host,
+      Some(cli_host),
+      "CLI host must win over config"
+    );
+    assert_eq!(opts.proxy.effective_host(), cli_host);
+  }
+
+  #[test]
+  fn build_options_proxy_host_from_config_when_no_cli() {
+    let cli = parse_cli(&["daemon", "start"]);
+    let config = Config {
+      proxy: crate::config::loader::ProxyConfig {
+        host: Some("0.0.0.0".parse().unwrap()),
+        ..crate::config::loader::ProxyConfig::default()
+      },
+      ..Config::default()
+    };
+    let opts =
+      build_options(None, None, false, false, None, false, &cli, &config).expect("build_options");
+    assert_eq!(opts.proxy.host, Some("0.0.0.0".parse().unwrap()));
+    assert!(!opts.proxy.effective_host().is_loopback());
+  }
+
+  #[test]
+  fn build_options_insecure_no_auth_or_combines_config_cli() {
+    let cli = parse_cli(&["daemon", "start"]);
+    // CLI flag on, config off → on.
+    let opts_cli = build_options(
+      None,
+      None,
+      false,
+      false,
+      None,
+      true,
+      &cli,
+      &Config::default(),
+    )
+    .expect("build_options");
+    assert!(opts_cli.proxy.insecure_no_auth);
+    // Config on, CLI off → on.
+    let config_insecure = Config {
+      proxy: crate::config::loader::ProxyConfig {
+        insecure_no_auth: true,
+        ..crate::config::loader::ProxyConfig::default()
+      },
+      ..Config::default()
+    };
+    let opts_config = build_options(
+      None,
+      None,
+      false,
+      false,
+      None,
+      false,
+      &cli,
+      &config_insecure,
+    )
+    .expect("build_options");
+    assert!(opts_config.proxy.insecure_no_auth);
+    // Both off → off (the safe default).
+    let opts_off = build_options(
+      None,
+      None,
+      false,
+      false,
+      None,
+      false,
+      &cli,
+      &Config::default(),
+    )
+    .expect("build_options");
+    assert!(!opts_off.proxy.insecure_no_auth);
+  }
+
+  #[test]
+  fn build_options_proxy_host_and_key_from_env() {
+    let _env = crate::cli::test_lock::serialize();
+    let prev_host = std::env::var_os("LLAMASTASH_PROXY_HOST");
+    let prev_key = std::env::var_os("LLAMASTASH_PROXY_API_KEY");
+    std::env::set_var("LLAMASTASH_PROXY_HOST", "0.0.0.0");
+    std::env::set_var("LLAMASTASH_PROXY_API_KEY", "sk-llamastash-fromenv");
+    let cli = parse_cli(&["daemon", "start"]);
+    let opts = build_options(
+      None,
+      None,
+      false,
+      false,
+      None,
+      false,
+      &cli,
+      &Config::default(),
+    );
+    let restore = |k: &str, v: Option<std::ffi::OsString>| match v {
+      Some(v) => std::env::set_var(k, v),
+      None => std::env::remove_var(k),
+    };
+    restore("LLAMASTASH_PROXY_HOST", prev_host);
+    restore("LLAMASTASH_PROXY_API_KEY", prev_key);
+    let opts = opts.expect("build_options");
+    assert_eq!(opts.proxy.host, Some("0.0.0.0".parse().unwrap()));
+    assert_eq!(opts.proxy.api_key.as_deref(), Some("sk-llamastash-fromenv"));
   }
 
   #[test]
@@ -875,12 +1048,12 @@ mod tests {
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
     // Default is fallback_enabled = true.
-    let baseline =
-      build_options(None, None, false, false, &cli, &config).expect("build_options baseline");
+    let baseline = build_options(None, None, false, false, None, false, &cli, &config)
+      .expect("build_options baseline");
     assert!(baseline.proxy.fallback_enabled);
     // CLI flag forces it off.
-    let opts =
-      build_options(None, None, false, true, &cli, &config).expect("build_options no-fallback");
+    let opts = build_options(None, None, false, true, None, false, &cli, &config)
+      .expect("build_options no-fallback");
     assert!(!opts.proxy.fallback_enabled);
   }
 
@@ -895,19 +1068,28 @@ mod tests {
       },
       ..Config::default()
     };
-    let opts_config =
-      build_options(None, None, false, false, &cli, &config_off_fallback).expect("build_options");
+    let opts_config = build_options(
+      None,
+      None,
+      false,
+      false,
+      None,
+      false,
+      &cli,
+      &config_off_fallback,
+    )
+    .expect("build_options");
     assert!(!opts_config.proxy.fallback_enabled);
 
     // CLI-only: config has fallback_enabled=true (default), CLI on → disabled.
     let config_default = Config::default();
-    let opts_cli =
-      build_options(None, None, false, true, &cli, &config_default).expect("build_options");
+    let opts_cli = build_options(None, None, false, true, None, false, &cli, &config_default)
+      .expect("build_options");
     assert!(!opts_cli.proxy.fallback_enabled);
 
     // Both off → fallback_enabled stays true (the default).
-    let opts_neither =
-      build_options(None, None, false, false, &cli, &config_default).expect("build_options");
+    let opts_neither = build_options(None, None, false, false, None, false, &cli, &config_default)
+      .expect("build_options");
     assert!(opts_neither.proxy.fallback_enabled);
   }
 
@@ -1021,7 +1203,7 @@ mod tests {
     // *why* the daemon refused.
     let cli = parse_cli(&["--no-scan", "daemon", "start"]);
     let config = Config::default();
-    let err = build_options(None, None, false, false, &cli, &config)
+    let err = build_options(None, None, false, false, None, false, &cli, &config)
       .expect_err("--no-scan with zero paths must error");
     let msg = format!("{err:#}");
     assert!(
@@ -1035,7 +1217,7 @@ mod tests {
     let cli = parse_cli(&["--no-scan", "--model-path", "/work/keep", "daemon", "start"]);
     let config = Config::default();
     assert!(
-      build_options(None, None, false, false, &cli, &config).is_ok(),
+      build_options(None, None, false, false, None, false, &cli, &config).is_ok(),
       "--no-scan + --model-path must build cleanly"
     );
   }
@@ -1048,7 +1230,7 @@ mod tests {
       ..Config::default()
     };
     assert!(
-      build_options(None, None, false, false, &cli, &config).is_ok(),
+      build_options(None, None, false, false, None, false, &cli, &config).is_ok(),
       "--no-scan + config model_paths must build cleanly"
     );
   }

@@ -330,11 +330,20 @@ fn write_status(cell: &StatusCell, next: ProxyStatus) {
   *guard = next;
 }
 
-/// Build the canonical loopback `SocketAddr` from a port. The host
-/// is fixed at `127.0.0.1` per the plan's Scope Boundaries (no LAN
-/// binding in v1).
+/// Build the `SocketAddr` the proxy listener binds from a `host` and
+/// `port`. `127.0.0.1` keeps the loopback-only posture; a routable
+/// address (`0.0.0.0`, a NIC IP, or IPv6) opts the proxy data plane
+/// into LAN exposure — gated by the bearer key in the daemon wiring,
+/// not here. The port-scan in `bind_with_scan` carries this host
+/// through unchanged.
+pub fn listen_addr(host: IpAddr, port: u16) -> SocketAddr {
+  SocketAddr::new(host, port)
+}
+
+/// Loopback `SocketAddr` for a port — `listen_addr(127.0.0.1, port)`.
+/// Retained for tests and callers that always bind loopback.
 pub fn loopback_addr(port: u16) -> SocketAddr {
-  SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+  listen_addr(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
 }
 
 #[cfg(test)]
@@ -342,6 +351,21 @@ mod tests {
   use super::*;
   use crate::ipc::methods::MethodContext;
   use std::time::Duration;
+
+  #[test]
+  fn listen_addr_builds_from_host_and_port() {
+    // loopback wrapper keeps the historical address.
+    assert_eq!(
+      loopback_addr(11435),
+      SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 11435)
+    );
+    // A routable IPv4 host is carried through verbatim.
+    let v4: IpAddr = "0.0.0.0".parse().unwrap();
+    assert_eq!(listen_addr(v4, 11435), SocketAddr::new(v4, 11435));
+    // IPv6 too.
+    let v6: IpAddr = "::".parse().unwrap();
+    assert_eq!(listen_addr(v6, 8080), SocketAddr::new(v6, 8080));
+  }
 
   /// Spin up the proxy on an ephemeral port and return the bound
   /// address + shutdown token + the JoinHandle. The caller drives

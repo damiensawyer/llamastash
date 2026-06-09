@@ -644,6 +644,16 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
   if opts.proxy.ollama_compat {
     cmd.arg("--ollama-compat");
   }
+  // Carry the LAN bind host + insecure opt-out through so a detached
+  // re-exec keeps them (they are per-invocation overrides, not config).
+  // The child re-resolves the API key from config — it is never passed
+  // via argv, which would leak the secret in the process list.
+  if let Some(host) = opts.proxy.host {
+    cmd.arg("--proxy-host").arg(host.to_string());
+  }
+  if opts.proxy.insecure_no_auth {
+    cmd.arg("--insecure-no-auth");
+  }
   cmd
     .stdin(Stdio::null())
     .stdout(Stdio::null())
@@ -746,6 +756,16 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
     .arg(opts.proxy.effective_port().to_string());
   if opts.proxy.ollama_compat {
     cmd.arg("--ollama-compat");
+  }
+  // Carry the LAN bind host + insecure opt-out through so a detached
+  // re-exec keeps them (they are per-invocation overrides, not config).
+  // The child re-resolves the API key from config — it is never passed
+  // via argv, which would leak the secret in the process list.
+  if let Some(host) = opts.proxy.host {
+    cmd.arg("--proxy-host").arg(host.to_string());
+  }
+  if opts.proxy.insecure_no_auth {
+    cmd.arg("--insecure-no-auth");
   }
   cmd
     .stdin(Stdio::null())
