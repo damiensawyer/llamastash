@@ -315,11 +315,36 @@ pub struct StartArgs {
   /// inline flags above.
   #[arg(last = true, value_name = "ARG")]
   pub extra: Vec<OsString>,
+  /// Backend to run this model on (R17). `auto` (default) picks by model
+  /// identity; override with `llamacpp` (or another installed backend) to
+  /// force one per launch.
+  #[arg(long, value_enum)]
+  pub backend: Option<BackendArg>,
   /// Emit JSON instead of human-readable success prose. Stable
   /// shape: `{ "name", "launch_id", "port", "pid", "preset",
   /// "path" }`.
   #[arg(long)]
   pub json: bool,
+}
+
+/// CLI surface for the per-model backend override (R17). Wire labels match
+/// [`crate::launch::params::BackendChoice`] so `start --backend <id>`
+/// round-trips to the daemon unchanged. Additional backends add a variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum BackendArg {
+  Auto,
+  #[value(name = "llamacpp")]
+  LlamaCpp,
+}
+
+impl BackendArg {
+  /// Wire label sent to the daemon (matches `BackendChoice` serde).
+  pub fn wire(self) -> &'static str {
+    match self {
+      BackendArg::Auto => "auto",
+      BackendArg::LlamaCpp => "llamacpp",
+    }
+  }
 }
 
 #[derive(Args, Debug)]

@@ -259,9 +259,13 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
       cmdline: format!(
         "llama-server --port {} -m {}",
         adopted.port,
-        adopted.id.path.display()
+        adopted
+          .id
+          .as_gguf()
+          .map(|g| g.path.display().to_string())
+          .unwrap_or_default()
       ),
-      model_path: Some(adopted.id.path.clone()),
+      model_path: adopted.id.as_gguf().map(|g| g.path.clone()),
       start_time_secs,
       port: Some(adopted.port),
       // Adopted entries went through our state.json before the

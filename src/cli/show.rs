@@ -142,6 +142,8 @@ async fn build_view(args: &ShowArgs, cli: &Cli, config: &Config) -> Result<ShowV
     "path": row.path,
     "parent": row.parent,
     "source": row.source,
+    // Backend that serves this model (R14 badge), derived from the source.
+    "backend": crate::cli::output::backend_for_source(&row.source),
     "model_id": row.model_id,
     "display_label": row.display_label,
     "parse_error": row.parse_error,
@@ -206,6 +208,11 @@ fn render_human(row: &CatalogRow, shards: &[ShardSize], total_bytes: u64, env: &
   }
   kv(&mut out, "parent", &row.parent);
   kv(&mut out, "source", &row.source);
+  kv(
+    &mut out,
+    "backend",
+    crate::cli::output::backend_for_source(&row.source),
+  );
   if let Some(id) = &row.model_id {
     kv(&mut out, "model_id", id);
   }

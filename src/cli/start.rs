@@ -86,7 +86,7 @@ pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
     }
   }
 
-  let payload = build_payload(&row.path, mode, &params);
+  let payload = build_payload(&row.path, mode, &params, args.backend.map(|b| b.wire()));
   let resp = client
     .call("start_model", Some(payload))
     .await
@@ -284,13 +284,18 @@ fn parse_cli_knobs(
   Ok((knobs, extras))
 }
 
-fn build_payload(model_path: &str, mode: &str, p: &PartialParams) -> Value {
+fn build_payload(model_path: &str, mode: &str, p: &PartialParams, backend: Option<&str>) -> Value {
   let mut obj = serde_json::Map::new();
   obj.insert(
     "model_path".into(),
     Value::String(PathBuf::from(model_path).display().to_string()),
   );
   obj.insert("mode".into(), Value::String(mode.to_string()));
+  // Per-model backend override (R17). Omitted when unset so the daemon
+  // applies its default (`Auto` → identity rule).
+  if let Some(b) = backend {
+    obj.insert("backend".into(), Value::String(b.to_string()));
+  }
   if let Some(ctx) = p.ctx {
     obj.insert("ctx".into(), Value::from(ctx));
   }
@@ -450,7 +455,7 @@ mod tests {
       knobs,
       extras: vec!["--rope-freq-base".into(), "10000".into()],
     };
-    let v = build_payload("/m/a.gguf", "chat", &p);
+    let v = build_payload("/m/a.gguf", "chat", &p, None);
     assert_eq!(v["model_path"], serde_json::json!("/m/a.gguf"));
     assert_eq!(v["mode"], serde_json::json!("chat"));
     assert_eq!(v["ctx"], serde_json::json!(32768));
@@ -461,6 +466,23 @@ mod tests {
       v["extras"],
       serde_json::json!(["--rope-freq-base", "10000"])
     );
+    assert!(
+      v.get("backend").is_none(),
+      "backend omitted when not overridden (daemon defaults to Auto)"
+    );
+  }
+
+  #[test]
+  fn build_payload_includes_backend_override_when_set() {
+    let p = PartialParams {
+      ctx: None,
+      port: None,
+      reasoning: None,
+      knobs: TypedKnobs::default(),
+      extras: vec![],
+    };
+    let v = build_payload("/m/a.gguf", "chat", &p, Some("lemonade"));
+    assert_eq!(v["backend"], serde_json::json!("lemonade"));
   }
 
   fn osvec(args: &[&str]) -> Vec<OsString> {
@@ -529,6 +551,7 @@ mod tests {
       mode: None,
       knobs: crate::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
+      backend: None,
       json: false,
     };
     let err = direct_path_candidate(&model, &args).unwrap_err();
@@ -551,6 +574,7 @@ mod tests {
       mode: Some(CliLaunchMode::Chat),
       knobs: crate::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
+      backend: None,
       json: false,
     };
     let resolved = direct_path_candidate(&model, &args).unwrap();
@@ -579,6 +603,7 @@ mod tests {
       mode: Some(CliLaunchMode::Chat),
       knobs: crate::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
+      backend: None,
       json: false,
     };
     let row = select_start_row(&[], &args).unwrap();
@@ -619,6 +644,7 @@ mod tests {
       mode: Some(CliLaunchMode::Chat),
       knobs: crate::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
+      backend: None,
       json: false,
     };
     let selected = select_start_row(std::slice::from_ref(&row), &args).unwrap();

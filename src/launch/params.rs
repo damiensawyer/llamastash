@@ -119,8 +119,41 @@ pub fn redact_for_display(extras: &[OsString]) -> String {
   out
 }
 
+/// Which inference backend should run a launch (R17).
+///
+/// This is a *launch-level* choice, not a translated knob — "which backend"
+/// has no `llama-server` argv form, so it rides on [`LaunchParams`] rather
+/// than [`TypedKnobs`]. The default [`BackendChoice::Auto`] runs the R13
+/// identity rule (GGUF → llama.cpp, registry → its owning backend); an
+/// explicit variant overrides it. Resolved by
+/// [`crate::backend::resolve_backend`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendChoice {
+  /// Pick automatically from the model's identity (R13).
+  #[default]
+  Auto,
+  /// Force the direct, zero-overhead llama.cpp backend. Wire value pinned
+  /// to `"llamacpp"` so it matches the backend id + the `start --backend`
+  /// flag (snake_case would give `llama_cpp`).
+  #[serde(rename = "llamacpp")]
+  LlamaCpp,
+  // Additional backends (e.g. a managed-multiplexer engine) add a variant
+  // here + a `resolve_backend` arm.
+}
+
+impl BackendChoice {
+  /// Stable lowercase label for CLI parsing / JSON projection.
+  pub fn label(self) -> &'static str {
+    match self {
+      BackendChoice::Auto => "auto",
+      BackendChoice::LlamaCpp => "llamacpp",
+    }
+  }
+}
+
 /// All launch knobs the supervisor reads. Persisted under
-/// `last_params: HashMap<ModelId, LaunchParams>` in `state.json`.
+/// `last_params: HashMap<ModelIdentity, LaunchParams>` in `state.json`.
 ///
 /// Pre-1.0 schema flip: the old `advanced: Vec<OsString>` field has
 /// been replaced with `knobs: TypedKnobs` + `extras: Vec<OsString>`.
@@ -173,6 +206,13 @@ pub struct LaunchParams {
   /// companion.
   #[serde(default)]
   pub mmproj_path: Option<PathBuf>,
+  /// Which backend runs this launch (R17). Defaults to
+  /// [`BackendChoice::Auto`] (the R13 identity rule); an explicit value
+  /// overrides per-model. Persisted in last-params like the other choices,
+  /// so a returning user keeps their override. `#[serde(default)]` keeps
+  /// pre-Phase-2b `state.json` rows loading as `Auto`.
+  #[serde(default)]
+  pub backend: BackendChoice,
 }
 
 impl LaunchParams {
@@ -186,6 +226,7 @@ impl LaunchParams {
       knobs: TypedKnobs::default(),
       extras: Vec::new(),
       mmproj_path: None,
+      backend: BackendChoice::default(),
     }
   }
 }
@@ -553,6 +594,35 @@ mod tests {
 
   fn base_params() -> LaunchParams {
     LaunchParams::new(PathBuf::from("/m/model.gguf"), LaunchMode::Chat)
+  }
+
+  #[test]
+  fn launch_params_defaults_backend_to_auto() {
+    assert_eq!(base_params().backend, BackendChoice::Auto);
+  }
+
+  #[test]
+  fn launch_params_without_backend_field_loads_as_auto() {
+    // A pre-Phase-2b last_params row has no `backend` key; #[serde(default)]
+    // must load it as Auto so existing state.json keeps working (R17).
+    let mut v = serde_json::to_value(base_params()).unwrap();
+    v.as_object_mut().unwrap().remove("backend");
+    assert!(v.get("backend").is_none());
+    let p: LaunchParams = serde_json::from_value(v).unwrap();
+    assert_eq!(p.backend, BackendChoice::Auto);
+  }
+
+  #[test]
+  fn backend_choice_serde_is_snake_case() {
+    for c in [BackendChoice::Auto, BackendChoice::LlamaCpp] {
+      let s = serde_json::to_string(&c).unwrap();
+      let back: BackendChoice = serde_json::from_str(&s).unwrap();
+      assert_eq!(c, back);
+    }
+    assert_eq!(
+      serde_json::to_string(&BackendChoice::LlamaCpp).unwrap(),
+      "\"llamacpp\""
+    );
   }
 
   #[test]

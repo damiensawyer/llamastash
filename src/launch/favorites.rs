@@ -9,14 +9,14 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::gguf::identity::ModelId;
+use crate::backend::identity::ModelIdentity;
 
 /// One favorited model. Lean wrapper so future fields (a colour, a
 /// reminder note, a pinned preset) can land without breaking the
 /// `state.json` schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FavoriteEntry {
-  pub id: ModelId,
+  pub id: ModelIdentity,
 }
 
 /// In-memory favourites set with stable iteration order.
@@ -46,7 +46,7 @@ impl Favorites {
   /// Returns true if `id` was added (false if already present). Used
   /// by the IPC `favorite_add` method so the response can distinguish
   /// no-op from new-add.
-  pub fn add(&mut self, id: ModelId) -> bool {
+  pub fn add(&mut self, id: ModelIdentity) -> bool {
     if self.entries.iter().any(|e| e.id == id) {
       return false;
     }
@@ -55,19 +55,19 @@ impl Favorites {
   }
 
   /// Returns true if `id` was removed.
-  pub fn remove(&mut self, id: &ModelId) -> bool {
+  pub fn remove(&mut self, id: &ModelIdentity) -> bool {
     let before = self.entries.len();
     self.entries.retain(|e| &e.id != id);
     self.entries.len() != before
   }
 
-  pub fn contains(&self, id: &ModelId) -> bool {
+  pub fn contains(&self, id: &ModelIdentity) -> bool {
     self.entries.iter().any(|e| &e.id == id)
   }
 
-  /// Set view of the contained `ModelId`s, useful for diffing two
+  /// Set view of the contained identities, useful for diffing two
   /// favorite sets.
-  pub fn as_set(&self) -> BTreeSet<&ModelId> {
+  pub fn as_set(&self) -> BTreeSet<&ModelIdentity> {
     self.entries.iter().map(|e| &e.id).collect()
   }
 }
@@ -78,11 +78,11 @@ mod tests {
 
   use std::path::PathBuf;
 
-  fn id(path: &str, tag: u8) -> ModelId {
-    ModelId {
+  fn id(path: &str, tag: u8) -> ModelIdentity {
+    ModelIdentity::Gguf(crate::gguf::identity::ModelId {
       path: PathBuf::from(path),
       header_blake3: [tag; 32],
-    }
+    })
   }
 
   #[test]
@@ -106,7 +106,10 @@ mod tests {
     let mut f = Favorites::new();
     f.add(id("/b.gguf", 2));
     f.add(id("/a.gguf", 1));
-    let paths: Vec<_> = f.iter().map(|e| e.id.path.clone()).collect();
+    let paths: Vec<_> = f
+      .iter()
+      .map(|e| e.id.as_gguf().unwrap().path.clone())
+      .collect();
     assert_eq!(
       paths,
       vec![PathBuf::from("/b.gguf"), PathBuf::from("/a.gguf")]

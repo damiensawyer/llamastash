@@ -24,6 +24,8 @@ pub async fn handle(args: StatusArgs, cli: &Cli, config: &Config) -> CliResult {
       // Preserve the proxy block — `status <target>` filters the
       // launches list but doesn't redact daemon-level surfaces.
       proxy: snap.proxy.clone(),
+      // Backends are daemon-level too — keep them on a scoped view.
+      backends: snap.backends.clone(),
     },
     None => snap,
   };

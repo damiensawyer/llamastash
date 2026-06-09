@@ -126,6 +126,17 @@ pub(crate) fn display_size(row: &CatalogRow) -> String {
     .unwrap_or_else(|| "?".to_string())
 }
 
+/// Backend id that serves a catalog row, from its source label (R14):
+/// the Lemonade discovery source maps to `lemonade`; every local-file
+/// source (user / huggingface / ollama / lm-studio) to `llamacpp`.
+pub(crate) fn backend_for_source(source: &str) -> &'static str {
+  if source == "lemonade" {
+    "lemonade"
+  } else {
+    "llamacpp"
+  }
+}
+
 /// JSON projection of `list_models` rows. Stable shape — agents pin
 /// against this, so column drift requires deliberate intent. Wrapped
 /// in `{"models": [...]}` so every CLI `--json` surface lives behind
@@ -143,6 +154,10 @@ pub fn list_json(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) -> 
         "path": r.path,
         "parent": r.parent,
         "source": r.source,
+        // Backend that serves this row (R14 badge): derived from the
+        // source label — a Lemonade-registry row is served by lemonade,
+        // every local-file source by the direct llama.cpp backend.
+        "backend": backend_for_source(&r.source),
         "arch": r.arch,
         "quant": r.quant,
         "native_ctx": r.native_ctx,
@@ -237,6 +252,61 @@ pub fn filter_rows(rows: &[CatalogRow], pattern: &str) -> Vec<CatalogRow> {
 /// for agents. RSS/CPU% are intentionally not surfaced here even when
 /// the per-PID sampler has primed them — they belong in a future
 /// `--detail` view rather than always-on columns.
+/// Render the `status.backends` array (R3/R16) into a concise section:
+/// per backend, its install state + the accelerators it can run on this
+/// host. Returns `None` when the field is absent (older daemon) or empty so
+/// the caller skips the section entirely.
+fn backends_human(backends: &serde_json::Value, tty: bool) -> Option<String> {
+  use crate::cli::{colors, format};
+  let arr = backends.as_array()?;
+  if arr.is_empty() {
+    return None;
+  }
+  let mut out = String::new();
+  if tty {
+    out.push_str(&format::section_header("backends", None));
+  }
+  for b in arr {
+    let id = b.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+    let installed = b
+      .get("installed")
+      .and_then(|v| v.as_bool())
+      .unwrap_or(false);
+    let accel: Vec<&str> = b
+      .get("accelerators")
+      .and_then(|v| v.as_array())
+      .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+      .unwrap_or_default();
+    let accel_str = if accel.is_empty() {
+      "—".to_string()
+    } else {
+      accel.join(", ")
+    };
+    if tty {
+      let state = if installed {
+        colors::success("installed")
+      } else {
+        colors::dim("not installed")
+      };
+      out.push_str(&format!(
+        "  {} {}  {}\n",
+        console::style(id).bold(),
+        state,
+        colors::dim(&accel_str),
+      ));
+    } else {
+      let state = if installed {
+        "installed"
+      } else {
+        "not installed"
+      };
+      out.push_str(&format!("backend {id}: {state} [{accel_str}]\n"));
+    }
+  }
+  out.push('\n');
+  Some(out)
+}
+
 pub fn status_human(snap: &StatusSnapshot) -> String {
   use crate::cli::{colors, format};
 
@@ -284,6 +354,11 @@ pub fn status_human(snap: &StatusSnapshot) -> String {
     } else {
       out.push_str(&format!("proxy: {line}\n"));
     }
+  }
+
+  // Backends section (R3/R16): installed state + accelerators per backend.
+  if let Some(block) = backends_human(&snap.backends, tty) {
+    out.push_str(&block);
   }
 
   // Launches table.
@@ -589,6 +664,13 @@ pub fn status_json(snap: &StatusSnapshot) -> Value {
       obj.insert("proxy".into(), snap.proxy.clone());
     }
   }
+  // Backends block (R3/R16) — same byte-for-byte mirror posture as proxy:
+  // present verbatim when the daemon emits it, omitted against older daemons.
+  if !snap.backends.is_null() {
+    if let Some(obj) = body.as_object_mut() {
+      obj.insert("backends".into(), snap.backends.clone());
+    }
+  }
   body
 }
 
@@ -767,6 +849,7 @@ mod tests {
         host: Value::Null,
         daemon: None,
         proxy: Value::Null,
+        backends: Value::Null,
       };
       let s = status_human(&snap);
       assert!(console::strip_ansi_codes(&s).contains("no managed"));
@@ -789,6 +872,7 @@ mod tests {
         host: Value::Null,
         daemon: None,
         proxy: Value::Null,
+        backends: Value::Null,
       };
       let s = status_human(&snap);
       let plain = console::strip_ansi_codes(&s);
@@ -836,6 +920,51 @@ mod tests {
   }
 
   #[test]
+  fn status_renders_and_serializes_backends_block() {
+    let _g = ColorGuard::set(false);
+    let backends = serde_json::json!([
+      { "id": "llamacpp", "lifecycle": "process_per_model", "installed": true, "accelerators": ["cpu", "vulkan"] },
+      { "id": "lemonade", "lifecycle": "managed_multiplexer", "installed": false, "accelerators": ["cpu", "npu"] },
+    ]);
+    let snap = StatusSnapshot {
+      models: vec![],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: None,
+      proxy: Value::Null,
+      backends: backends.clone(),
+    };
+    // Human render: each backend's id, install state, and accelerators.
+    let human = status_human(&snap);
+    assert!(human.contains("llamacpp"), "human backends: {human}");
+    assert!(human.contains("installed"));
+    assert!(human.contains("not installed"));
+    assert!(human.contains("cpu, npu"));
+    // JSON render mirrors the daemon shape verbatim.
+    let json = status_json(&snap);
+    assert_eq!(json["backends"], backends);
+  }
+
+  #[test]
+  fn status_json_omits_backends_when_absent() {
+    let snap = StatusSnapshot {
+      models: vec![],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: None,
+      proxy: Value::Null,
+      backends: Value::Null,
+    };
+    let json = status_json(&snap);
+    assert!(
+      json.get("backends").is_none(),
+      "backends key must be omitted against an older daemon: {json}"
+    );
+  }
+
+  #[test]
   fn status_human_tsv_branch_emits_legacy_daemon_preamble_byte_shape() {
     // Piped consumers parsing today's `pid=N` / `connections=N` form
     // stay supported byte-for-byte.
@@ -855,6 +984,7 @@ mod tests {
         ipc_url: None,
       }),
       proxy: Value::Null,
+      backends: Value::Null,
     };
     let s = status_human(&snap);
     assert!(s.starts_with("daemon: pid=4242"), "preamble shape: {s:?}");
@@ -880,6 +1010,7 @@ mod tests {
         ipc_url: None,
       }),
       proxy: Value::Null,
+      backends: Value::Null,
     };
     let s = status_human(&snap);
     let plain = console::strip_ansi_codes(&s);
@@ -920,6 +1051,7 @@ mod tests {
       host: serde_json::json!({"gpu_backend": "amd", "cpu_pct": 12.5}),
       daemon: None,
       proxy: Value::Null,
+      backends: Value::Null,
     };
     let v = status_json(&snap);
     let model = &v["models"][0];
@@ -952,6 +1084,7 @@ mod tests {
         ipc_url: Some("http://127.0.0.1:48134".into()),
       }),
       proxy: Value::Null,
+      backends: Value::Null,
     };
     let v = status_json(&snap);
     assert_eq!(v["daemon"]["pid"], serde_json::json!(11));
@@ -986,6 +1119,7 @@ mod tests {
       }),
       daemon: None,
       proxy: Value::Null,
+      backends: Value::Null,
     };
     let v = status_json(&snap);
     assert!(v.get("host").is_some(), "host key must appear: {v}");
@@ -1027,6 +1161,7 @@ mod tests {
       host: Value::Null,
       daemon: None,
       proxy: Value::Null,
+      backends: Value::Null,
     };
     let s = status_human(&snap);
     // Regression guard: managed + external rows are exact tabs, no
@@ -1049,6 +1184,7 @@ mod tests {
       host: Value::Null,
       daemon: None,
       proxy: Value::Null,
+      backends: Value::Null,
     };
     let s = status_human(&snap);
     let plain = console::strip_ansi_codes(&s);
@@ -1090,6 +1226,7 @@ mod tests {
       host: Value::Null,
       daemon: None,
       proxy: proxy_value("listening", Some("127.0.0.1:11434"), None),
+      backends: Value::Null,
     };
     let v = status_json(&snap);
     let proxy = v.get("proxy").expect("proxy block must round-trip");
@@ -1108,6 +1245,7 @@ mod tests {
       host: Value::Null,
       daemon: None,
       proxy: proxy_value("disabled", None, None),
+      backends: Value::Null,
     };
     let v = status_json(&snap);
     let proxy = v.get("proxy").expect("proxy block must round-trip");
@@ -1125,6 +1263,7 @@ mod tests {
       host: Value::Null,
       daemon: None,
       proxy: proxy_value("port_in_use", Some("127.0.0.1:11434"), None),
+      backends: Value::Null,
     };
     let v = status_json(&snap);
     let proxy = v.get("proxy").expect("proxy block must round-trip");
@@ -1142,6 +1281,7 @@ mod tests {
       host: Value::Null,
       daemon: None,
       proxy: proxy_value("unbound", Some("127.0.0.1:80"), Some("permission denied")),
+      backends: Value::Null,
     };
     let v = status_json(&snap);
     let proxy = v.get("proxy").expect("proxy block must round-trip");
@@ -1161,6 +1301,7 @@ mod tests {
       host: Value::Null,
       daemon: None,
       proxy: Value::Null,
+      backends: Value::Null,
     };
     let v = status_json(&snap);
     assert!(
@@ -1190,6 +1331,7 @@ mod tests {
         ipc_url: None,
       }),
       proxy: proxy_value("disabled", None, None),
+      backends: Value::Null,
     };
     let s = status_human(&snap);
     assert!(
@@ -1216,6 +1358,7 @@ mod tests {
         ipc_url: None,
       }),
       proxy: proxy_value("listening", Some("127.0.0.1:11434"), None),
+      backends: Value::Null,
     };
     let s = status_human(&snap);
     assert!(
@@ -1242,6 +1385,7 @@ mod tests {
         ipc_url: None,
       }),
       proxy: proxy_value("port_in_use", Some("127.0.0.1:11434"), None),
+      backends: Value::Null,
     };
     let s = status_human(&snap);
     assert!(
@@ -1306,6 +1450,7 @@ mod tests {
       host: Value::Null,
       daemon: None,
       proxy: Value::Null,
+      backends: Value::Null,
     };
     let rendered = status_human(&snap);
     assert!(
@@ -1325,6 +1470,7 @@ mod tests {
       host: Value::Null,
       daemon: None,
       proxy: Value::Null,
+      backends: Value::Null,
     };
     let v = status_json(&snap);
     assert_eq!(
@@ -1342,6 +1488,7 @@ mod tests {
       host: Value::Null,
       daemon: None,
       proxy: Value::Null,
+      backends: Value::Null,
     };
     let v = status_json(&snap);
     assert!(
@@ -1368,6 +1515,7 @@ mod tests {
         ipc_url: None,
       }),
       proxy: proxy_value("unbound", Some("127.0.0.1:80"), Some("permission denied")),
+      backends: Value::Null,
     };
     let s = status_human(&snap);
     assert!(

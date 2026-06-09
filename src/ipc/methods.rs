@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use tokio::sync::{Mutex, RwLock};
 
 use super::protocol::{ErrorCode, ErrorObject, Request, Response, JSONRPC_VERSION};
+use crate::backend::identity::ModelIdentity;
 use crate::backend::{Backend, LaunchPlan};
 use crate::config::loader::PortRange;
 use crate::daemon::host_metrics::{HostMetricsSnapshot, SamplerHandles};
@@ -522,12 +523,14 @@ async fn status_response(ctx: &MethodContext) -> Value {
     }
     None => Value::Null,
   };
+  let backends = backends_status(ctx).await;
   let mut body = json!({
     "models": models,
     "external": external,
     "gpu": gpu,
     "host": host,
     "device_catalog": device_catalog,
+    "backends": backends,
     "daemon": {
       "pid": std::process::id(),
       "uptime_seconds": ctx.started_at.elapsed().as_secs(),
@@ -546,6 +549,65 @@ async fn status_response(ctx: &MethodContext) -> Value {
     }
   }
   body
+}
+
+/// Build the `status.backends` array (R3/R16): one row per backend with
+/// whether its binary is installed on this host and which accelerators it
+/// can run on. llama.cpp's accelerator set unions its CPU floor with the
+/// GPU backends the live device catalog reveals. Additional backends append
+/// their own row.
+async fn backends_status(ctx: &MethodContext) -> Value {
+  use crate::backend::llama_cpp::LlamaCppBackend;
+  use crate::backend::Backend;
+
+  let llama = LlamaCppBackend::new();
+  let llama_installed = ctx
+    .launch
+    .as_ref()
+    .map(|e| e.binary.exists())
+    .unwrap_or(false);
+  let mut llama_acc = llama.accelerators();
+  if let Some(env) = ctx.launch.as_ref() {
+    let cat = env.device_catalog.read().await;
+    for d in cat.iter() {
+      if let Some(a) = accelerator_from_selector(&d.selector) {
+        llama_acc.insert(a);
+      }
+    }
+  }
+
+  json!([backend_row(
+    llama.id(),
+    llama.lifecycle().label(),
+    llama_installed,
+    llama_acc.labels()
+  )])
+}
+
+fn backend_row(id: &str, lifecycle: &str, installed: bool, accelerators: Vec<&str>) -> Value {
+  json!({
+    "id": id,
+    "lifecycle": lifecycle,
+    "installed": installed,
+    "accelerators": accelerators,
+  })
+}
+
+/// Map a llama.cpp `--device` selector prefix to an accelerator class.
+fn accelerator_from_selector(selector: &str) -> Option<crate::backend::Accelerator> {
+  use crate::backend::Accelerator;
+  let s = selector.to_ascii_lowercase();
+  if s.starts_with("cuda") {
+    Some(Accelerator::Cuda)
+  } else if s.starts_with("rocm") {
+    Some(Accelerator::Rocm)
+  } else if s.starts_with("vulkan") {
+    Some(Accelerator::Vulkan)
+  } else if s.starts_with("metal") {
+    Some(Accelerator::Metal)
+  } else {
+    None
+  }
 }
 
 /// Project the proxy listener's status cell into the wire shape
@@ -639,7 +701,7 @@ async fn stop_model_handler(
   ctx.supervisors.remove(&parsed.launch_id).await;
   // Drop the running snapshot keyed by `(id, port)` so a second
   // launch of the same GGUF on a different port keeps its row.
-  let stopped_id = model.id().clone();
+  let stopped_id: ModelIdentity = model.id().clone().into();
   ctx
     .state
     .mutate(|s| {
@@ -869,10 +931,10 @@ pub(crate) async fn stop_all_managed(
   let outcomes = join_all(stops).await;
 
   let mut stopped: Vec<(LaunchId, ManagedState)> = Vec::with_capacity(outcomes.len());
-  let mut stopped_keys: Vec<(ModelId, u16)> = Vec::with_capacity(outcomes.len());
+  let mut stopped_keys: Vec<(ModelIdentity, u16)> = Vec::with_capacity(outcomes.len());
   for (launch_id, model_id, port, final_state) in outcomes {
     ctx.supervisors.remove(&launch_id).await;
-    stopped_keys.push((model_id, port));
+    stopped_keys.push((model_id.into(), port));
     stopped.push((launch_id, final_state));
   }
   if !stopped_keys.is_empty() {
@@ -966,6 +1028,11 @@ pub(crate) struct StartParams {
   /// as `None` to let the daemon find it automatically.
   #[serde(default)]
   pub(crate) mmproj_path: Option<PathBuf>,
+  /// Per-model backend override (R17). `None` / `auto` runs the identity
+  /// rule (GGUF → llama.cpp, registry → its backend); an explicit value
+  /// forces a backend. Set by `start --backend` and the TUI Launch picker.
+  #[serde(default)]
+  pub(crate) backend: Option<crate::launch::params::BackendChoice>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -1097,6 +1164,10 @@ pub(crate) async fn start_model_inner(
   // in a single read so the layered-knob resolver below doesn't have
   // to re-open the file.
   let (id, arch) = resolve_model_id_and_arch(&parsed.model_path)?;
+  // Persisted-keyspace key (state_store / last_params). The GGUF launch
+  // path always produces a `Gguf` identity; the Lemonade `DelegateToManager`
+  // path (Unit 3) will produce a `Backend` identity instead.
+  let identity: ModelIdentity = id.clone().into();
 
   // Mode resolution: explicit override > catalog hint > default to chat.
   // The CLI surface refuses to default silently when discovery says
@@ -1177,6 +1248,10 @@ pub(crate) async fn start_model_inner(
   // → built-in `(arch, backend)` table → llama-server's own default.
   let mut launch_params = LaunchParams::new(parsed.model_path.clone(), mode);
   launch_params.port = Some(port);
+  // Per-model backend override (R17): `None` keeps the default `Auto`
+  // (identity rule); an explicit choice from `start --backend` / the TUI
+  // picker overrides it. Resolved into a backend at the selection seam below.
+  launch_params.backend = parsed.backend.unwrap_or_default();
   launch_params.extras = parsed.extras.into_iter().map(OsString::from).collect();
   // Resolve the multimodal projector: an explicit `mmproj_path` wins;
   // otherwise auto-detect a companion next to the model — unless the
@@ -1211,7 +1286,7 @@ pub(crate) async fn start_model_inner(
     let snap = ctx.state.snapshot().await;
     snap
       .last_params_map()
-      .get(&id)
+      .get(&identity)
       .map(|p| p.knobs.clone())
       .unwrap_or_default()
   };
@@ -1352,14 +1427,26 @@ pub(crate) async fn start_model_inner(
   };
 
   // Translate the resolved knob IR into a launch plan via the backend.
-  // The backend is selected from the model (Phase 1: always llama.cpp).
-  // The orchestrator owns the branch on plan shape; the process-per-model
-  // arm feeds the supervisor. When Phase 2 adds a managed-multiplexer
-  // `LaunchPlan` variant this irrefutable `let` becomes a refutable
-  // pattern — a compile error that forces us to handle the new arm here.
-  let inference_backend = crate::backend::select_backend(&launch_params.model_path);
-  let LaunchPlan::SpawnProcess(launch_spec) =
-    inference_backend.prepare_launch(&launch_params, port, launch_binary, scaled_probe);
+  // Selection honors the per-model override then the R13 identity rule
+  // (`Auto` → GGUF binds llama.cpp). The orchestrator owns the branch on
+  // plan shape: the process-per-model arm feeds the supervisor; the
+  // managed-multiplexer arm is wired in Unit 3.
+  let inference_backend = crate::backend::resolve_backend(&identity, launch_params.backend);
+  let launch_spec =
+    match inference_backend.prepare_launch(&launch_params, port, launch_binary, scaled_probe) {
+      LaunchPlan::SpawnProcess(spec) => spec,
+      LaunchPlan::DelegateToManager(_) => {
+        // No managed-multiplexer backend is registered on this build, so
+        // selection never returns one. Release the reserved port and fail
+        // cleanly rather than silently dropping the launch. (A managed-
+        // multiplexer engine wires this arm to ensure its umbrella.)
+        ctx.supervisors.release_reserved_port(port).await;
+        return Err(ErrorObject::new(
+          ErrorCode::InternalError,
+          "managed-multiplexer backends are not yet supported".to_string(),
+        ));
+      }
+    };
 
   let spawn_result = supervisor_spawn(ManagedSpawn {
     id: id.clone(),
@@ -1403,9 +1490,9 @@ pub(crate) async fn start_model_inner(
   ctx
     .state
     .mutate(|s| {
-      s.running.retain(|r| !(r.id == id && r.port == port));
+      s.running.retain(|r| !(r.id == identity && r.port == port));
       s.running.push(RunningSnapshot {
-        id: id.clone(),
+        id: identity.clone(),
         pid,
         port,
         started_at,
@@ -1429,7 +1516,7 @@ pub(crate) async fn start_model_inner(
   spawn_last_params_recorder(
     ctx.state.clone(),
     model.clone(),
-    id.clone(),
+    identity.clone(),
     persist_params,
     ctx.shutdown.clone(),
   );
@@ -1446,7 +1533,7 @@ pub(crate) async fn start_model_inner(
 fn spawn_last_params_recorder(
   state: PersistedState,
   model: ManagedModel,
-  id: ModelId,
+  id: ModelIdentity,
   params: LaunchParams,
   shutdown: ShutdownToken,
 ) {
@@ -1607,8 +1694,13 @@ async fn presets_list_handler(
 ) -> Result<Value, ErrorObject> {
   let parsed: PresetsListParams = parse_params(params)?;
   let id = resolve_model_id(&parsed.model_path)?;
+  let identity = ModelIdentity::Gguf(id.clone());
   let snapshot = ctx.state.snapshot().await;
-  let presets = snapshot.presets_map().get(&id).cloned().unwrap_or_default();
+  let presets = snapshot
+    .presets_map()
+    .get(&identity)
+    .cloned()
+    .unwrap_or_default();
   Ok(json!({
     "model_id": id,
     "presets": presets.iter().map(preset_row).collect::<Vec<_>>(),
@@ -1645,6 +1737,7 @@ async fn presets_save_handler(
     ));
   }
   let id = resolve_model_id(&parsed.model_path)?;
+  let identity = ModelIdentity::Gguf(id.clone());
   let mut params_value = LaunchParams::new(
     parsed.model_path.clone(),
     parsed
@@ -1665,9 +1758,9 @@ async fn presets_save_handler(
   let prev = ctx
     .state
     .mutate(|s| {
-      let mut presets = s.presets_map().get(&id).cloned().unwrap_or_default();
+      let mut presets = s.presets_map().get(&identity).cloned().unwrap_or_default();
       let prev = presets.upsert(preset.clone());
-      s.upsert_presets(id.clone(), presets);
+      s.upsert_presets(identity.clone(), presets);
       prev
     })
     .await;
@@ -1691,12 +1784,13 @@ async fn presets_delete_handler(
 ) -> Result<Value, ErrorObject> {
   let parsed: PresetsDeleteParams = parse_params(params)?;
   let id = resolve_model_id(&parsed.model_path)?;
+  let identity = ModelIdentity::Gguf(id.clone());
   let removed = ctx
     .state
     .mutate(|s| {
-      let mut presets = s.presets_map().get(&id).cloned().unwrap_or_default();
+      let mut presets = s.presets_map().get(&identity).cloned().unwrap_or_default();
       let removed = presets.remove(&parsed.name);
-      s.upsert_presets(id.clone(), presets);
+      s.upsert_presets(identity.clone(), presets);
       removed
     })
     .await;
@@ -1718,10 +1812,11 @@ async fn presets_show_handler(
 ) -> Result<Value, ErrorObject> {
   let parsed: PresetsShowParams = parse_params(params)?;
   let id = resolve_model_id(&parsed.model_path)?;
+  let identity = ModelIdentity::Gguf(id.clone());
   let snapshot = ctx.state.snapshot().await;
   let preset = snapshot
     .presets_map()
-    .get(&id)
+    .get(&identity)
     .and_then(|p| p.get(&parsed.name).cloned());
   Ok(json!({
     "model_id": id,
@@ -1759,7 +1854,11 @@ async fn favorite_add_handler(
 ) -> Result<Value, ErrorObject> {
   let parsed: FavoriteParams = parse_params(params)?;
   let id = resolve_model_id(&parsed.model_path)?;
-  let added = ctx.state.mutate(|s| s.favorites.add(id.clone())).await;
+  let identity = ModelIdentity::Gguf(id.clone());
+  let added = ctx
+    .state
+    .mutate(|s| s.favorites.add(identity.clone()))
+    .await;
   Ok(json!({
     "model_id": id,
     "added": added,
@@ -1772,7 +1871,8 @@ async fn favorite_remove_handler(
 ) -> Result<Value, ErrorObject> {
   let parsed: FavoriteParams = parse_params(params)?;
   let id = resolve_model_id(&parsed.model_path)?;
-  let removed = ctx.state.mutate(|s| s.favorites.remove(&id)).await;
+  let identity = ModelIdentity::Gguf(id.clone());
+  let removed = ctx.state.mutate(|s| s.favorites.remove(&identity)).await;
   Ok(json!({
     "model_id": id,
     "removed": removed,
@@ -1800,7 +1900,7 @@ async fn last_params_list_handler(ctx: &MethodContext) -> Result<Value, ErrorObj
     .map(|entry| {
       json!({
         "id": &entry.id,
-        "model_path": &entry.id.path,
+        "model_path": entry.id.as_gguf().map(|g| &g.path),
         "params": launch_params_row(&entry.params),
       })
     })
@@ -2036,6 +2136,39 @@ mod tests {
     assert!(daemon["pid"].is_number());
     assert!(daemon["uptime_seconds"].is_number());
     assert_eq!(daemon["active_connections"], json!(0));
+  }
+
+  #[tokio::test]
+  async fn status_includes_backends_block() {
+    let c = ctx();
+    let resp = dispatch_request(&c, Request::new(1, "status", None)).await;
+    let body = resp.result.expect("status result");
+    let backends = body
+      .get("backends")
+      .and_then(|v| v.as_array())
+      .expect("status must include a backends array (R3/R16)");
+    let ids: Vec<&str> = backends
+      .iter()
+      .filter_map(|b| b.get("id").and_then(|v| v.as_str()))
+      .collect();
+    assert!(
+      ids.contains(&"llamacpp"),
+      "backends must list llamacpp: {ids:?}"
+    );
+    // Each row carries the R16 fields; llama.cpp always offers CPU.
+    let llama = backends
+      .iter()
+      .find(|b| b["id"] == "llamacpp")
+      .expect("llamacpp row");
+    assert!(llama["installed"].is_boolean());
+    assert_eq!(llama["lifecycle"], json!("process_per_model"));
+    let accel: Vec<&str> = llama["accelerators"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .filter_map(|v| v.as_str())
+      .collect();
+    assert!(accel.contains(&"cpu"), "llama.cpp floor is cpu: {accel:?}");
   }
 
   #[tokio::test]

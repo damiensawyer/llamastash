@@ -358,6 +358,9 @@ pub struct StartModelArgs {
   pub extras: Vec<String>,
   pub mode: Option<crate::launch::mode::LaunchMode>,
   pub prefer_port: Option<u16>,
+  /// Per-model backend choice from the Launch picker (R17). `Auto` runs
+  /// the identity rule on the daemon side.
+  pub backend: crate::launch::params::BackendChoice,
 }
 
 /// Action awaiting user confirmation in the modal popup. Captured

@@ -76,6 +76,8 @@ pub enum ModelSource {
   Ollama,
   /// An LM Studio models directory.
   LmStudio,
+  // A backend-registry source (e.g. a managed-multiplexer engine) adds a
+  // variant here + arms in `label` / `backend_id`.
 }
 
 impl ModelSource {
@@ -85,6 +87,20 @@ impl ModelSource {
       ModelSource::HuggingFace => "huggingface",
       ModelSource::Ollama => "ollama",
       ModelSource::LmStudio => "lm-studio",
+    }
+  }
+
+  /// The id of the backend that serves models from this source (R13/R14).
+  ///
+  /// Disk sources (user / HF / Ollama / LM Studio) are all local GGUF files
+  /// served by the direct llama.cpp backend. A backend-registry source adds
+  /// its own arm returning that backend's id.
+  pub fn backend_id(&self) -> &'static str {
+    match self {
+      ModelSource::UserPath
+      | ModelSource::HuggingFace
+      | ModelSource::Ollama
+      | ModelSource::LmStudio => "llamacpp",
     }
   }
 }

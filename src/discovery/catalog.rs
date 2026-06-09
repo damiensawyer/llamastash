@@ -91,6 +91,9 @@ fn model_row(m: &DiscoveredModel) -> Value {
     "path": m.path,
     "parent": m.parent,
     "source": m.source.label(),
+    // Backend that serves this row (R14 badge / R13 routing). Additive —
+    // GGUF rows report "llamacpp", Lemonade-registry rows "lemonade".
+    "backend": m.source.backend_id(),
     "split_siblings": m.split_siblings,
     "metadata": m.metadata.as_ref().map(|md| {
       json!({
@@ -151,6 +154,16 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
     }
+  }
+
+  #[test]
+  fn model_row_tags_backend_by_source() {
+    // Disk (GGUF) rows report the direct llama.cpp backend — the R14 badge /
+    // R13 routing tag. GGUF JSON is otherwise unchanged (additive field). A
+    // backend-registry source adds its own tag.
+    let gguf = model_row(&fake_model("/m/a.gguf", ModelSource::UserPath));
+    assert_eq!(gguf["backend"], "llamacpp");
+    assert_eq!(gguf["path"], "/m/a.gguf");
   }
 
   #[tokio::test]

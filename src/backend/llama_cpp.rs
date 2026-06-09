@@ -14,9 +14,12 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{Backend, KnobCapability, LaunchPlan, Lifecycle, ProcessLaunchSpec, Readiness};
+use super::identity::ModelIdentity;
+use super::{
+  Accelerator, AcceleratorSupport, Backend, KnobCapability, LaunchPlan, Lifecycle,
+  ProcessLaunchSpec, Readiness,
+};
 use crate::daemon::probe::ProbeOptions;
-use crate::gguf::identity::ModelId;
 use crate::launch::params::{compose, LaunchParams};
 
 /// Environment variables removed before spawning `llama-server`.
@@ -108,9 +111,17 @@ impl Backend for LlamaCppBackend {
     &self.capabilities
   }
 
-  fn identify(&self, path: &Path, header_bytes: &[u8]) -> ModelId {
-    // Delegate — do not reimplement the `(path, BLAKE3)` identity.
-    crate::gguf::identity::compute(path, header_bytes)
+  fn accelerators(&self) -> AcceleratorSupport {
+    // CPU is the always-available floor; which GPU backend a given build
+    // can drive is host-/variant-specific and surfaced via the live device
+    // catalog (`status` unions that in), not asserted statically here.
+    AcceleratorSupport::from_list([Accelerator::Cpu])
+  }
+
+  fn identify(&self, path: &Path, header_bytes: &[u8]) -> ModelIdentity {
+    // Delegate — do not reimplement the `(path, BLAKE3)` identity. Wrap it
+    // in the generalized seam type; the GGUF `ModelId` is unchanged.
+    ModelIdentity::Gguf(crate::gguf::identity::compute(path, header_bytes))
   }
 
   fn prepare_launch(
@@ -124,54 +135,10 @@ impl Backend for LlamaCppBackend {
   }
 }
 
-/// Zero-cost, exhaustive dispatch over the available backends (R3).
-///
-/// `dyn Backend` is deliberately avoided — the backend set is small and
-/// closed, so an enum gives static dispatch and forces every new backend
-/// to be handled at every call site. Phase 1 has one variant; Phase 2
-/// adds `Lemonade` and the compiler flags every match that needs it.
-#[derive(Debug, Clone)]
-pub enum Backends {
-  LlamaCpp(LlamaCppBackend),
-}
-
-impl Backend for Backends {
-  fn id(&self) -> &'static str {
-    match self {
-      Backends::LlamaCpp(b) => b.id(),
-    }
-  }
-
-  fn lifecycle(&self) -> Lifecycle {
-    match self {
-      Backends::LlamaCpp(b) => b.lifecycle(),
-    }
-  }
-
-  fn capabilities(&self) -> &KnobCapability {
-    match self {
-      Backends::LlamaCpp(b) => b.capabilities(),
-    }
-  }
-
-  fn identify(&self, path: &Path, header_bytes: &[u8]) -> ModelId {
-    match self {
-      Backends::LlamaCpp(b) => b.identify(path, header_bytes),
-    }
-  }
-
-  fn prepare_launch(
-    &self,
-    params: &LaunchParams,
-    port: u16,
-    binary: PathBuf,
-    probe: ProbeOptions,
-  ) -> LaunchPlan {
-    match self {
-      Backends::LlamaCpp(b) => b.prepare_launch(params, port, binary, probe),
-    }
-  }
-}
+// The cross-backend dispatch enum (`Backends`) lives in the parent module
+// (`crate::backend`) now that there is more than one backend — see
+// `resolve_backend` / `backend_for_identity` and `impl Backend for Backends`
+// there.
 
 #[cfg(test)]
 mod tests {
@@ -184,6 +151,7 @@ mod tests {
   fn spec_of(plan: LaunchPlan) -> ProcessLaunchSpec {
     match plan {
       LaunchPlan::SpawnProcess(s) => s,
+      LaunchPlan::DelegateToManager(_) => panic!("llama.cpp must produce a SpawnProcess plan"),
     }
   }
 
@@ -392,23 +360,10 @@ mod tests {
     let bytes = b"GGUF\x03\x00\x00\x00 header";
     let via_backend = b.identify(Path::new("/m/model.gguf"), bytes);
     let direct = crate::gguf::identity::compute(Path::new("/m/model.gguf"), bytes);
-    assert_eq!(via_backend, direct);
+    // llama.cpp identity is the GGUF identity, wrapped in the seam type.
+    assert_eq!(via_backend.as_gguf(), Some(&direct));
   }
 
-  // ---- enum dispatch forwards correctly ----
-
-  #[test]
-  fn backends_enum_forwards_to_inner() {
-    let backends = Backends::LlamaCpp(LlamaCppBackend::new());
-    assert_eq!(backends.id(), "llamacpp");
-    assert_eq!(backends.lifecycle(), Lifecycle::ProcessPerModel);
-    let p = LaunchParams::new(PathBuf::from("/m/model.gguf"), LaunchMode::Chat);
-    let via_enum = spec_of(backends.prepare_launch(
-      &p,
-      41100,
-      PathBuf::from("/bin/llama-server"),
-      ProbeOptions::default(),
-    ));
-    assert_eq!(via_enum.argv, compose(&p, 41100));
-  }
+  // Cross-backend `Backends` enum-dispatch forwarding is tested in the
+  // parent module (`crate::backend`), where the enum now lives.
 }

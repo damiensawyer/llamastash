@@ -1,7 +1,7 @@
 //! Named launch presets per model (`R21`).
 //!
 //! Stored under `state_dir/state.json` as
-//! `presets: HashMap<ModelId, Vec<NamedPreset>>`. A preset's `params`
+//! `presets: HashMap<ModelIdentity, Vec<NamedPreset>>`. A preset's `params`
 //! is a full [`LaunchParams`] snapshot so applying a preset is just
 //! "clone these params, then layer per-invocation overrides on top".
 
@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::gguf::identity::ModelId;
+use crate::backend::identity::ModelIdentity;
 use crate::launch::params::LaunchParams;
 
 /// One saved preset. `name` is unique within a single model's preset
@@ -68,9 +68,9 @@ impl Presets {
   }
 }
 
-/// Top-level map from canonical model id → that model's preset list.
+/// Top-level map from model identity → that model's preset list.
 /// Serialised in `state.json` under `presets`.
-pub type PresetStore = BTreeMap<ModelId, Presets>;
+pub type PresetStore = BTreeMap<ModelIdentity, Presets>;
 
 #[cfg(test)]
 mod tests {

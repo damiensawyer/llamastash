@@ -143,11 +143,22 @@ pub async fn sweep(inputs: SweepInputs<'_>) -> SweepReport {
       stale.push(snap);
       continue;
     }
+    // Orphan re-adoption is process-based, so it is GGUF-only: a
+    // managed-multiplexer (Lemonade) snapshot has no local file and is
+    // served by the shared umbrella, not a re-adoptable per-model child.
+    // A non-GGUF identity therefore can't be re-adopted — drop it as stale.
+    let path = match snap.id.as_gguf() {
+      Some(g) => g.path.clone(),
+      None => {
+        stale.push(snap);
+        continue;
+      }
+    };
     // Three-factor confirmation: PID alive (above), port listening,
     // and `/v1/models` returns the recorded model path. Only then is
     // it safe to claim ownership again — otherwise we may be looking
     // at a recycled PID or an unrelated `llama-server` invocation.
-    if !models_endpoint_matches(snap.port, &snap.id.path, inputs.probe_timeout).await {
+    if !models_endpoint_matches(snap.port, &path, inputs.probe_timeout).await {
       stale.push(snap);
       continue;
     }
@@ -385,10 +396,10 @@ mod tests {
 
   fn fake_snapshot(pid: i32, port: u16, path: &str, tag: u8) -> RunningSnapshot {
     RunningSnapshot {
-      id: ModelId {
+      id: crate::backend::identity::ModelIdentity::Gguf(ModelId {
         path: PathBuf::from(path),
         header_blake3: [tag; 32],
-      },
+      }),
       pid,
       port,
       started_at: 1_700_000_000,

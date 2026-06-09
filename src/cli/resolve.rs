@@ -367,6 +367,10 @@ pub async fn fetch_status(client: &mut Client) -> Result<StatusSnapshot, CliExit
   // as `Value::Null` and the projection in `status_json` drops the
   // key entirely.
   let proxy = body.get("proxy").cloned().unwrap_or(Value::Null);
+  // Backends block — verbatim copy of the daemon's `status.backends`
+  // array (R3/R16). `Value::Null` when talking to a daemon that predates
+  // the field; the formatter then skips the section.
+  let backends = body.get("backends").cloned().unwrap_or(Value::Null);
   Ok(StatusSnapshot {
     models,
     external,
@@ -374,6 +378,7 @@ pub async fn fetch_status(client: &mut Client) -> Result<StatusSnapshot, CliExit
     host,
     daemon,
     proxy,
+    backends,
   })
 }
 
@@ -399,6 +404,10 @@ pub struct StatusSnapshot {
   /// parse the IPC and the CLI see identical shapes. `Value::Null`
   /// when talking to a pre-Unit-5 daemon that omits the field.
   pub proxy: Value,
+  /// Backends block — array of `{id, lifecycle, installed, accelerators}`
+  /// (R3/R16). Verbatim copy of the daemon's wire shape; `Value::Null`
+  /// against a daemon that predates the field.
+  pub backends: Value,
 }
 
 #[derive(Debug, Clone)]

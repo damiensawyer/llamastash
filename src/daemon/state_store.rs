@@ -21,7 +21,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::gguf::identity::ModelId;
+use crate::backend::identity::ModelIdentity;
 use crate::launch::favorites::Favorites;
 use crate::launch::params::LaunchParams;
 use crate::launch::presets::PresetStore;
@@ -55,14 +55,14 @@ pub struct DaemonState {
 /// on the Loading → Ready transition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LastParamsEntry {
-  pub id: ModelId,
+  pub id: ModelIdentity,
   pub params: LaunchParams,
 }
 
 /// One entry in `presets` — a model's named-preset list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PresetsEntry {
-  pub id: ModelId,
+  pub id: ModelIdentity,
   pub presets: crate::launch::presets::Presets,
 }
 
@@ -81,7 +81,7 @@ impl Default for DaemonState {
 impl DaemonState {
   /// In-memory map view of `last_params` for `O(log n)` lookup.
   /// Cheap on the typical daemon (a few dozen entries at most).
-  pub fn last_params_map(&self) -> BTreeMap<&ModelId, &LaunchParams> {
+  pub fn last_params_map(&self) -> BTreeMap<&ModelIdentity, &LaunchParams> {
     self
       .last_params
       .iter()
@@ -103,13 +103,13 @@ impl DaemonState {
   /// as the "recent launches" projection the TUI surfaces in its
   /// `↺ Recent` section. On re-upsert of an existing id the entry
   /// moves to the front too — re-launching a model "promotes" it.
-  pub fn upsert_last_params(&mut self, id: ModelId, params: LaunchParams) {
+  pub fn upsert_last_params(&mut self, id: ModelIdentity, params: LaunchParams) {
     self.last_params.retain(|e| e.id != id);
     self.last_params.insert(0, LastParamsEntry { id, params });
   }
 
   /// Insert or replace the preset list for `id`.
-  pub fn upsert_presets(&mut self, id: ModelId, presets: crate::launch::presets::Presets) {
+  pub fn upsert_presets(&mut self, id: ModelIdentity, presets: crate::launch::presets::Presets) {
     if let Some(entry) = self.presets.iter_mut().find(|e| e.id == id) {
       entry.presets = presets;
     } else {
@@ -124,7 +124,7 @@ impl DaemonState {
 /// answering and the model file matches.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunningSnapshot {
-  pub id: ModelId,
+  pub id: ModelIdentity,
   pub pid: i32,
   pub port: u16,
   /// Wall-clock seconds since the Unix epoch when the supervisor
@@ -213,6 +213,7 @@ mod tests {
   use std::fs;
   use std::time::{SystemTime, UNIX_EPOCH};
 
+  use crate::gguf::identity::ModelId;
   use crate::launch::mode::LaunchMode;
   use crate::launch::presets::{NamedPreset, Presets};
 
@@ -229,11 +230,11 @@ mod tests {
     p
   }
 
-  fn id(path: &str, tag: u8) -> ModelId {
-    ModelId {
+  fn id(path: &str, tag: u8) -> ModelIdentity {
+    ModelIdentity::Gguf(ModelId {
       path: PathBuf::from(path),
       header_blake3: [tag; 32],
-    }
+    })
   }
 
   fn fake_params(path: &str) -> LaunchParams {
@@ -383,6 +384,94 @@ mod tests {
       LoadError::Parse { path: p, .. } => assert_eq!(p, path(&dir)),
       other => panic!("expected Parse error, got {other:?}"),
     }
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn legacy_gguf_state_json_loads_into_gguf_identities() {
+    // A state.json written by pre-Phase-2 code: every `id` is a bare
+    // ModelId object `{path, header_blake3}` with no enum tag. The
+    // untagged `ModelIdentity` must load each one as `Gguf` — the
+    // no-migration guarantee for existing users (R12).
+    let dir = temp_state_dir("legacy-load");
+    let legacy = r#"{
+      "favorites": [
+        { "id": { "path": "/models/qwen.gguf", "header_blake3": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      ],
+      "last_params": [],
+      "presets": [],
+      "running": [],
+      "schema_version": 1
+    }"#;
+    fs::write(path(&dir), legacy).unwrap();
+    let s = load(&dir).expect("legacy state.json must load without migration");
+    let fav = s.favorites.iter().next().expect("one favorite");
+    let gguf = fav
+      .id
+      .as_gguf()
+      .expect("a legacy favorite must deserialize as a Gguf identity");
+    assert_eq!(gguf.path.to_string_lossy(), "/models/qwen.gguf");
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn backend_identity_persists_and_reloads_across_every_map() {
+    // A Lemonade-registry identity (no local file) must persist + reload
+    // through favorites / last_params / presets / running alongside GGUF
+    // rows — the persisted-key generalization (R12).
+    use crate::backend::identity::BackendModelId;
+    let dir = temp_state_dir("backend-id");
+    let lemon: ModelIdentity = BackendModelId {
+      backend: "lemonade".into(),
+      name: "Qwen2.5-7B-Instruct-GGUF".into(),
+    }
+    .into();
+    let mut s = DaemonState::default();
+    s.favorites.add(lemon.clone());
+    s.upsert_last_params(lemon.clone(), fake_params("/unused"));
+    let mut presets = Presets::new();
+    presets.upsert(NamedPreset {
+      name: "fast".into(),
+      params: fake_params("/unused"),
+    });
+    s.upsert_presets(lemon.clone(), presets);
+    s.running.push(RunningSnapshot {
+      id: lemon.clone(),
+      pid: 4321,
+      port: 13305,
+      started_at: 1_700_000_001,
+      params: fake_params("/unused"),
+    });
+
+    save(&dir, &s).expect("save");
+    let back = load(&dir).expect("load");
+    assert_eq!(back, s, "backend identity must round-trip every map");
+    assert_eq!(
+      back.last_params[0].id.as_backend().unwrap().name,
+      "Qwen2.5-7B-Instruct-GGUF",
+      "the reloaded identity is the Lemonade registry model"
+    );
+    assert!(back.favorites.contains(&lemon));
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn gguf_identity_stays_wire_compatible_in_state_json() {
+    // A GGUF identity must serialize as a bare `{path, header_blake3}`
+    // object — no untagged-enum variant key — so a new daemon's
+    // state.json is byte-shape-identical to what the pre-Phase-2 code
+    // wrote and read.
+    let dir = temp_state_dir("wire-compat");
+    let mut s = DaemonState::default();
+    s.upsert_last_params(id("/m/a.gguf", 1), fake_params("/m/a.gguf"));
+    save(&dir, &s).unwrap();
+    let raw = fs::read_to_string(path(&dir)).unwrap();
+    assert!(raw.contains("\"path\""), "id keeps the bare path field");
+    assert!(raw.contains("\"header_blake3\""), "id keeps header_blake3");
+    assert!(
+      !raw.contains("\"Gguf\"") && !raw.contains("\"Backend\""),
+      "no enum variant tag may leak into the wire shape: {raw}"
+    );
     fs::remove_dir_all(&dir).ok();
   }
 

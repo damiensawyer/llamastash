@@ -366,6 +366,7 @@ async fn agent_script_round_trip_list_start_status_logs_stop() {
       mode: Some(CliLaunchMode::Chat),
       knobs: llamastash::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
+      backend: None,
       json: false,
     }),
   )
@@ -466,6 +467,7 @@ async fn list_filter_and_unknown_ref_exit_codes() {
       mode: Some(CliLaunchMode::Chat),
       knobs: llamastash::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
+      backend: None,
       json: false,
     }),
   )
@@ -749,6 +751,7 @@ async fn start_preset_chain_seeds_supervisor_with_saved_params() {
       mode: Some(CliLaunchMode::Chat),
       knobs: llamastash::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
+      backend: None,
       json: false,
     }),
   )
@@ -800,6 +803,7 @@ async fn start_ctx_above_native_succeeds_and_duplicate_launch_uses_new_port() {
       mode: Some(CliLaunchMode::Chat),
       knobs: llamastash::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
+      backend: None,
       json: false,
     }),
   )
@@ -825,6 +829,7 @@ async fn start_ctx_above_native_succeeds_and_duplicate_launch_uses_new_port() {
       mode: Some(CliLaunchMode::Chat),
       knobs: llamastash::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
+      backend: None,
       json: false,
     }),
   )
@@ -872,6 +877,7 @@ async fn logs_follow_returns_daemon_unreachable_when_daemon_dies() {
       mode: Some(CliLaunchMode::Chat),
       knobs: llamastash::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
+      backend: None,
       json: false,
     }),
   )
