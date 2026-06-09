@@ -76,7 +76,7 @@ async fn handle_start(
   cli: &Cli,
   config: &Config,
 ) -> Result<()> {
-  let opts = build_options(
+  let mut opts = build_options(
     state_dir,
     proxy_port,
     ollama_compat,
@@ -86,6 +86,11 @@ async fn handle_start(
     cli,
     config,
   )?;
+  // Provision the proxy bearer key when a LAN bind is requested. Runs
+  // in the parent (or the foreground process) so the generated key is
+  // printed to the user's terminal; the detached child re-reads it
+  // from config. No-op for loopback / pre-set key / --insecure-no-auth.
+  provision_proxy_key(&mut opts, cli)?;
   if foreground {
     // `--foreground` (or `-f`) keeps the daemon attached to the
     // controlling terminal. Print a one-line notice up front so the
@@ -150,6 +155,103 @@ fn print_already_running(pid: i32) {
     crate::cli::colors::dim("daemon: already running"),
     crate::cli::colors::dim("pid"),
     console::style(pid.to_string()).bold(),
+  );
+}
+
+/// Provision the proxy bearer key when a non-loopback bind is
+/// requested. Runs in the CLI parent (and the foreground path) so the
+/// generated key reaches the user's terminal. No-op for a loopback
+/// bind, when a key is already set (config or `LLAMASTASH_PROXY_API_KEY`),
+/// or when `--insecure-no-auth` waives auth. Otherwise it generates a
+/// key, persists `proxy.api_key` to `config.yaml` (atomic, mode 0600),
+/// sets it on `opts`, and prints it once.
+///
+/// Idempotent across the detached re-exec: the child re-reads the now-
+/// persisted key from config, so this short-circuits without
+/// regenerating or reprinting.
+fn provision_proxy_key(opts: &mut DaemonOptions, cli: &Cli) -> Result<()> {
+  let host = opts.proxy.effective_host();
+  // Loopback needs no key; a configured / env key is used as-is (and an
+  // env key is deliberately never written back to disk).
+  if host.is_loopback() || opts.proxy.api_key.is_some() {
+    return Ok(());
+  }
+  let port = opts.proxy.effective_port();
+  if opts.proxy.insecure_no_auth {
+    eprintln!(
+      "{}",
+      crate::cli::colors::warning(&format!(
+        "proxy: binding {host}:{port} with NO authentication (--insecure-no-auth). \
+         Anyone who can reach this address can use your models — trusted networks only."
+      ))
+    );
+    return Ok(());
+  }
+  let key = crate::proxy::ProxyApiKey::generate();
+  let key_str = key.as_str().to_string();
+  opts.proxy.api_key = Some(key_str.clone());
+  match crate::config::config_path(cli.config.clone()) {
+    Some(path) => {
+      if let Err(e) =
+        crate::config::writer::merge_and_write(&path, proxy_api_key_additions(&key_str))
+      {
+        log::warn!("failed to persist generated proxy api_key: {e}");
+        eprintln!(
+          "{}",
+          crate::cli::colors::warning(
+            "proxy: could not save the API key to config; it will be regenerated next start",
+          )
+        );
+      }
+    }
+    None => log::warn!("no writable config path; generated proxy api_key was not persisted"),
+  }
+  print_provisioned_key(host, port, &key_str);
+  Ok(())
+}
+
+/// Build the `{ proxy: { api_key: <key> } }` YAML fragment the config
+/// merge persists. Nested so the recursive merge sets only `api_key`
+/// and preserves the user's other `proxy` keys.
+fn proxy_api_key_additions(key: &str) -> serde_yaml::Value {
+  let mut proxy = serde_yaml::Mapping::new();
+  proxy.insert(
+    serde_yaml::Value::String("api_key".into()),
+    serde_yaml::Value::String(key.to_string()),
+  );
+  let mut root = serde_yaml::Mapping::new();
+  root.insert(
+    serde_yaml::Value::String("proxy".into()),
+    serde_yaml::Value::Mapping(proxy),
+  );
+  serde_yaml::Value::Mapping(root)
+}
+
+/// One-time banner shown when a LAN proxy key is auto-generated. The
+/// key prints to stdout exactly once (it's saved to config for reuse).
+fn print_provisioned_key(host: IpAddr, port: u16, key: &str) {
+  println!(
+    "{}",
+    crate::cli::colors::success(&format!("proxy: LAN access enabled on {host}:{port}"))
+  );
+  println!(
+    "{}",
+    crate::cli::colors::dim("proxy: generated an API key (saved to your config, shown once):")
+  );
+  println!("    {key}");
+  // For 0.0.0.0 / :: the user must substitute the box's LAN IP; show a
+  // bearer-token usage hint either way.
+  let example_host = if host.is_unspecified() {
+    "<lan-ip>".to_string()
+  } else {
+    host.to_string()
+  };
+  println!(
+    "{}",
+    crate::cli::colors::dim(&format!(
+      "    use it as a bearer token, e.g.\n    \
+       curl http://{example_host}:{port}/v1/models -H \"Authorization: Bearer {key}\""
+    ))
   );
 }
 
@@ -1041,6 +1143,89 @@ mod tests {
     let opts = opts.expect("build_options");
     assert_eq!(opts.proxy.host, Some("0.0.0.0".parse().unwrap()));
     assert_eq!(opts.proxy.api_key.as_deref(), Some("sk-llamastash-fromenv"));
+  }
+
+  /// Build a non-loopback `DaemonOptions` + a `Cli` pinned to
+  /// `config_path` so `provision_proxy_key` reads/writes a temp config.
+  fn non_loopback_opts(config_path: &std::path::Path) -> (DaemonOptions, Cli) {
+    let mut opts = DaemonOptions::from_defaults().expect("defaults");
+    opts.proxy.host = Some("0.0.0.0".parse().unwrap());
+    let cli = parse_cli(&["--config", config_path.to_str().unwrap(), "daemon", "start"]);
+    (opts, cli)
+  }
+
+  #[test]
+  fn provision_generates_persists_and_sets_key_for_lan() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.yaml");
+    let (mut opts, cli) = non_loopback_opts(&cfg);
+    assert!(opts.proxy.api_key.is_none());
+    provision_proxy_key(&mut opts, &cli).expect("provision");
+    let key = opts.proxy.api_key.clone().expect("key set on opts");
+    assert!(key.starts_with("sk-llamastash-"), "unexpected key: {key}");
+    let written = std::fs::read_to_string(&cfg).expect("config written");
+    assert!(written.contains(&key), "key not persisted: {written}");
+    assert!(written.contains("api_key"));
+  }
+
+  #[test]
+  fn provision_is_idempotent_when_key_already_set() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.yaml");
+    let (mut opts, cli) = non_loopback_opts(&cfg);
+    provision_proxy_key(&mut opts, &cli).expect("first");
+    let first = opts.proxy.api_key.clone().unwrap();
+    let first_file = std::fs::read_to_string(&cfg).unwrap();
+    // Second call: key already present → no regeneration, no rewrite.
+    provision_proxy_key(&mut opts, &cli).expect("second");
+    assert_eq!(opts.proxy.api_key.as_deref(), Some(first.as_str()));
+    assert_eq!(std::fs::read_to_string(&cfg).unwrap(), first_file);
+  }
+
+  #[test]
+  fn provision_insecure_generates_no_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.yaml");
+    let (mut opts, cli) = non_loopback_opts(&cfg);
+    opts.proxy.insecure_no_auth = true;
+    provision_proxy_key(&mut opts, &cli).expect("provision");
+    assert!(
+      opts.proxy.api_key.is_none(),
+      "insecure must not generate a key"
+    );
+    assert!(!cfg.exists(), "insecure must not write config");
+  }
+
+  #[test]
+  fn provision_loopback_is_noop() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.yaml");
+    // host stays None → loopback default.
+    let mut opts = DaemonOptions::from_defaults().expect("defaults");
+    let cli = parse_cli(&["--config", cfg.to_str().unwrap(), "daemon", "start"]);
+    provision_proxy_key(&mut opts, &cli).expect("provision");
+    assert!(opts.proxy.api_key.is_none());
+    assert!(!cfg.exists(), "loopback must not write config");
+  }
+
+  #[test]
+  fn provision_preserves_existing_proxy_keys_in_config() {
+    // A recursive merge must keep the user's other proxy settings.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.yaml");
+    std::fs::write(&cfg, "proxy:\n  port: 18080\n  ollama_compat: true\n").unwrap();
+    let (mut opts, cli) = non_loopback_opts(&cfg);
+    provision_proxy_key(&mut opts, &cli).expect("provision");
+    let written = std::fs::read_to_string(&cfg).unwrap();
+    assert!(
+      written.contains("18080"),
+      "existing port dropped: {written}"
+    );
+    assert!(
+      written.contains("ollama_compat"),
+      "existing flag dropped: {written}"
+    );
+    assert!(written.contains(opts.proxy.api_key.as_ref().unwrap().as_str()));
   }
 
   #[test]
