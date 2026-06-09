@@ -326,12 +326,18 @@ pub fn find_mmproj(model_path: &Path) -> Option<PathBuf> {
 fn detect_multimodal(model_path: &Path) -> Option<Multimodal> {
   let projector = find_mmproj(model_path)?;
   let read = read_path(&projector, HeaderReadOptions::default()).ok()?;
+  // clip flags are GGUF booleans, but some projector writers encode them
+  // as a uint8 0/1. Accept either so an audio-only projector isn't
+  // misread as the vision default.
   let flag = |key: &str| {
     read
       .header
       .metadata
       .get(key)
-      .and_then(|v| v.as_bool())
+      .map(|v| {
+        v.as_bool()
+          .unwrap_or_else(|| v.as_u64().is_some_and(|n| n != 0))
+      })
       .unwrap_or(false)
   };
   let vision = flag("clip.has_vision_encoder");
@@ -1261,6 +1267,29 @@ mod tests {
       Some(Multimodal {
         vision: true,
         audio: false
+      })
+    );
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn detect_multimodal_reads_int_encoded_clip_flags() {
+    // Some projector writers encode the clip flags as uint8 0/1 rather
+    // than GGUF bool; an audio-only projector must still read as audio
+    // (not fall through to the vision default).
+    use crate::gguf::header::GgufValue;
+    let dir = temp_dir("mm-int");
+    fs::write(dir.join("model.gguf"), build_minimal_gguf("llama")).unwrap();
+    let proj = crate::gguf::test_fixtures::FixtureBuilder::new()
+      .with_kv("clip.has_vision_encoder", GgufValue::U8(0))
+      .with_kv("clip.has_audio_encoder", GgufValue::U8(1))
+      .build();
+    fs::write(dir.join("mmproj-model.gguf"), proj).unwrap();
+    assert_eq!(
+      detect_multimodal(&dir.join("model.gguf")),
+      Some(Multimodal {
+        vision: false,
+        audio: true
       })
     );
     fs::remove_dir_all(&dir).ok();
