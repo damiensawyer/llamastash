@@ -6,7 +6,8 @@
 //! or NPU needed).
 //!
 //! Per-model routing (a Lemonade model in the catalog + proxy forwarding to
-//! the umbrella) is Phase 2b and not exercised here.
+//! the umbrella) is exercised in `lemonade_route_test.rs`.
+#![cfg(feature = "test-fixtures")]
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
