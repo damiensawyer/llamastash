@@ -456,6 +456,59 @@ async fn status_response(ctx: &MethodContext) -> Value {
     });
     models.push(row);
   }
+  // Delegated Lemonade models — the registry holds only the shared
+  // umbrella (one row whose path is the `lemond` binary), but every
+  // model made resident via `start_model` persisted a RunningSnapshot
+  // at the umbrella's port. Project each as a first-class row: the
+  // synthetic `lemonade://<name>` path matches the catalog entry, so
+  // the TUI list pane and `llamastash list` show the *model* as
+  // running, not just the umbrella. State mirrors the umbrella's — it
+  // serves every resident model, so its readiness is theirs. Rows are
+  // emitted only while the umbrella is registered; with it gone the
+  // snapshots are unreachable leftovers (the boot sweep reaps them).
+  if let Some(umbrella) = ctx
+    .supervisors
+    .get(&crate::backend::lemonade::umbrella_launch_id())
+    .await
+  {
+    let ustate_obj = flatten_state(&umbrella.state().await);
+    let upid = umbrella.pid().await;
+    for running_snap in ctx.state.snapshot().await.running.iter() {
+      let Some(backend_id) = lemonade_snapshot_id(running_snap) else {
+        continue;
+      };
+      let synthetic_id = crate::gguf::identity::ModelId {
+        path: running_snap.params.model_path.clone(),
+        header_blake3: [0u8; 32],
+      };
+      let params_json = json!({
+        "model_path": running_snap.params.model_path,
+        "mode": running_snap.params.mode.label(),
+        "ctx": running_snap.params.ctx,
+        "port": running_snap.params.port,
+        "reasoning": running_snap.params.reasoning,
+        "knobs": &running_snap.params.knobs,
+        "extras": running_snap.params.extras
+          .iter()
+          .map(|s| s.to_string_lossy().into_owned())
+          .collect::<Vec<_>>(),
+      });
+      models.push(json!({
+        "launch_id": crate::backend::lemonade::delegated_launch_id(&backend_id.name),
+        "id": synthetic_id,
+        "port": running_snap.port,
+        "mode": running_snap.params.mode.label(),
+        "pid": upid,
+        "ready_at": running_snap.started_at,
+        "state": ustate_obj.clone(),
+        "params": params_json,
+        // Resource readings stay on the umbrella's own row — mirroring
+        // its RSS onto every resident model would double-count it.
+        "latest_rss_bytes": Value::Null,
+        "latest_cpu_pct": Value::Null,
+      }));
+    }
+  }
   // External — read-only rows for `llama-server` processes the
   // daemon doesn't own. Populated by the startup orphan sweep;
   // mirrors the plan's "External read-only" surface (plan: list-
@@ -607,15 +660,29 @@ async fn backends_status(ctx: &MethodContext) -> Value {
     obj.insert("enabled".into(), json!(ctx.lemonade.enabled));
     obj.insert("umbrella".into(), json!(lemonade_umbrella_state(ctx).await));
   }
-  json!([
-    backend_row(
-      llama.id(),
-      llama.lifecycle().label(),
-      llama_installed,
-      llama_acc.labels()
-    ),
-    lemonade_row,
-  ])
+  // Each row carries its resolved `binary` path when one exists, so
+  // clients (the TUI's Daemon panel server row) can list every enabled
+  // backend's executable generically — no per-backend client code.
+  let mut llama_row = backend_row(
+    llama.id(),
+    llama.lifecycle().label(),
+    llama_installed,
+    llama_acc.labels(),
+  );
+  let llama_binary = ctx.launch.as_ref().map(|e| e.binary.display().to_string());
+  set_backend_binary(&mut llama_row, llama_binary);
+  let lemonade_binary =
+    crate::backend::lemonade::resolve_lemond_binary(&ctx.lemonade).map(|b| b.display().to_string());
+  set_backend_binary(&mut lemonade_row, lemonade_binary);
+  json!([llama_row, lemonade_row])
+}
+
+/// Attach a backend row's resolved `binary` path; absent when no binary
+/// resolves so clients can tell "backend known" from "executable found".
+fn set_backend_binary(row: &mut Value, binary: Option<String>) {
+  if let (Some(obj), Some(bin)) = (row.as_object_mut(), binary) {
+    obj.insert("binary".into(), json!(bin));
+  }
 }
 
 /// The managed `lemond` umbrella's state for `status`, distinct from the
@@ -777,6 +844,11 @@ async fn stop_model_handler(
 ) -> Result<Value, ErrorObject> {
   let parsed: StopParams = parse_params(params)?;
   check_grace_secs(parsed.grace_secs)?;
+  // A delegated Lemonade model is not a supervised child — "stopping" it
+  // means unloading it from the shared umbrella, which keeps running.
+  if let Some(name) = crate::backend::lemonade::delegated_model_name(parsed.launch_id.as_str()) {
+    return stop_delegated_lemonade(ctx, &parsed.launch_id, name).await;
+  }
   let model = ctx
     .supervisors
     .get(&parsed.launch_id)
@@ -793,17 +865,84 @@ async fn stop_model_handler(
   // Drop the running snapshot keyed by `(id, port)` so a second
   // launch of the same GGUF on a different port keeps its row.
   let stopped_id: ModelIdentity = model.id().clone().into();
+  let stopped_umbrella = parsed.launch_id == crate::backend::lemonade::umbrella_launch_id();
   ctx
     .state
     .mutate(|s| {
       s.running
-        .retain(|r| !(r.id == stopped_id && r.port == stopped_port))
+        .retain(|r| !(r.id == stopped_id && r.port == stopped_port));
+      // Stopping the umbrella takes every delegated model down with it —
+      // their snapshots would otherwise linger as ghost rows the next
+      // `ensure_umbrella` (fresh process, nothing resident) can't honor.
+      if stopped_umbrella {
+        s.running.retain(|r| lemonade_snapshot_id(r).is_none());
+      }
     })
     .await;
   Ok(json!({
     "launch_id": parsed.launch_id,
     "state": flatten_state(&final_state),
   }))
+}
+
+/// Stop one delegated Lemonade model: best-effort unload from the shared
+/// umbrella, then drop its running snapshot so `status` stops emitting the
+/// row. The umbrella itself keeps running (stop it via its own
+/// `lemonade-umbrella` launch id). An unload refusal is logged but doesn't
+/// fail the stop — the snapshot is the daemon's own bookkeeping, and a
+/// model the umbrella already evicted should always be clearable.
+async fn stop_delegated_lemonade(
+  ctx: &MethodContext,
+  launch_id: &LaunchId,
+  name: &str,
+) -> Result<Value, ErrorObject> {
+  if let Some(umbrella) = ctx
+    .supervisors
+    .get(&crate::backend::lemonade::umbrella_launch_id())
+    .await
+  {
+    match crate::backend::lemonade::LemonadeClient::new(umbrella.port()) {
+      Ok(client) => {
+        if let Err(e) = client.unload(name).await {
+          log::warn!("lemonade: unload of `{name}` failed (dropping the row anyway): {e}");
+        }
+      }
+      Err(e) => log::warn!("lemonade: could not build client to unload `{name}`: {e}"),
+    }
+  }
+  let removed = ctx
+    .state
+    .mutate(|s| {
+      let before = s.running.len();
+      s.running
+        .retain(|r| lemonade_snapshot_id(r).map(|b| b.name.as_str()) != Some(name));
+      before != s.running.len()
+    })
+    .await;
+  if !removed {
+    return Err(ErrorObject::new(
+      ErrorCode::InvalidParams,
+      format!("unknown launch_id: {}", launch_id.as_str()),
+    ));
+  }
+  Ok(json!({
+    "launch_id": launch_id,
+    "state": flatten_state(&ManagedState::Stopped),
+  }))
+}
+
+/// The lemonade [`BackendModelId`](crate::backend::identity::BackendModelId)
+/// behind a running snapshot, or `None` for any other identity (GGUF, other
+/// backends). The one predicate shared by the `status` projection and both
+/// `stop_model` snapshot sweeps, so "is this a delegated lemonade row" can't
+/// drift between them.
+fn lemonade_snapshot_id(
+  snap: &crate::daemon::state_store::RunningSnapshot,
+) -> Option<&crate::backend::identity::BackendModelId> {
+  snap
+    .id
+    .as_backend()
+    .filter(|b| b.backend == crate::backend::lemonade::LEMONADE_BACKEND_ID)
 }
 
 /// Flatten `ManagedState` to a JSON object whose `state` field is a
@@ -1059,16 +1198,18 @@ async fn logs_tail_handler(
   params: Option<Value>,
 ) -> Result<Value, ErrorObject> {
   let parsed: LogsTailParams = parse_params(params)?;
-  let model = ctx
-    .supervisors
-    .get(&parsed.launch_id)
-    .await
-    .ok_or_else(|| {
-      ErrorObject::new(
-        ErrorCode::InvalidParams,
-        format!("unknown launch_id: {}", parsed.launch_id.as_str()),
-      )
-    })?;
+  // A delegated Lemonade model has no process of its own — its log *is*
+  // the shared umbrella's log, so tail that one.
+  let lookup_id = match crate::backend::lemonade::delegated_model_name(parsed.launch_id.as_str()) {
+    Some(_) => crate::backend::lemonade::umbrella_launch_id(),
+    None => parsed.launch_id.clone(),
+  };
+  let model = ctx.supervisors.get(&lookup_id).await.ok_or_else(|| {
+    ErrorObject::new(
+      ErrorCode::InvalidParams,
+      format!("unknown launch_id: {}", parsed.launch_id.as_str()),
+    )
+  })?;
   let tail = model.tail(parsed.lines).await;
   Ok(json!({
     "launch_id": parsed.launch_id,
@@ -2472,6 +2613,95 @@ mod tests {
     let proxy = proxy.get("proxy").expect("proxy block present");
     assert_eq!(proxy["host"], json!("0.0.0.0"));
     assert_eq!(proxy["auth"], json!("enforced"));
+  }
+
+  /// A delegated-lemonade snapshot the way `start_delegated_lemonade`
+  /// persists one: Backend identity + the synthetic `lemonade://` path.
+  fn lemonade_running_snapshot(
+    name: &str,
+    port: u16,
+  ) -> crate::daemon::state_store::RunningSnapshot {
+    crate::daemon::state_store::RunningSnapshot {
+      id: crate::backend::identity::ModelIdentity::Backend(
+        crate::backend::identity::BackendModelId {
+          backend: crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
+          name: name.to_string(),
+        },
+      ),
+      pid: 0,
+      port,
+      started_at: 0,
+      params: LaunchParams::new(
+        PathBuf::from(format!("lemonade://{name}")),
+        LaunchMode::Chat,
+      ),
+    }
+  }
+
+  #[tokio::test]
+  async fn status_omits_delegated_lemonade_rows_without_umbrella() {
+    // A snapshot with no registered umbrella is an unreachable leftover
+    // (umbrella crashed / was stopped): emitting a row for it would
+    // offer a stop affordance against nothing. The happy path (umbrella
+    // up → rows emitted) is covered in `lemonade_umbrella_test.rs`.
+    let c = ctx();
+    c.state
+      .mutate(|s| s.running.push(lemonade_running_snapshot("Qwen-X", 13305)))
+      .await;
+    let resp = dispatch_request(&c, Request::new(1, "status", None)).await;
+    let body = resp.result.expect("status result");
+    let models = body["models"].as_array().expect("models array");
+    assert!(
+      !models.iter().any(|m| m["launch_id"]
+        .as_str()
+        .unwrap_or("")
+        .starts_with("lemonade:")),
+      "no delegated rows without a registered umbrella: {models:?}"
+    );
+  }
+
+  #[tokio::test]
+  async fn stop_delegated_lemonade_clears_snapshot_even_without_umbrella() {
+    // The umbrella is gone but the snapshot lingers (e.g. it crashed):
+    // the row must still be clearable — the unload is best-effort, the
+    // bookkeeping removal is the contract.
+    let c = ctx();
+    c.state
+      .mutate(|s| s.running.push(lemonade_running_snapshot("Qwen-X", 13305)))
+      .await;
+    let resp = dispatch_request(
+      &c,
+      Request::new(
+        1,
+        "stop_model",
+        Some(json!({"launch_id": "lemonade:Qwen-X"})),
+      ),
+    )
+    .await;
+    let body = resp.result.expect("delegated stop must succeed");
+    assert_eq!(body["state"]["state"], json!("stopped"));
+    let still_there = c
+      .state
+      .snapshot()
+      .await
+      .running
+      .iter()
+      .any(|r| lemonade_snapshot_id(r).is_some());
+    assert!(!still_there, "snapshot must be dropped");
+    // Second stop: the row is unknown now — same error a bogus
+    // supervised launch_id gets.
+    let second = dispatch_request(
+      &c,
+      Request::new(
+        2,
+        "stop_model",
+        Some(json!({"launch_id": "lemonade:Qwen-X"})),
+      ),
+    )
+    .await;
+    let err = second.error.expect("double-stop must error");
+    assert_eq!(err.code, ErrorCode::InvalidParams.as_i32());
+    assert!(err.message.contains("lemonade:Qwen-X"));
   }
 
   #[tokio::test]

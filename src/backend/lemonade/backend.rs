@@ -98,20 +98,15 @@ impl LemonadeBackend {
 /// — both must produce an *identical* spec so [`super::ensure_umbrella`]
 /// treats them as the one shared umbrella.
 pub fn umbrella_process_spec(port: u16, binary: PathBuf, probe: ProbeOptions) -> ProcessLaunchSpec {
-  // `lemond <DIR> --host 127.0.0.1 --port <port>`: DIR is the working
-  // directory holding config.json/bin/ — default to the binary's own
-  // directory (typically the user's Lemonade install dir). --host/--port
-  // override config.json so llamastash owns the loopback binding.
-  // `Path::parent` of a bare filename is `Some("")`, not `None`, so guard
-  // the empty case too — `lemond` needs a real working directory.
-  // `resolve_lemond_binary` canonicalizes the resolved path, so in practice
-  // `binary` is absolute and parent is the real install dir.
-  let work_dir = match binary.parent() {
-    Some(p) if !p.as_os_str().is_empty() => p.as_os_str().to_owned(),
-    _ => OsString::from("."),
-  };
+  // `lemond --host 127.0.0.1 --port <port>`: --host/--port override
+  // config.json so llamastash owns the loopback binding. `lemond`'s
+  // positional `cache_dir` (config.json + model data, default
+  // `~/.cache/lemonade`) is deliberately NOT passed: the default is shared
+  // with any manual `lemond` runs, so models download once. Passing the
+  // binary's parent here (an earlier revision did) breaks system installs —
+  // `lemond` at `/usr/bin/lemond` would try to write
+  // `/usr/bin/config.json.tmp` and die on the read-only dir.
   let argv = vec![
-    work_dir,
     OsString::from("--host"),
     OsString::from("127.0.0.1"),
     OsString::from("--port"),
@@ -143,10 +138,9 @@ pub fn umbrella_process_spec(port: u16, binary: PathBuf, probe: ProbeOptions) ->
 /// "backend unavailable" rather than an error to recover from.
 ///
 /// The path is canonicalized so a relative `lemonade.binary` (or a relative
-/// PATH entry) still yields an absolute path: [`umbrella_process_spec`] derives
-/// the umbrella's working dir from the binary's parent, which must be the real
-/// install dir (config.json / bin/ live there), not a path relative to the
-/// daemon's CWD.
+/// PATH entry) still yields an absolute path: the umbrella is spawned and
+/// registered under this path (it doubles as the supervisor's synthetic model
+/// id), so it must not depend on the daemon's CWD.
 pub fn resolve_lemond_binary(cfg: &crate::config::loader::LemonadeConfig) -> Option<PathBuf> {
   // `is_file()` already confirmed the target exists, so canonicalize should
   // succeed; fall back to the verbatim path if it somehow doesn't.
@@ -328,10 +322,10 @@ mod tests {
       .iter()
       .map(|s| s.to_string_lossy().into_owned())
       .collect();
-    assert_eq!(
-      argv,
-      vec!["/opt/lemonade", "--host", "127.0.0.1", "--port", "41100"]
-    );
+    // No positional cache_dir: lemond's own default (`~/.cache/lemonade`)
+    // is shared with manual runs; the binary's parent may be read-only
+    // (`/usr/bin` on a system install).
+    assert_eq!(argv, vec!["--host", "127.0.0.1", "--port", "41100"]);
     // Readiness is the umbrella liveness endpoint, not /health.
     assert_eq!(
       spec.umbrella.readiness,
@@ -352,22 +346,6 @@ mod tests {
     assert_eq!(backend.backend, "lemonade");
     assert_eq!(backend.name, "Llama-3.1-8B");
     assert!(id.as_gguf().is_none());
-  }
-
-  #[test]
-  fn umbrella_work_dir_defaults_to_dot_for_bare_binary() {
-    let b = LemonadeBackend::new();
-    let p = LaunchParams::new(PathBuf::from("M"), LaunchMode::Chat);
-    let spec =
-      manager_of(b.prepare_launch(&p, 8000, PathBuf::from("lemond"), ProbeOptions::default()));
-    assert_eq!(
-      spec
-        .umbrella
-        .argv
-        .first()
-        .map(|s| s.to_string_lossy().into_owned()),
-      Some(".".to_string())
-    );
   }
 
   #[test]

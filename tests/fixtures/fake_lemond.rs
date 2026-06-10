@@ -11,9 +11,10 @@
 //! - `POST /api/v1/chat/completions` → 200 OpenAI-shaped chat (proxy route test)
 //!
 //! Args mirror the real `lemond` invocation enough for the supervisor's
-//! argv to be portable: a positional working-dir (ignored) plus
-//! `--host <ADDR>` / `--port <N>`. CI has no real `lemond`, so the
-//! managed-multiplexer test runs against this binary.
+//! argv to be portable: `--host <ADDR>` / `--port <N>`, plus an optional
+//! positional cache-dir (accepted and ignored — the supervisor no longer
+//! passes one, but the real `lemond` would). CI has no real `lemond`, so
+//! the managed-multiplexer test runs against this binary.
 
 use std::env;
 use std::sync::Mutex;

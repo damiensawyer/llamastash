@@ -50,10 +50,18 @@ pub enum LemonadeError {
   Api(String),
 }
 
-/// One model row from `GET /api/v1/models` (OpenAI list shape).
+/// One model row from `GET /api/v1/models` (OpenAI list shape). Beyond
+/// the OpenAI `id`, `lemond` decorates rows with capability `labels`
+/// (`transcription`, `embedding`, `vision`, …) and an approximate `size`
+/// in GB — enough for discovery to project a mode hint and size for a
+/// registry model that has no local file to read.
 #[derive(Debug, Clone, Deserialize)]
-struct ModelEntry {
-  id: String,
+pub struct ModelEntry {
+  pub id: String,
+  #[serde(default)]
+  pub labels: Vec<String>,
+  #[serde(default)]
+  pub size: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +144,19 @@ impl LemonadeClient {
 
   /// `GET /api/v1/models` — the registry model names (OpenAI list).
   pub async fn list_models(&self) -> Result<Vec<String>, LemonadeError> {
+    Ok(
+      self
+        .list_model_entries()
+        .await?
+        .into_iter()
+        .map(|m| m.id)
+        .collect(),
+    )
+  }
+
+  /// `GET /api/v1/models` — the full rows (name + labels + size).
+  /// Discovery uses the labels to derive a mode hint per model.
+  pub async fn list_model_entries(&self) -> Result<Vec<ModelEntry>, LemonadeError> {
     let resp = self
       .http
       .get(format!("{}/api/v1/models", self.base))
@@ -144,7 +165,7 @@ impl LemonadeClient {
       .map_err(transport)?;
     ensure_success(&resp)?;
     let list: ModelList = decode(resp).await?;
-    Ok(list.data.into_iter().map(|m| m.id).collect())
+    Ok(list.data)
   }
 
   /// `POST /api/v1/load {model_name}` — preload a model into memory.

@@ -12,8 +12,9 @@
 
 use std::path::PathBuf;
 
-use crate::backend::lemonade::LemonadeClient;
+use crate::backend::lemonade::{LemonadeClient, ModelEntry};
 use crate::discovery::{DiscoveredModel, ModelSource};
+use crate::gguf::metadata::{ModeHint, ModelMetadata, Quant};
 
 /// Synthetic path for a Lemonade-registry model (no local file). Keeps the
 /// catalog's path-keyed map unique per model; the user-facing name lives in
@@ -27,13 +28,47 @@ fn synthetic_path(name: &str) -> PathBuf {
   ))
 }
 
-/// Project one Lemonade registry name into a catalog row.
-fn row_for(name: &str) -> DiscoveredModel {
+/// Mode hint from `lemond`'s capability labels. Registry rows have no
+/// GGUF header to read, but the labels say what the model *is*:
+/// `embedding` / `reranking` map onto llamastash's modes;
+/// `transcription` / `tts` have no llamastash surface yet, so they stay
+/// `Unknown` (the TUI then offers no chat tab for a Whisper model);
+/// everything else is an LLM → chat.
+fn mode_hint_from_labels(labels: &[String]) -> ModeHint {
+  let has = |want: &str| labels.iter().any(|l| l.eq_ignore_ascii_case(want));
+  if has("embedding") {
+    ModeHint::Embedding
+  } else if has("reranking") || has("rerank") {
+    ModeHint::Rerank
+  } else if has("transcription") || has("tts") {
+    ModeHint::Unknown
+  } else {
+    ModeHint::Chat
+  }
+}
+
+/// Project one Lemonade registry row into a catalog row. The metadata
+/// block is synthesized from what `lemond` reports (labels → mode hint,
+/// `size` GB → weights bytes); GGUF-header fields stay empty.
+fn row_for(entry: &ModelEntry) -> DiscoveredModel {
+  let name = entry.id.as_str();
   DiscoveredModel {
     path: synthetic_path(name),
     parent: PathBuf::from(crate::backend::lemonade::LEMONADE_PATH_SCHEME),
     source: ModelSource::Lemonade,
-    metadata: None,
+    metadata: Some(ModelMetadata {
+      arch: None,
+      total_parameters: None,
+      parameter_label: None,
+      // No GGUF header to read a quant tag from.
+      quant: Quant::Unknown(0),
+      native_ctx: None,
+      chat_template: None,
+      tokenizer_kind: None,
+      reasoning_hint: false,
+      mode_hint: mode_hint_from_labels(&entry.labels),
+      weights_bytes: entry.size.map(|gb| (gb * 1e9) as u64),
+    }),
     parse_error: None,
     split_siblings: Vec::new(),
     display_label: Some(name.to_string()),
@@ -53,8 +88,8 @@ pub async fn enumerate(port: u16) -> Vec<DiscoveredModel> {
       return Vec::new();
     }
   };
-  match client.list_models().await {
-    Ok(names) => names.iter().map(|n| row_for(n)).collect(),
+  match client.list_model_entries().await {
+    Ok(entries) => entries.iter().map(row_for).collect(),
     Err(e) => {
       log::debug!("lemonade discovery: list_models failed (umbrella down?): {e}");
       Vec::new()
@@ -104,13 +139,42 @@ mod tests {
     assert_eq!(names, vec!["Qwen2.5-0.5B-Instruct", "Llama-3.1-8B"]);
     // Every row is tagged Lemonade with a synthetic (file-less) path.
     assert!(rows.iter().all(|r| r.source == ModelSource::Lemonade));
-    assert!(rows.iter().all(|r| r.metadata.is_none()));
     assert_eq!(
       rows[0].path,
       PathBuf::from("lemonade://Qwen2.5-0.5B-Instruct")
     );
     // The backend tag derives from the source (R13/R14).
     assert_eq!(rows[0].source.backend_id(), "lemonade");
+    // No labels → an LLM → chat hint.
+    assert_eq!(rows[0].metadata.as_ref().unwrap().mode_hint, ModeHint::Chat);
+  }
+
+  #[tokio::test]
+  async fn enumerate_maps_labels_and_size_into_metadata() {
+    // Mirrors a real lemond `/api/v1/models` row set: an LLM with
+    // capability labels, a Whisper transcription model, an embedder.
+    let port = spawn_fake_models(
+      r#"{"object":"list","data":[
+        {"id":"qwen3.5-4b-FLM","labels":["vision","reasoning","tool-calling"],"size":3.2},
+        {"id":"Whisper-Tiny","labels":["transcription","realtime-transcription"]},
+        {"id":"nomic-embed","labels":["embedding"]}
+      ]}"#,
+    )
+    .await;
+    let rows = enumerate(port).await;
+    let hint = |i: usize| rows[i].metadata.as_ref().unwrap().mode_hint;
+    assert_eq!(hint(0), ModeHint::Chat, "LLM labels → chat");
+    assert_eq!(
+      hint(1),
+      ModeHint::Unknown,
+      "transcription has no llamastash mode surface"
+    );
+    assert_eq!(hint(2), ModeHint::Embedding);
+    assert_eq!(
+      rows[0].metadata.as_ref().unwrap().weights_bytes,
+      Some(3_200_000_000),
+      "size GB → weights bytes for the SIZE column"
+    );
   }
 
   #[tokio::test]

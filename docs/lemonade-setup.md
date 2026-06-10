@@ -50,9 +50,9 @@ Enable the backend with any **one** of these (they OR together):
   lemonade:
     enabled: true
     # Optional: explicit *absolute* path to the lemond binary. If omitted,
-    # LlamaStash looks for `lemond` (or `lemonade`) on your PATH. Prefer an
-    # absolute path — LlamaStash runs lemond from the binary's own directory
-    # (where its config.json / bin/ live).
+    # LlamaStash looks for `lemond` (or `lemonade`) on your PATH. lemond
+    # keeps its config.json + model data in its own default cache dir
+    # (`~/.cache/lemonade`), shared with any manual lemond runs.
     binary: /opt/lemonade/lemond
     # Optional: the loopback port lemond binds. Defaults to 13305.
     port: 13305

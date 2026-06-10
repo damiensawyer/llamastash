@@ -12,15 +12,21 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use llamastash::backend::identity::{BackendModelId, ModelIdentity};
 use llamastash::backend::lemonade::{
   ensure_umbrella, umbrella_launch_id, LemonadeBackend, LemonadeClient,
 };
 use llamastash::backend::{Backend, LaunchPlan};
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::registry::SupervisorRegistry;
+use llamastash::daemon::shutdown::ShutdownToken;
+use llamastash::daemon::state_store::RunningSnapshot;
 use llamastash::daemon::supervisor::{ManagedModel, ManagedState};
+use llamastash::ipc::methods::{dispatch_request, MethodContext};
+use llamastash::ipc::protocol::Request;
 use llamastash::launch::mode::LaunchMode;
 use llamastash::launch::params::LaunchParams;
+use serde_json::json;
 
 fn fake_lemond_binary() -> PathBuf {
   PathBuf::from(env!("CARGO_BIN_EXE_fake_lemond"))
@@ -147,4 +153,117 @@ async fn ensure_umbrella_is_idempotent() {
   // `first` and `second` are the same reused umbrella — stop it once so the
   // `fake_lemond` child doesn't leak (Windows `cargo test` exit hang).
   first.stop(Duration::from_secs(3)).await;
+}
+
+/// Delegated-model visibility: a model made resident in the umbrella (its
+/// RunningSnapshot persisted, as `start_delegated_lemonade` does) surfaces as
+/// its own `status` row under the `lemonade:<name>` launch id, and
+/// `stop_model` on that id unloads it from the umbrella + drops the row —
+/// while the umbrella itself keeps running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_projects_delegated_models_and_stop_unloads_them() {
+  let logs = unique_temp("delegated");
+  std::fs::create_dir_all(&logs).unwrap();
+  let registry = SupervisorRegistry::new();
+  let port = allocate_port();
+  let umbrella = ensure_umbrella(
+    &registry,
+    port,
+    umbrella_spec(port),
+    logs.join("lemond.log"),
+  )
+  .await
+  .expect("umbrella spawns");
+  wait_ready(&umbrella).await;
+
+  // Share the registry with a MethodContext and persist the snapshot the way
+  // `start_delegated_lemonade` does after a successful preload.
+  let ctx = MethodContext::new(ShutdownToken::new()).with_supervisors(registry);
+  let name = "Qwen2.5-0.5B-Instruct";
+  let client = LemonadeClient::new(port).expect("client");
+  client.load(name).await.expect("preload");
+  let identity = ModelIdentity::Backend(BackendModelId {
+    backend: "lemonade".to_string(),
+    name: name.to_string(),
+  });
+  ctx
+    .state
+    .mutate(|s| {
+      s.running.push(RunningSnapshot {
+        id: identity,
+        pid: 0,
+        port,
+        started_at: 0,
+        params: LaunchParams::new(
+          PathBuf::from(format!("lemonade://{name}")),
+          LaunchMode::Chat,
+        ),
+      })
+    })
+    .await;
+
+  // `status` projects the delegated row: catalog-matching path, the
+  // umbrella's port, state mirrored from the (Ready) umbrella.
+  let resp = dispatch_request(&ctx, Request::new(1, "status", None)).await;
+  let body = resp.result.expect("status result");
+  let models = body["models"].as_array().expect("models array");
+  let row = models
+    .iter()
+    .find(|m| m["launch_id"] == format!("lemonade:{name}"))
+    .expect("delegated lemonade row must be emitted");
+  assert_eq!(row["id"]["path"], format!("lemonade://{name}"));
+  assert_eq!(row["port"], json!(port));
+  assert_eq!(row["state"]["state"], "ready");
+  assert_eq!(row["mode"], "chat");
+
+  // Stop via the delegated id: the umbrella unloads the model (fake_lemond
+  // clears its resident slot) and the row disappears; the umbrella row stays.
+  let resp = dispatch_request(
+    &ctx,
+    Request::new(
+      2,
+      "stop_model",
+      Some(json!({"launch_id": format!("lemonade:{name}")})),
+    ),
+  )
+  .await;
+  let stop_body = resp.result.expect("stop_model result");
+  assert_eq!(stop_body["state"]["state"], "stopped");
+  let health = client.health().await.expect("health");
+  assert_eq!(
+    health.model_loaded, None,
+    "stop must unload the model from the umbrella"
+  );
+  let resp = dispatch_request(&ctx, Request::new(3, "status", None)).await;
+  let body = resp.result.expect("status result");
+  let models = body["models"].as_array().expect("models array");
+  assert!(
+    !models
+      .iter()
+      .any(|m| m["launch_id"] == format!("lemonade:{name}")),
+    "stopped delegated row must drop out of status"
+  );
+  assert!(
+    models
+      .iter()
+      .any(|m| m["launch_id"] == umbrella_launch_id().as_str()),
+    "umbrella row must survive a delegated stop"
+  );
+
+  // A second stop of the same id is an InvalidParams error (unknown row).
+  let resp = dispatch_request(
+    &ctx,
+    Request::new(
+      4,
+      "stop_model",
+      Some(json!({"launch_id": format!("lemonade:{name}")})),
+    ),
+  )
+  .await;
+  assert!(
+    resp.error.is_some(),
+    "double-stop of a delegated id must error"
+  );
+
+  umbrella.stop(Duration::from_secs(3)).await;
 }
