@@ -920,6 +920,7 @@ mod tests {
 
   #[test]
   fn build_options_threads_config_proxy_block_into_daemon_options() {
+    let _env = crate::cli::test_lock::serialize();
     // Regression: before this wiring landed, config.proxy.port was
     // parsed and validated but `build_options` never copied it onto
     // DaemonOptions.proxy. The daemon silently ran with
@@ -955,6 +956,7 @@ mod tests {
 
   #[test]
   fn build_options_proxy_port_cli_overrides_config_value() {
+    let _env = crate::cli::test_lock::serialize();
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config {
       proxy: crate::config::loader::ProxyConfig {
@@ -982,6 +984,7 @@ mod tests {
 
   #[test]
   fn build_options_no_cli_override_falls_back_to_config_then_default() {
+    let _env = crate::cli::test_lock::serialize();
     // Defaults all the way down: no CLI override, no proxy block in
     // config → daemon uses ProxyConfig::default(), which resolves to
     // 11435 (default mode) when nothing pins `port` explicitly.
@@ -996,6 +999,7 @@ mod tests {
 
   #[test]
   fn build_options_ollama_compat_cli_flag_flips_mode_and_default_port() {
+    let _env = crate::cli::test_lock::serialize();
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
     let opts =
@@ -1009,6 +1013,7 @@ mod tests {
 
   #[test]
   fn build_options_ollama_compat_or_combines_config_cli_env() {
+    let _env = crate::cli::test_lock::serialize();
     // Config-only: config says compat=true, CLI flag off → enabled.
     let cli = parse_cli(&["daemon", "start"]);
     let config_compat = Config {
@@ -1036,6 +1041,7 @@ mod tests {
 
   #[test]
   fn build_options_proxy_host_cli_overrides_config() {
+    let _env = crate::cli::test_lock::serialize();
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config {
       proxy: crate::config::loader::ProxyConfig {
@@ -1066,6 +1072,7 @@ mod tests {
 
   #[test]
   fn build_options_proxy_host_from_config_when_no_cli() {
+    let _env = crate::cli::test_lock::serialize();
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config {
       proxy: crate::config::loader::ProxyConfig {
@@ -1082,6 +1089,7 @@ mod tests {
 
   #[test]
   fn build_options_insecure_no_auth_or_combines_config_cli() {
+    let _env = crate::cli::test_lock::serialize();
     let cli = parse_cli(&["daemon", "start"]);
     // CLI flag on, config off → on.
     let opts_cli = build_options(
@@ -1278,6 +1286,7 @@ mod tests {
 
   #[test]
   fn build_options_no_proxy_fallback_cli_flag_clears_fallback_enabled() {
+    let _env = crate::cli::test_lock::serialize();
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
     // Default is fallback_enabled = true.
@@ -1292,6 +1301,7 @@ mod tests {
 
   #[test]
   fn build_options_no_proxy_fallback_or_combines_config_cli() {
+    let _env = crate::cli::test_lock::serialize();
     // Config-only: config has fallback_enabled=false, CLI off → disabled.
     let cli = parse_cli(&["daemon", "start"]);
     let config_off_fallback = Config {
@@ -1430,6 +1440,7 @@ mod tests {
 
   #[test]
   fn build_options_rejects_disable_scan_with_no_paths() {
+    let _env = crate::cli::test_lock::serialize();
     // The dead-end combo: scanning off, zero user paths anywhere.
     // Today this would leave the catalog empty forever — the
     // validator must turn it into a startup error so the user sees
@@ -1447,6 +1458,7 @@ mod tests {
 
   #[test]
   fn build_options_accepts_disable_scan_when_cli_path_supplied() {
+    let _env = crate::cli::test_lock::serialize();
     let cli = parse_cli(&["--no-scan", "--model-path", "/work/keep", "daemon", "start"]);
     let config = Config::default();
     assert!(
@@ -1457,6 +1469,7 @@ mod tests {
 
   #[test]
   fn build_options_accepts_disable_scan_when_config_path_supplied() {
+    let _env = crate::cli::test_lock::serialize();
     let cli = parse_cli(&["--no-scan", "daemon", "start"]);
     let config = Config {
       model_paths: vec![PathBuf::from("/work/cfg")],
