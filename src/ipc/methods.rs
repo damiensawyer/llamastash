@@ -462,9 +462,11 @@ async fn status_response(ctx: &MethodContext) -> Value {
   // at the umbrella's port. Project each as a first-class row: the
   // synthetic `lemonade://<name>` path matches the catalog entry, so
   // the TUI list pane and `llamastash list` show the *model* as
-  // running, not just the umbrella. State mirrors the umbrella's — it
-  // serves every resident model, so its readiness is theirs. Rows are
-  // emitted only while the umbrella is registered; with it gone the
+  // running, not just the umbrella. State comes from the preload
+  // task's recorded outcome (`Loading` / `Ready` / `Error{cause}`);
+  // a snapshot with no recorded outcome (re-adopted across a daemon
+  // restart) falls back to mirroring the umbrella. Rows are emitted
+  // only while the umbrella is registered; with it gone the
   // snapshots are unreachable leftovers (the boot sweep reaps them).
   if let Some(umbrella) = ctx
     .supervisors
@@ -476,6 +478,10 @@ async fn status_response(ctx: &MethodContext) -> Value {
     for running_snap in ctx.state.snapshot().await.running.iter() {
       let Some(backend_id) = lemonade_snapshot_id(running_snap) else {
         continue;
+      };
+      let state_obj = match ctx.supervisors.delegated_state(&backend_id.name).await {
+        Some(s) => flatten_state(&s),
+        None => ustate_obj.clone(),
       };
       let synthetic_id = crate::gguf::identity::ModelId {
         path: running_snap.params.model_path.clone(),
@@ -500,7 +506,7 @@ async fn status_response(ctx: &MethodContext) -> Value {
         "mode": running_snap.params.mode.label(),
         "pid": upid,
         "ready_at": running_snap.started_at,
-        "state": ustate_obj.clone(),
+        "state": state_obj,
         "params": params_json,
         // Resource readings stay on the umbrella's own row — mirroring
         // its RSS onto every resident model would double-count it.
@@ -879,6 +885,9 @@ async fn stop_model_handler(
       }
     })
     .await;
+  if stopped_umbrella {
+    ctx.supervisors.clear_delegated().await;
+  }
   Ok(json!({
     "launch_id": parsed.launch_id,
     "state": flatten_state(&final_state),
@@ -910,6 +919,7 @@ async fn stop_delegated_lemonade(
       Err(e) => log::warn!("lemonade: could not build client to unload `{name}`: {e}"),
     }
   }
+  ctx.supervisors.remove_delegated(name).await;
   let removed = ctx
     .state
     .mutate(|s| {
@@ -936,7 +946,7 @@ async fn stop_delegated_lemonade(
 /// backends). The one predicate shared by the `status` projection and both
 /// `stop_model` snapshot sweeps, so "is this a delegated lemonade row" can't
 /// drift between them.
-fn lemonade_snapshot_id(
+pub(crate) fn lemonade_snapshot_id(
   snap: &crate::daemon::state_store::RunningSnapshot,
 ) -> Option<&crate::backend::identity::BackendModelId> {
   snap
@@ -1856,20 +1866,50 @@ async fn start_delegated_lemonade(
   // Preload the model so an explicit launch makes it resident (chat would
   // autoload too), forwarding the launch params lemond honors: `ctx_size`
   // plus the free-form extras as the recipe-scoped `*_args` string.
-  // Best-effort: a load failure (e.g. a non-registry name from a
-  // GGUF+override launch) is logged but does not fail the umbrella
-  // start — the umbrella is up and real registry models autoload on chat.
-  match LemonadeClient::new(serving_port) {
-    Ok(client) => {
-      let opts = lemonade_load_options(&client, &spec.model.name, &params).await;
-      if let Err(e) = client.load_with(&spec.model.name, &opts).await {
-        log::warn!(
-          "lemonade: preload of `{}` failed (umbrella is up; chat will autoload): {e}",
-          spec.model.name
-        );
+  //
+  // The load runs as a background task: a cold load can take lemond's
+  // full 120 s budget, which is far past the CLI's IPC reply timeout —
+  // awaiting it here meant the client hung up and hyper cancelled this
+  // handler mid-preload, silently dropping the launch. The task records
+  // its outcome in the registry's delegated-state map (`Loading` →
+  // `Ready` / `Error{cause}`), which is what `status` reports for the
+  // row — so a model lemond can't load shows `error` with lemond's
+  // message instead of a phantom `ready`.
+  ctx
+    .supervisors
+    .set_delegated_state(&spec.model.name, ManagedState::Loading)
+    .await;
+  {
+    let registry = ctx.supervisors.clone();
+    let name = spec.model.name.clone();
+    let params = params.clone();
+    tokio::spawn(async move {
+      let outcome = match LemonadeClient::new(serving_port) {
+        Ok(client) => {
+          let opts = lemonade_load_options(&client, &name, &params).await;
+          client.load_with(&name, &opts).await
+        }
+        Err(e) => Err(e),
+      };
+      match outcome {
+        Ok(()) => {
+          registry
+            .set_delegated_state(&name, ManagedState::Ready)
+            .await;
+        }
+        Err(e) => {
+          log::warn!("lemonade: preload of `{name}` failed: {e}");
+          registry
+            .set_delegated_state(
+              &name,
+              ManagedState::Error {
+                cause: e.to_string(),
+              },
+            )
+            .await;
+        }
       }
-    }
-    Err(e) => log::warn!("lemonade: could not build client to preload: {e}"),
+    });
   }
 
   // Persist a running snapshot at the umbrella port for status visibility.

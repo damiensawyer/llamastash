@@ -185,6 +185,8 @@ async fn unload_idle_umbrella_model(
     _ => return,
   }
   let port = umbrella.port();
+  let persisted = state.ctx.state.clone();
+  let supervisors = state.ctx.supervisors.clone();
   tokio::spawn(async move {
     let client = match LemonadeClient::new(port) {
       Ok(c) => c,
@@ -204,7 +206,21 @@ async fn unload_idle_umbrella_model(
     };
     if let Some(name) = loaded {
       log::info!("proxy eviction: unloading idle lemonade model `{name}` (umbrella stays up)");
-      let _ = client.unload(&name).await;
+      if client.unload(&name).await.is_ok() {
+        // Drop the model's running snapshot + recorded state so `status`
+        // stops listing an evicted model as running — same end state as
+        // a process eviction, where the supervisor row is pruned. The
+        // catalog row stays; the next request autoloads it.
+        supervisors.remove_delegated(&name).await;
+        persisted
+          .mutate(|s| {
+            s.running.retain(|r| {
+              crate::ipc::methods::lemonade_snapshot_id(r).map(|b| b.name.as_str())
+                != Some(name.as_str())
+            });
+          })
+          .await;
+      }
     }
   });
 }

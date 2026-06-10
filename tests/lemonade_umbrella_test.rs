@@ -17,12 +17,13 @@ use llamastash::backend::lemonade::{
   ensure_umbrella, umbrella_launch_id, LemonadeBackend, LemonadeClient,
 };
 use llamastash::backend::{Backend, LaunchPlan};
+use llamastash::config::loader::{LemonadeConfig, PortRange};
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::registry::SupervisorRegistry;
 use llamastash::daemon::shutdown::ShutdownToken;
 use llamastash::daemon::state_store::RunningSnapshot;
 use llamastash::daemon::supervisor::{ManagedModel, ManagedState};
-use llamastash::ipc::methods::{dispatch_request, MethodContext};
+use llamastash::ipc::methods::{dispatch_request, LaunchEnv, MethodContext};
 use llamastash::ipc::protocol::Request;
 use llamastash::launch::mode::LaunchMode;
 use llamastash::launch::params::LaunchParams;
@@ -153,6 +154,153 @@ async fn ensure_umbrella_is_idempotent() {
   // `first` and `second` are the same reused umbrella — stop it once so the
   // `fake_lemond` child doesn't leak (Windows `cargo test` exit hang).
   first.stop(Duration::from_secs(3)).await;
+}
+
+/// Regression for the blocking-preload bug: `start_model` used to await
+/// the lemond load inside its IPC reply, so a cold load (up to lemond's
+/// 120 s budget) outlived the CLI's 5 s reply timeout — the client hung
+/// up, hyper cancelled the handler mid-await, and the launch silently
+/// evaporated (no snapshot, no log line). The preload now runs as a
+/// background task that records its outcome in the registry's
+/// delegated-state map, so:
+///   - the reply returns promptly even when the load is slow;
+///   - the row surfaces `loading` → `ready` for a good load;
+///   - a rejected load surfaces `error` + cause instead of a phantom
+///     `ready` row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_model_replies_promptly_and_records_preload_outcome() {
+  let dir = unique_temp("preload");
+  std::fs::create_dir_all(&dir).unwrap();
+  let registry = SupervisorRegistry::new();
+  let port = allocate_port();
+  let env = LaunchEnv {
+    // Never spawned: every launch in this test delegates to the umbrella.
+    binary: PathBuf::from("/nonexistent/llama-server"),
+    port_range: PortRange {
+      start: 41000,
+      end: 41999,
+    },
+    log_dir: dir.clone(),
+    probe: fast_probe(),
+    arch_defaults: Default::default(),
+    device_catalog: Default::default(),
+  };
+  let ctx = MethodContext::new(ShutdownToken::new())
+    .with_supervisors(registry.clone())
+    .with_launch_env(env)
+    .with_lemonade(LemonadeConfig {
+      enabled: true,
+      binary: Some(fake_lemond_binary()),
+      port,
+    });
+
+  let row_state = |body: &serde_json::Value, name: &str| -> Option<(String, Option<String>)> {
+    body["models"].as_array().and_then(|models| {
+      models
+        .iter()
+        .find(|m| m["launch_id"] == format!("lemonade:{name}"))
+        .map(|m| {
+          (
+            m["state"]["state"].as_str().unwrap_or_default().to_string(),
+            m["state"]["cause"].as_str().map(str::to_string),
+          )
+        })
+    })
+  };
+  let status = |ctx: &MethodContext, id: i64| {
+    let ctx = ctx.clone();
+    async move {
+      dispatch_request(&ctx, Request::new(id, "status", None))
+        .await
+        .result
+        .expect("status result")
+    }
+  };
+
+  // Slow load (fake_lemond sleeps 1.5 s on a name containing `slow`): the
+  // reply must come back well before the load completes.
+  let started = Instant::now();
+  let resp = dispatch_request(
+    &ctx,
+    Request::new(
+      1,
+      "start_model",
+      Some(json!({"model_path": "lemonade://Qwen-slow"})),
+    ),
+  )
+  .await;
+  let elapsed = started.elapsed();
+  let body = resp.result.expect("start_model result");
+  assert_eq!(body["launch_id"], umbrella_launch_id().as_str());
+  assert!(
+    elapsed < Duration::from_millis(1200),
+    "start_model must not block on the preload (took {elapsed:?})"
+  );
+
+  // The row exists immediately and reflects the in-flight preload, then
+  // flips to ready once the (slow) load lands.
+  let body = status(&ctx, 2).await;
+  let (state, _) = row_state(&body, "Qwen-slow").expect("row emitted while preloading");
+  assert!(
+    state == "loading" || state == "ready",
+    "in-flight preload surfaces as loading (or ready if it already landed), got {state}"
+  );
+  let deadline = Instant::now() + Duration::from_secs(5);
+  loop {
+    let body = status(&ctx, 3).await;
+    let (state, _) = row_state(&body, "Qwen-slow").expect("row stays emitted");
+    if state == "ready" {
+      break;
+    }
+    assert!(Instant::now() < deadline, "slow preload never became ready");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+
+  // Rejected load (name containing `fail` → 500): the row must surface
+  // `error` with lemond's cause, not a phantom `ready`.
+  let resp = dispatch_request(
+    &ctx,
+    Request::new(
+      4,
+      "start_model",
+      Some(json!({"model_path": "lemonade://Broken-fail"})),
+    ),
+  )
+  .await;
+  resp.result.expect("start_model dispatches the preload");
+  let deadline = Instant::now() + Duration::from_secs(5);
+  let cause = loop {
+    let body = status(&ctx, 5).await;
+    let (state, cause) = row_state(&body, "Broken-fail").expect("failed row stays emitted");
+    if state == "error" {
+      break cause;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "rejected preload never surfaced as error (state {state})"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  };
+  assert!(
+    cause.is_some_and(|c| !c.is_empty()),
+    "error row must carry lemond's cause"
+  );
+
+  // The failed row is still clearable by its delegated id.
+  let resp = dispatch_request(
+    &ctx,
+    Request::new(
+      6,
+      "stop_model",
+      Some(json!({"launch_id": "lemonade:Broken-fail"})),
+    ),
+  )
+  .await;
+  resp.result.expect("failed delegated row must be stoppable");
+
+  if let Some(umbrella) = registry.get(&umbrella_launch_id()).await {
+    umbrella.stop(Duration::from_secs(3)).await;
+  }
 }
 
 /// Delegated-model visibility: a model made resident in the umbrella (its

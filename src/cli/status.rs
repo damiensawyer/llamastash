@@ -8,7 +8,7 @@ use crate::cli::cli_args::{Cli, StatusArgs};
 use crate::cli::client::connect_or_spawn;
 use crate::cli::exit_codes::CliResult;
 use crate::cli::output::{pretty_json, status_human, status_json};
-use crate::cli::resolve::{fetch_status, resolve_running, StatusSnapshot};
+use crate::cli::resolve::{fetch_status, resolve_running_via_catalog, StatusSnapshot};
 use crate::config::Config;
 
 pub async fn handle(args: StatusArgs, cli: &Cli, config: &Config) -> CliResult {
@@ -16,7 +16,7 @@ pub async fn handle(args: StatusArgs, cli: &Cli, config: &Config) -> CliResult {
   let snap = fetch_status(&mut client).await?;
   let scoped = match &args.target {
     Some(t) => StatusSnapshot {
-      models: vec![resolve_running(&snap.models, t)?],
+      models: vec![resolve_running_via_catalog(&mut client, &snap.models, t).await?],
       external: vec![],
       gpu: snap.gpu.clone(),
       host: snap.host.clone(),

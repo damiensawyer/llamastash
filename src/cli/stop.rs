@@ -15,7 +15,7 @@ use crate::cli::cli_args::{Cli, StopArgs};
 use crate::cli::client::connect_or_spawn;
 use crate::cli::exit_codes::{CliExit, CliResult, STOP_FAILED, USAGE};
 use crate::cli::output::pretty_json;
-use crate::cli::resolve::{fetch_status, resolve_running, ExternalRow, RunningRow};
+use crate::cli::resolve::{fetch_status, resolve_running_via_catalog, ExternalRow, RunningRow};
 use crate::config::Config;
 
 pub async fn handle(args: StopArgs, cli: &Cli, config: &Config) -> CliResult {
@@ -170,7 +170,7 @@ pub async fn handle(args: StopArgs, cli: &Cli, config: &Config) -> CliResult {
     }
     return Ok(());
   }
-  let row = resolve_running(&snap.models, &target)?;
+  let row = resolve_running_via_catalog(&mut client, &snap.models, &target).await?;
   let mut params = serde_json::json!({"launch_id": &row.launch_id});
   if let Some(g) = grace {
     params["grace_secs"] = serde_json::Value::from(g);

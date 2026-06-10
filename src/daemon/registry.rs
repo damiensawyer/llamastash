@@ -14,7 +14,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as TokioMutex, RwLock};
 
-use crate::daemon::supervisor::ManagedModel;
+use crate::daemon::supervisor::{ManagedModel, ManagedState};
 
 /// Stable identifier for one launch. Strings on the wire so future
 /// schemes (UUID, etc.) don't require an IPC bump.
@@ -46,6 +46,15 @@ pub struct SupervisorRegistry {
   /// `collect_in_use_ports` snapshot, both bind-probe the same free
   /// port, and the second spawn's `llama-server` would fail to bind.
   reserved_ports: Arc<TokioMutex<BTreeSet<u16>>>,
+  /// Per-delegated-model state for managed-multiplexer backends
+  /// (Lemonade), keyed by registry model name. Delegated models have
+  /// no supervisor of their own — the umbrella is the only process —
+  /// so the background preload task records its outcome here
+  /// (`Loading` → `Ready` / `Error{cause}`) and the `status`
+  /// projection reads it instead of blindly mirroring the umbrella's
+  /// state. Entries are dropped when the model is stopped/evicted and
+  /// cleared wholesale when the umbrella stops.
+  delegated: Arc<RwLock<BTreeMap<String, ManagedState>>>,
 }
 
 impl SupervisorRegistry {
@@ -139,6 +148,29 @@ impl SupervisorRegistry {
   /// spawn fails and the reservation should be released for retry.
   pub async fn release_reserved_port(&self, port: u16) {
     self.reserved_ports.lock().await.remove(&port);
+  }
+
+  /// Record the state of one delegated (umbrella-served) model.
+  pub async fn set_delegated_state(&self, name: &str, state: ManagedState) {
+    self.delegated.write().await.insert(name.to_string(), state);
+  }
+
+  /// The recorded state of one delegated model, if any. `None` means
+  /// no preload outcome is known (e.g. a snapshot re-adopted across a
+  /// daemon restart) — callers fall back to mirroring the umbrella.
+  pub async fn delegated_state(&self, name: &str) -> Option<ManagedState> {
+    self.delegated.read().await.get(name).cloned()
+  }
+
+  /// Forget one delegated model (stopped or evicted).
+  pub async fn remove_delegated(&self, name: &str) {
+    self.delegated.write().await.remove(name);
+  }
+
+  /// Forget every delegated model — the umbrella is gone, so no
+  /// recorded state can be honored.
+  pub async fn clear_delegated(&self) {
+    self.delegated.write().await.clear();
   }
 }
 

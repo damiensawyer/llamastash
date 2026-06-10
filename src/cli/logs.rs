@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use crate::cli::cli_args::{Cli, LogsArgs};
 use crate::cli::client::connect_or_spawn;
 use crate::cli::exit_codes::{CliExit, CliResult, DAEMON_UNREACHABLE, SUCCESS};
-use crate::cli::resolve::{fetch_status, resolve_running};
+use crate::cli::resolve::{fetch_status, resolve_running_via_catalog};
 use crate::config::Config;
 use crate::ipc::{Client, ClientError};
 
@@ -29,7 +29,7 @@ const MIN_SEEN_WINDOW: usize = 1024;
 pub async fn handle(args: LogsArgs, cli: &Cli, config: &Config) -> CliResult {
   let mut client = connect_or_spawn(cli, config).await?;
   let snap = fetch_status(&mut client).await?;
-  let row = resolve_running(&snap.models, &args.target)?;
+  let row = resolve_running_via_catalog(&mut client, &snap.models, &args.target).await?;
 
   let initial_lines = args.lines.unwrap_or(200) as usize;
   let body = client

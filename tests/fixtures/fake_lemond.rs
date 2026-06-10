@@ -41,7 +41,7 @@ async fn main() {
       let mut buf = vec![0u8; 4096];
       let n = sock.read(&mut buf).await.unwrap_or(0);
       let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
-      let (status, body) = route(&raw);
+      let (status, body) = route(&raw).await;
       let resp = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -54,7 +54,13 @@ async fn main() {
 /// Route on the full raw request. `/api/v1/{load,unload}` mutate the
 /// process-global loaded-model state and `/api/v1/health` reports it, so
 /// the eviction test can assert an idle unload cleared the model.
-fn route(raw: &str) -> (String, String) {
+///
+/// Failure / latency injection mirrors `fake_llama_server`'s body-marker
+/// pattern, keyed on the requested model name so concurrent tests never
+/// race an env var: a name containing `fail` rejects the load with 500;
+/// `slow` sleeps ~1.5 s before succeeding — far past any caller that
+/// wrongly blocks its own reply path on the load.
+async fn route(raw: &str) -> (String, String) {
   let request_line = raw.lines().next().unwrap_or_default();
   let mut parts = request_line.split_whitespace();
   let method = parts.next().unwrap_or("");
@@ -73,6 +79,15 @@ fn route(raw: &str) -> (String, String) {
     ),
     ("POST", "/api/v1/load") => {
       let name = body_model_name(raw).unwrap_or_else(|| "unknown".to_string());
+      if name.contains("fail") {
+        return (
+          "500 Internal Server Error".to_string(),
+          r#"{"detail":"injected load failure"}"#.to_string(),
+        );
+      }
+      if name.contains("slow") {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+      }
       *LOADED.lock().unwrap() = Some(name);
       ok(r#"{"status":"success","message":"loaded"}"#)
     }

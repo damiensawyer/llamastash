@@ -272,11 +272,42 @@ async fn idle_lemonade_model_is_unloaded_but_umbrella_stays_up() {
     "model should be resident before the idle sweep"
   );
 
-  let state = proxy_state_with(
-    vec![lemonade_model("Qwen2.5-0.5B-Instruct")],
-    registry.clone(),
-  )
-  .await;
+  // Build the proxy state around an explicit MethodContext so the test
+  // can watch the persisted running snapshot the sweep mutates.
+  let catalog = llamastash::discovery::ModelCatalog::new();
+  catalog
+    .upsert(lemonade_model("Qwen2.5-0.5B-Instruct"))
+    .await;
+  let ctx =
+    MethodContext::with_catalog(ShutdownToken::new(), catalog).with_supervisors(registry.clone());
+  let state = llamastash::proxy::state::ProxyState::from_context(&ctx, false, true);
+  // Persist the running snapshot + recorded state the way `start_model`
+  // does, so the sweep's row cleanup has something real to clear.
+  let identity = llamastash::backend::identity::ModelIdentity::Backend(
+    llamastash::backend::identity::BackendModelId {
+      backend: "lemonade".to_string(),
+      name: "Qwen2.5-0.5B-Instruct".to_string(),
+    },
+  );
+  ctx
+    .state
+    .mutate(|s| {
+      s.running
+        .push(llamastash::daemon::state_store::RunningSnapshot {
+          id: identity,
+          pid: 0,
+          port,
+          started_at: 0,
+          params: LaunchParams::new(
+            PathBuf::from("lemonade://Qwen2.5-0.5B-Instruct"),
+            LaunchMode::Chat,
+          ),
+        })
+    })
+    .await;
+  registry
+    .set_delegated_state("Qwen2.5-0.5B-Instruct", ManagedState::Ready)
+    .await;
   // Stamp the umbrella's MRU, then sweep with a ~0 TTL so it counts idle.
   state.touch_mru(umbrella.id()).await;
   eviction::sweep_once(&state, Duration::from_nanos(1)).await;
@@ -291,6 +322,29 @@ async fn idle_lemonade_model_is_unloaded_but_umbrella_stays_up() {
     assert!(Instant::now() < deadline, "idle model was never unloaded");
     sleep(Duration::from_millis(25)).await;
   }
+
+  // An evicted model must also drop its running snapshot + recorded
+  // state — same end state as a process eviction, where the supervisor
+  // row is pruned — so `status` stops listing it as running.
+  let deadline = Instant::now() + Duration::from_secs(5);
+  loop {
+    let gone = ctx.state.snapshot().await.running.is_empty();
+    if gone {
+      break;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "evicted model's running snapshot was never dropped"
+    );
+    sleep(Duration::from_millis(25)).await;
+  }
+  assert!(
+    registry
+      .delegated_state("Qwen2.5-0.5B-Instruct")
+      .await
+      .is_none(),
+    "evicted model's recorded state must be forgotten"
+  );
 
   // The umbrella process itself must still be registered + Ready.
   let still = registry

@@ -615,6 +615,51 @@ pub fn resolve_running(rows: &[RunningRow], reference: &str) -> Result<RunningRo
   single_or_error(by_name, reference)
 }
 
+/// [`resolve_running`], with a lazy catalog fallback for launches whose
+/// user-facing name never appears in their path — an Ollama alias like
+/// `gemma4:e2b` runs from a `sha256-…` blob, so the path-substring tier
+/// can't see it. Only a zero-match miss falls through (ambiguity is
+/// final); the fallback maps catalog display labels back to paths and
+/// re-matches the running rows, costing one extra `list_models` call
+/// only on that miss path.
+pub async fn resolve_running_via_catalog(
+  client: &mut Client,
+  rows: &[RunningRow],
+  reference: &str,
+) -> Result<RunningRow, CliExit> {
+  let miss = match resolve_running(rows, reference) {
+    Ok(row) => return Ok(row),
+    Err(e) => e,
+  };
+  // `single_or_error`'s zero-match message — ambiguous matches keep
+  // their launch-id listing and never reach the catalog.
+  if !miss
+    .message
+    .as_deref()
+    .unwrap_or_default()
+    .starts_with("no running launch matches")
+  {
+    return Err(miss);
+  }
+  let Ok(catalog) = fetch_catalog(client).await else {
+    return Err(miss);
+  };
+  let lower = reference.trim().to_lowercase();
+  let label_paths: Vec<String> = catalog
+    .iter()
+    .filter(|c| c.name().to_lowercase().contains(&lower))
+    .map(|c| c.path.clone())
+    .collect();
+  let by_label: Vec<&RunningRow> = rows
+    .iter()
+    .filter(|r| label_paths.contains(&r.model_path))
+    .collect();
+  if by_label.is_empty() {
+    return Err(miss);
+  }
+  single_or_error(by_label, reference)
+}
+
 fn single_or_error(matches: Vec<&RunningRow>, reference: &str) -> Result<RunningRow, CliExit> {
   match matches.len() {
     0 => Err(CliExit::new(
