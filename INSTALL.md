@@ -160,7 +160,7 @@ If you already have `llama-server` installed (e.g. via `brew install llama.cpp`)
 
 After `init`, just run `llamastash` to open the TUI.
 
-**Optional — NPU / multi-engine via Lemonade.** For NPU inference on AMD Ryzen AI (and other engines llama.cpp can't reach), LlamaStash can use [Lemonade](https://github.com/lemonade-sdk/lemonade) (`lemond`) as an opt-in second backend. You install Lemonade yourself; LlamaStash finds and supervises it. See **[Lemonade setup](docs/lemonade-setup.md)**.
+**Optional — NPU / multi-engine via Lemonade (experimental).** For NPU inference on AMD Ryzen AI (and other engines llama.cpp can't reach), LlamaStash can use [Lemonade](https://github.com/lemonade-sdk/lemonade) (`lemond`) as an opt-in second backend. **Experimental** — new and lightly road-tested; behaviour and config may change. You install Lemonade yourself; LlamaStash finds and supervises it. See **[Lemonade setup](docs/lemonade-setup.md)**.
 
 ## For AI agents
 

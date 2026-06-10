@@ -207,7 +207,9 @@ To reach your models from another machine, opt into LAN mode with `--proxy-host 
 
 TLS is not yet implemented, so LAN mode is plaintext HTTP — keep it on a trusted network or put a TLS-terminating reverse proxy in front. Only the proxy data plane is ever exposed: the control plane and `llama-server` children always stay loopback (`--host 127.0.0.1`, enforced by the `extras` denylist).
 
-## NPU & multi-engine via Lemonade (opt-in)
+## NPU & multi-engine via Lemonade (experimental, opt-in)
+
+> **⚠️ Experimental.** The Lemonade backend is new and lightly road-tested — behaviour, config keys, and the discovery/routing surface may change. llama.cpp remains the stable default.
 
 llama.cpp is the direct, zero-overhead default backend. For engines llama.cpp can't reach, LlamaStash exposes a **pluggable backend seam** and [Lemonade](https://github.com/lemonade-sdk/lemonade) (`lemond`) plugs in as a second backend — most notably **NPU inference** on AMD Ryzen AI / XDNA, plus ROCm / ONNX / others. It is **off by default**: a standard install never contacts `lemond`.
 

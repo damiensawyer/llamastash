@@ -276,7 +276,8 @@ impl Default for ProxyConfig {
   }
 }
 
-/// Lemonade backend configuration (R9/R11 opt-in gate).
+/// Lemonade backend configuration (R9/R11 opt-in gate). **Experimental** —
+/// the backend is new and lightly road-tested; these keys may change.
 ///
 /// Off by default. Only when `enabled` is true does the daemon run Lemonade
 /// discovery, supervise the `lemond` umbrella, and route to it. llamastash

@@ -176,8 +176,9 @@ Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs
 - **Ollama drop-in mode is opt-in.** Enable with `--ollama-compat` (or `proxy.ollama_compat: true` / `LLAMASTASH_OLLAMA_COMPAT=1`) and the proxy claims port `11434`, answers `GET /` with the byte-exact `"Ollama is running"` handshake string, and works as a transparent replacement for the official `ollama` CLI and other Ollama-Go-based clients. Leaving compat off keeps the safe coexistence default (port `11435`, `"LlamaStash is running"` identity).
 - [Loopback by default, opt-in LAN with auth](FEATURES.md#auth-posture) — the proxy binds `127.0.0.1` and runs keyless for the same-machine threat model. Expose it on the LAN with `--proxy-host 0.0.0.0` (or `proxy.host`) and llamastash auto-generates a bearer key, requires it on every request, and refuses to bind a routable address with no key unless you pass `--insecure-no-auth`. TLS is on the roadmap; LAN mode is plaintext for now (trusted network or front with a reverse proxy). The control plane and `llama-server` children always stay loopback.
 
-### [NPU & multi-engine via Lemonade (opt-in)](docs/lemonade-setup.md)
+### [NPU & multi-engine via Lemonade (experimental, opt-in)](docs/lemonade-setup.md)
 
+- **⚠️ Experimental** — new and lightly road-tested; behaviour and config may change. llama.cpp stays the stable default.
 - **A pluggable backend seam.** llama.cpp is the direct, zero-overhead default; [Lemonade](https://github.com/lemonade-sdk/lemonade) (`lemond`) plugs in as a second backend for engines llama.cpp can't reach — **NPU inference** on AMD Ryzen AI / XDNA, plus ROCm / ONNX / others. Off by default; enable per `[lemonade]` config, `--lemonade`, or `LLAMASTASH_LEMONADE=1`.
 - **You install Lemonade; LlamaStash drives it.** No auto-install — LlamaStash finds `lemond` (PATH or `lemonade.binary`), supervises the shared umbrella, discovers its models, routes inference through the proxy, and evicts idle models by API unload. See **[Lemonade setup](docs/lemonade-setup.md)**.
 

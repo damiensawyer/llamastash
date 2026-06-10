@@ -5,6 +5,10 @@ LlamaStash can use [**Lemonade**](https://github.com/lemonade-sdk/lemonade)
 fans out to engines llama.cpp can't reach — most notably **NPU inference** on
 AMD Ryzen AI / XDNA hardware, plus ROCm, ONNX, and others.
 
+> **⚠️ Experimental.** The Lemonade backend is new and lightly road-tested.
+> Expect rough edges; behaviour, config keys, and the discovery/routing
+> surface may change without notice. llama.cpp remains the stable default.
+
 It is **opt-in and off by default**. A standard install never contacts
 `lemond`. llama.cpp stays the direct, zero-overhead default.
 
