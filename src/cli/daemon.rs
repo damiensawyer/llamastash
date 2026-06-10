@@ -90,7 +90,7 @@ async fn handle_start(
   // in the parent (or the foreground process) so the generated key is
   // printed to the user's terminal; the detached child re-reads it
   // from config. No-op for loopback / pre-set key / --insecure-no-auth.
-  provision_proxy_key(&mut opts, cli)?;
+  provision_proxy_key(&mut opts, cli, foreground)?;
   if foreground {
     // `--foreground` (or `-f`) keeps the daemon attached to the
     // controlling terminal. Print a one-line notice up front so the
@@ -169,7 +169,16 @@ fn print_already_running(pid: i32) {
 /// Idempotent across the detached re-exec: the child re-reads the now-
 /// persisted key from config, so this short-circuits without
 /// regenerating or reprinting.
-fn provision_proxy_key(opts: &mut DaemonOptions, cli: &Cli) -> Result<()> {
+///
+/// `foreground` controls how a persistence failure is handled. The
+/// generated key lives on `opts` regardless, so a `--foreground` daemon
+/// (same process) keeps working for this run even if the write failed.
+/// A detached daemon re-execs and reads the key back from config — the
+/// key is never passed via argv — so if the write failed the child
+/// can't see it, hits the backstop, and silently drops the proxy. In
+/// that case we refuse to start rather than print a key that will never
+/// authenticate.
+fn provision_proxy_key(opts: &mut DaemonOptions, cli: &Cli, foreground: bool) -> Result<()> {
   let host = opts.proxy.effective_host();
   // Loopback needs no key; a configured / env key is used as-is (and an
   // env key is deliberately never written back to disk).
@@ -190,23 +199,33 @@ fn provision_proxy_key(opts: &mut DaemonOptions, cli: &Cli) -> Result<()> {
   let key = crate::proxy::ProxyApiKey::generate();
   let key_str = key.as_str().to_string();
   opts.proxy.api_key = Some(key_str.clone());
-  match crate::config::config_path(cli.config.clone()) {
+  let persisted = match crate::config::config_path(cli.config.clone()) {
     Some(path) => {
-      if let Err(e) =
-        crate::config::writer::merge_and_write(&path, proxy_api_key_additions(&key_str))
-      {
-        log::warn!("failed to persist generated proxy api_key: {e}");
-        eprintln!(
-          "{}",
-          crate::cli::colors::warning(
-            "proxy: could not save the API key to config; it will be regenerated next start",
-          )
-        );
+      match crate::config::writer::merge_and_write(&path, proxy_api_key_additions(&key_str)) {
+        Ok(_) => true,
+        Err(e) => {
+          log::warn!("failed to persist generated proxy api_key: {e}");
+          false
+        }
       }
     }
-    None => log::warn!("no writable config path; generated proxy api_key was not persisted"),
+    None => {
+      log::warn!("no writable config path; generated proxy api_key was not persisted");
+      false
+    }
+  };
+  // A detached daemon reads the key back from config; an unpersisted key
+  // can't reach it, so the proxy would refuse to bind while we'd have
+  // claimed LAN access is up. Fail loudly instead.
+  if !persisted && !foreground {
+    return Err(anyhow::anyhow!(
+      "proxy: generated a LAN API key but could not save it to config, so the \
+       backgrounded daemon can't read it back and the proxy would not start. Set a \
+       writable config (e.g. --config <path>) or set proxy.api_key yourself, or run \
+       with --foreground. Daemon not started."
+    ));
   }
-  print_provisioned_key(host, port, &key_str);
+  print_provisioned_key(host, port, &key_str, persisted);
   Ok(())
 }
 
@@ -227,17 +246,22 @@ fn proxy_api_key_additions(key: &str) -> serde_yaml::Value {
   serde_yaml::Value::Mapping(root)
 }
 
-/// One-time banner shown when a LAN proxy key is auto-generated. The
-/// key prints to stdout exactly once (it's saved to config for reuse).
-fn print_provisioned_key(host: IpAddr, port: u16, key: &str) {
+/// One-time banner shown when a LAN proxy key is auto-generated. When
+/// `persisted` the key is saved to config and reused on the next start;
+/// otherwise (a foreground run whose write failed) it lives only in
+/// this process and a fresh key is generated next time — the banner
+/// says so rather than claiming it was saved.
+fn print_provisioned_key(host: IpAddr, port: u16, key: &str, persisted: bool) {
   println!(
     "{}",
     crate::cli::colors::success(&format!("proxy: LAN access enabled on {host}:{port}"))
   );
-  println!(
-    "{}",
-    crate::cli::colors::dim("proxy: generated an API key (saved to your config, shown once):")
-  );
+  let save_note = if persisted {
+    "proxy: generated an API key (saved to your config, shown once):"
+  } else {
+    "proxy: generated an API key (could NOT save to config — valid for this run only, regenerates next start):"
+  };
+  println!("{}", crate::cli::colors::dim(save_note));
   println!("    {key}");
   // For 0.0.0.0 / :: the user must substitute the box's LAN IP; show a
   // bearer-token usage hint either way.
@@ -1216,7 +1240,7 @@ mod tests {
     let cfg = dir.path().join("config.yaml");
     let (mut opts, cli) = non_loopback_opts(&cfg);
     assert!(opts.proxy.api_key.is_none());
-    provision_proxy_key(&mut opts, &cli).expect("provision");
+    provision_proxy_key(&mut opts, &cli, false).expect("provision");
     let key = opts.proxy.api_key.clone().expect("key set on opts");
     assert!(key.starts_with("sk-llamastash-"), "unexpected key: {key}");
     let written = std::fs::read_to_string(&cfg).expect("config written");
@@ -1229,11 +1253,11 @@ mod tests {
     let dir = tempfile::tempdir().expect("tempdir");
     let cfg = dir.path().join("config.yaml");
     let (mut opts, cli) = non_loopback_opts(&cfg);
-    provision_proxy_key(&mut opts, &cli).expect("first");
+    provision_proxy_key(&mut opts, &cli, false).expect("first");
     let first = opts.proxy.api_key.clone().unwrap();
     let first_file = std::fs::read_to_string(&cfg).unwrap();
     // Second call: key already present → no regeneration, no rewrite.
-    provision_proxy_key(&mut opts, &cli).expect("second");
+    provision_proxy_key(&mut opts, &cli, false).expect("second");
     assert_eq!(opts.proxy.api_key.as_deref(), Some(first.as_str()));
     assert_eq!(std::fs::read_to_string(&cfg).unwrap(), first_file);
   }
@@ -1244,7 +1268,7 @@ mod tests {
     let cfg = dir.path().join("config.yaml");
     let (mut opts, cli) = non_loopback_opts(&cfg);
     opts.proxy.insecure_no_auth = true;
-    provision_proxy_key(&mut opts, &cli).expect("provision");
+    provision_proxy_key(&mut opts, &cli, false).expect("provision");
     assert!(
       opts.proxy.api_key.is_none(),
       "insecure must not generate a key"
@@ -1259,9 +1283,55 @@ mod tests {
     // host stays None → loopback default.
     let mut opts = DaemonOptions::from_defaults().expect("defaults");
     let cli = parse_cli(&["--config", cfg.to_str().unwrap(), "daemon", "start"]);
-    provision_proxy_key(&mut opts, &cli).expect("provision");
+    provision_proxy_key(&mut opts, &cli, false).expect("provision");
     assert!(opts.proxy.api_key.is_none());
     assert!(!cfg.exists(), "loopback must not write config");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn provision_detached_errors_when_key_cannot_persist() {
+    // Detached daemon re-reads the key from config; if the write fails
+    // the child can't see the key, hits the backstop, and drops the
+    // proxy. provision must refuse to start rather than print a dead
+    // key. Force a write failure with a symlink config target (the
+    // writer refuses to follow symlinks).
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.yaml");
+    let victim = dir.path().join("victim.dat");
+    std::fs::write(&victim, b"x").unwrap();
+    symlink(&victim, &cfg).unwrap();
+    let (mut opts, cli) = non_loopback_opts(&cfg);
+    let err = provision_proxy_key(&mut opts, &cli, false).expect_err("must refuse to start");
+    assert!(
+      err.to_string().contains("could not save"),
+      "error must explain the unpersisted key: {err}"
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn provision_foreground_tolerates_persist_failure() {
+    // Same write failure, but a --foreground daemon is the same process
+    // that holds the key, so it works for this run. provision keeps the
+    // key on opts and returns Ok (the banner flags it as unsaved).
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.yaml");
+    let victim = dir.path().join("victim.dat");
+    std::fs::write(&victim, b"x").unwrap();
+    symlink(&victim, &cfg).unwrap();
+    let (mut opts, cli) = non_loopback_opts(&cfg);
+    provision_proxy_key(&mut opts, &cli, true).expect("foreground tolerates write failure");
+    assert!(
+      opts
+        .proxy
+        .api_key
+        .as_deref()
+        .is_some_and(|k| k.starts_with("sk-llamastash-")),
+      "key must still be set on opts for the in-process run"
+    );
   }
 
   #[test]
@@ -1271,7 +1341,7 @@ mod tests {
     let cfg = dir.path().join("config.yaml");
     std::fs::write(&cfg, "proxy:\n  port: 18080\n  ollama_compat: true\n").unwrap();
     let (mut opts, cli) = non_loopback_opts(&cfg);
-    provision_proxy_key(&mut opts, &cli).expect("provision");
+    provision_proxy_key(&mut opts, &cli, false).expect("provision");
     let written = std::fs::read_to_string(&cfg).unwrap();
     assert!(
       written.contains("18080"),

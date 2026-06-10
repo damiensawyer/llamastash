@@ -23,6 +23,7 @@ pub mod state_store;
 pub mod supervisor;
 
 use std::{
+  net::IpAddr,
   path::{Path, PathBuf},
   sync::Arc,
   time::{Duration, SystemTime, UNIX_EPOCH},
@@ -182,6 +183,19 @@ pub enum StartOutcome {
   RanToCompletion,
   /// Another instance is already running.
   AlreadyRunning(i32),
+}
+
+/// The fail-closed proxy backstop: `true` when the daemon must refuse
+/// to bind the proxy because it would face the network with no auth.
+/// That is exactly a non-loopback `host`, no configured key, and no
+/// `--insecure-no-auth` opt-out. Loopback (any address in `127/8`,
+/// `::1`), a configured key, or the explicit opt-out each clear it.
+///
+/// Extracted so the security boundary has a direct truth-table test —
+/// `run_foreground` itself is hard to unit-test, and a stray `&&`→`||`
+/// or dropped `!` here would silently expose an unauthenticated proxy.
+fn must_refuse_insecure_proxy(host: IpAddr, has_api_key: bool, insecure_no_auth: bool) -> bool {
+  !host.is_loopback() && !has_api_key && !insecure_no_auth
 }
 
 /// Run the daemon in the current process. Returns when the shutdown
@@ -391,7 +405,11 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
     // don't normally reach this; the backstop catches config-only and
     // auto-spawn paths that bypass the CLI. The daemon and the control
     // plane keep running — only the proxy listener is skipped.
-    if !host.is_loopback() && opts.proxy.api_key.is_none() && !opts.proxy.insecure_no_auth {
+    if must_refuse_insecure_proxy(
+      host,
+      opts.proxy.api_key.is_some(),
+      opts.proxy.insecure_no_auth,
+    ) {
       log::error!(
         "proxy: refusing to bind {addr} without authentication. Set proxy.api_key \
          (e.g. run `llamastash daemon start --proxy-host {host}` to auto-generate one) \
@@ -981,3 +999,48 @@ pub use lockfile::Lockfile as DaemonLockfile;
 
 /// Default drain timeout exposed for callers (tests, CLI status command).
 pub const SHUTDOWN_DRAIN_TIMEOUT: Duration = control_plane::DRAIN_TIMEOUT;
+
+#[cfg(test)]
+mod tests {
+  use super::must_refuse_insecure_proxy;
+  use std::net::IpAddr;
+
+  fn ip(s: &str) -> IpAddr {
+    s.parse().expect("valid ip")
+  }
+
+  #[test]
+  fn refuse_insecure_proxy_truth_table() {
+    // Loopback never refuses, regardless of key / opt-out — the
+    // historical same-UID posture is always allowed.
+    for host in ["127.0.0.1", "127.0.0.2", "::1"] {
+      for has_key in [false, true] {
+        for insecure in [false, true] {
+          assert!(
+            !must_refuse_insecure_proxy(ip(host), has_key, insecure),
+            "loopback {host} must never be refused (key={has_key}, insecure={insecure})"
+          );
+        }
+      }
+    }
+
+    // Non-loopback: refuse ONLY when there's no key AND no opt-out.
+    for host in ["0.0.0.0", "192.168.1.5", "::", "2001:db8::1"] {
+      assert!(
+        must_refuse_insecure_proxy(ip(host), false, false),
+        "{host} with no key and no opt-out must be refused"
+      );
+      assert!(
+        !must_refuse_insecure_proxy(ip(host), true, false),
+        "{host} with a key must bind (auth enforced)"
+      );
+      assert!(
+        !must_refuse_insecure_proxy(ip(host), false, true),
+        "{host} with --insecure-no-auth must bind (operator opted out)"
+      );
+      // A key present alongside the opt-out still binds (and auth wins
+      // downstream — the key is honored regardless of the flag).
+      assert!(!must_refuse_insecure_proxy(ip(host), true, true));
+    }
+  }
+}
