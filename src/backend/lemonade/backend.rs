@@ -83,9 +83,9 @@ pub fn umbrella_process_spec(port: u16, binary: PathBuf, probe: ProbeOptions) ->
   // directory (typically the user's Lemonade install dir). --host/--port
   // override config.json so llamastash owns the loopback binding.
   // `Path::parent` of a bare filename is `Some("")`, not `None`, so guard
-  // the empty case too — `lemond` needs a real working directory. The start
-  // path resolves `binary` to an absolute path (config.binary or a PATH
-  // lookup), so parent is the real install dir in practice.
+  // the empty case too — `lemond` needs a real working directory.
+  // `resolve_lemond_binary` canonicalizes the resolved path, so in practice
+  // `binary` is absolute and parent is the real install dir.
   let work_dir = match binary.parent() {
     Some(p) if !p.as_os_str().is_empty() => p.as_os_str().to_owned(),
     _ => OsString::from("."),
@@ -118,12 +118,23 @@ pub fn umbrella_process_spec(port: u16, binary: PathBuf, probe: ProbeOptions) ->
 ///   1. the explicit `lemonade.binary` path, if it points at a file;
 ///   2. otherwise `lemond` then `lemonade` on `PATH`.
 ///
-/// Returns the resolved absolute path, or `None` when nothing is found —
-/// llamastash never installs `lemond`, so a missing binary is a clean
+/// Returns the resolved *canonical absolute* path, or `None` when nothing is
+/// found — llamastash never installs `lemond`, so a missing binary is a clean
 /// "backend unavailable" rather than an error to recover from.
+///
+/// The path is canonicalized so a relative `lemonade.binary` (or a relative
+/// PATH entry) still yields an absolute path: [`umbrella_process_spec`] derives
+/// the umbrella's working dir from the binary's parent, which must be the real
+/// install dir (config.json / bin/ live there), not a path relative to the
+/// daemon's CWD.
 pub fn resolve_lemond_binary(cfg: &crate::config::loader::LemonadeConfig) -> Option<PathBuf> {
+  // `is_file()` already confirmed the target exists, so canonicalize should
+  // succeed; fall back to the verbatim path if it somehow doesn't.
+  fn canonical(p: &Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+  }
   if let Some(explicit) = &cfg.binary {
-    return explicit.is_file().then(|| explicit.clone());
+    return explicit.is_file().then(|| canonical(explicit));
   }
   let names: &[&str] = if cfg!(windows) {
     &["lemond.exe", "lemonade.exe"]
@@ -135,7 +146,7 @@ pub fn resolve_lemond_binary(cfg: &crate::config::loader::LemonadeConfig) -> Opt
     for name in names {
       let candidate = dir.join(name);
       if candidate.is_file() {
-        return Some(candidate);
+        return Some(canonical(&candidate));
       }
     }
   }
@@ -301,14 +312,15 @@ mod tests {
   fn resolve_binary_prefers_explicit_path_then_path_lookup() {
     use crate::config::loader::LemonadeConfig;
 
-    // Explicit binary that exists resolves to itself.
+    // Explicit binary that exists resolves to its canonical path.
     let this_exe = std::env::current_exe().expect("current exe");
     let cfg = LemonadeConfig {
       enabled: true,
       binary: Some(this_exe.clone()),
       port: 13305,
     };
-    assert_eq!(resolve_lemond_binary(&cfg), Some(this_exe));
+    let expected = this_exe.canonicalize().unwrap_or(this_exe);
+    assert_eq!(resolve_lemond_binary(&cfg), Some(expected));
 
     // Explicit binary that does NOT exist resolves to None (we never fall
     // back to PATH when the user named a specific file).
