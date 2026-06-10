@@ -103,3 +103,12 @@ lemond honors — `ctx` and the free-form extras (forwarded as the recipe's
 - **No NPU acceleration** — Lemonade falls back to CPU/GPU when AMD's NPU
   system stack (XRT / firmware / `flm`) isn't installed. Check Lemonade's own
   diagnostics; that stack is AMD's to install, not LlamaStash's.
+- **`FLM NPU validation failed: Memlock limits are too low`** — `lemond`
+  inherits the LlamaStash daemon's resource limits, and FLM needs to lock
+  model memory for the NPU. Many non-login contexts (systemd user services,
+  agent sandboxes) cap `memlock` at 8 MB even when
+  `/etc/security/limits.conf` says `unlimited`. Check with `ulimit -l` in
+  the shell that starts the daemon; start it from a real login shell, or
+  raise `DefaultLimitMEMLOCK` for `user@.service` if you manage the daemon
+  via systemd. NPU models surface the error on the model's `status` row and
+  at request time; CPU/GPU recipes are unaffected.
