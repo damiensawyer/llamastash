@@ -166,7 +166,13 @@ async fn stale_runtime_file_is_overwritten_on_start() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_detached_honours_caller_supplied_paths() {
   let dir = unique_temp_dir("detach-opts");
-  let opts = opts_for(&dir);
+  let mut opts = opts_for(&dir);
+  // The detached child re-execs `daemon start`, whose backend fail-fast
+  // precheck refuses to start without a resolvable `llama-server` — which
+  // CI runners don't have. This test is about state-dir plumbing, not
+  // backend readiness, so ride the designed escape hatch (and prove
+  // `--force` propagates through the re-exec while we're at it).
+  opts.force = true;
   let attach = opts.state_dir.clone();
   let pidfile = dir.join("daemon.pid");
   let runtime = llamastash::daemon::runtime_file::path(&dir);
