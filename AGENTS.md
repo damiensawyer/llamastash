@@ -157,6 +157,20 @@ target/debug/llamastash                                 # TUI: pan through every
 
 For TUI changes specifically, **launch the TUI and look at the panel you touched** — golden snapshots catch byte-exact regressions but not "the field is empty in real life because the running daemon doesn't surface it yet." A fresh daemon restart is part of the validation.
 
+Agents (no interactive terminal) can drive the TUI through
+`scripts/tui_drive.py`: it spawns the working-tree binary in a pty, feeds a
+scripted key sequence, and prints a plain-text screen capture after each step
+(needs `pip install pyte`; the child inherits `LLAMASTASH_*` env vars, so
+pair it with an isolated state dir). Example — stage the launch picker on a
+filtered row and read the staged form:
+
+```bash
+python3 scripts/tui_drive.py '[["", 4, "boot"], ["/gemma|<enter>", 2, "staged"]]'
+```
+
+One-frame renders without key input are cheaper via the built-in
+`llamastash --render --render-size 160x45` (`make render` renders all sizes).
+
 When E2E surfaces a regression the test suite missed (stale daemon, missing IPC field, wrong port, etc.), add a regression test before fixing — that's the gap the suite needs covered.
 
 ## Running the daemon locally
