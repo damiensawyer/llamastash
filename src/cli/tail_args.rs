@@ -45,7 +45,7 @@ pub fn parse_tail_args(tokens: &[OsString]) -> Result<(TypedKnobs, Vec<OsString>
                 .peek()
                 .map(|t| t.to_string_lossy().to_ascii_lowercase())
               {
-                Some(p) if is_bool_value_token(&p) => {
+                Some(p) if is_bool_value_token(&p) || p == "auto" => {
                   iter.next();
                   Some(p)
                 }
@@ -65,10 +65,10 @@ pub fn parse_tail_args(tokens: &[OsString]) -> Result<(TypedKnobs, Vec<OsString>
 
 /// `parse_bool`-spellings that may follow a bool flag in space form,
 /// matching the `on|off|true|false|...` spellings `parse_bool` accepts.
-/// `auto` (llama-server's tri-state default for `--flash-attn`) is
-/// intentionally NOT consumed — the bench never uses it and consuming
-/// it would force `parse_bool` to invent a meaning. A user passing
-/// `--flash-attn auto` instead routes `auto` to extras unchanged.
+/// The literal `auto` is consumed too (handled at the call site, not
+/// here) — it sets the knob's [`KnobValue::Auto`] state rather than a
+/// boolean. This fixes the prior `--flash-attn auto` bug where `auto`
+/// was left as a dangling positional in extras, producing broken argv.
 fn is_bool_value_token(s: &str) -> bool {
   matches!(
     s,
@@ -103,10 +103,17 @@ fn apply_knob(
   value: Option<&str>,
   flag: &str,
 ) -> Result<(), CliExit> {
+  // The `auto` literal sets the knob's Auto state on *any* knob,
+  // regardless of value kind — `--n-gpu-layers auto`, `--ctx auto`,
+  // `--flash-attn auto` all delegate to `--fit`. For the string knobs
+  // where `auto` is also a legal upstream value (split_mode / device /
+  // cache_type_* / tensor_split) the knob-state meaning wins; to pass a
+  // literal `auto` to llama-server, use the `--` extras tail.
+  if value.is_some_and(|v| v.eq_ignore_ascii_case("auto")) {
+    crate::launch::params::set_field_auto(knobs, field);
+    return Ok(());
+  }
   match (field, kind) {
-    // U4 wraps each parsed value as `KnobValue::Set`; the `auto`
-    // literal (→ `KnobValue::Auto`) lands in U5 alongside the
-    // flash-attn fix.
     (KnobField::Ctx, ValueKind::U32) => knobs.ctx = Some(KnobValue::Set(parse_u32(flag, value)?)),
     (KnobField::Reasoning, ValueKind::Bool) => {
       knobs.reasoning = Some(KnobValue::Set(parse_bool(flag, value)?))
@@ -423,12 +430,40 @@ mod tests {
   }
 
   #[test]
-  fn boolean_space_form_leaves_auto_to_extras() {
-    // `auto` isn't a parse_bool spelling — pass it through to the
-    // child via extras so llama-server can interpret it natively.
+  fn flash_attn_auto_sets_auto_state_with_no_dangling_extra() {
+    // Regression for the latent bug: `--flash-attn auto` previously
+    // left `auto` as a dangling positional in extras *and* set
+    // flash_attn=true, producing broken argv. It now consumes `auto`
+    // and sets the knob's Auto state — nothing leaks to extras.
     let (knobs, extras) = parse_tail_args(&osvec(&["--flash-attn", "auto"])).unwrap();
-    assert_eq!(knobs.flash_attn, Some(KnobValue::Set(true)));
-    assert_eq!(extras, vec![OsString::from("auto")]);
+    assert_eq!(knobs.flash_attn, Some(KnobValue::Auto));
+    assert!(
+      extras.is_empty(),
+      "`auto` must be consumed, not left dangling: {extras:?}"
+    );
+  }
+
+  #[test]
+  fn auto_literal_sets_auto_on_every_knob_kind() {
+    // Numeric, string, and equals-form all route `auto` to the Auto
+    // state rather than parsing it as a value.
+    let (k, extras) = parse_tail_args(&osvec(&[
+      "--n-gpu-layers",
+      "auto",
+      "--threads=auto",
+      "--split-mode=auto",
+    ]))
+    .unwrap();
+    assert_eq!(k.n_gpu_layers, Some(KnobValue::Auto));
+    assert_eq!(k.threads, Some(KnobValue::Auto));
+    // `auto` is a legal upstream value for split_mode, but the knob
+    // state wins (use extras to pass a literal `auto` to the server).
+    assert_eq!(k.split_mode, Some(KnobValue::Auto));
+    assert!(extras.is_empty());
+
+    // A concrete value still parses to Set.
+    let (k2, _) = parse_tail_args(&osvec(&["--n-gpu-layers", "50"])).unwrap();
+    assert_eq!(k2.n_gpu_layers, Some(KnobValue::Set(50)));
   }
 
   #[test]

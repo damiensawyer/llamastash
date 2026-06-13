@@ -326,9 +326,11 @@ pub struct StartArgs {
   /// Saved preset to load before applying overrides.
   #[arg(long, value_name = "NAME")]
   pub preset: Option<String>,
-  /// Context length override.
-  #[arg(long, value_name = "TOKENS")]
-  pub ctx: Option<u32>,
+  /// Context length override. A token count pins `-c`; the literal
+  /// `auto` delegates the window to llama-server's `--fit` (the knob's
+  /// Auto state).
+  #[arg(long, value_name = "TOKENS|auto", value_parser = parse_ctx_arg)]
+  pub ctx: Option<CtxArg>,
   /// Pin the listening port (otherwise auto-allocated from the config range).
   #[arg(long, value_name = "PORT")]
   pub port: Option<u16>,
@@ -994,6 +996,26 @@ pub enum FavoritesAction {
 pub enum ReasoningFlag {
   On,
   Off,
+}
+
+/// `start --ctx` value: a concrete token count or the `auto` knob
+/// state. A custom parser (not `ValueEnum`) because the value is either
+/// a free integer or the literal `auto`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CtxArg {
+  /// Delegate the context window to `--fit`.
+  Auto,
+  /// Pin the context window to this many tokens.
+  Value(u32),
+}
+
+fn parse_ctx_arg(s: &str) -> Result<CtxArg, String> {
+  if s.eq_ignore_ascii_case("auto") {
+    return Ok(CtxArg::Auto);
+  }
+  s.parse::<u32>()
+    .map(CtxArg::Value)
+    .map_err(|_| format!("expected a token count or `auto`, got `{s}`"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1798,7 +1820,7 @@ mod tests {
       Some(Command::Start(args)) => {
         assert_eq!(args.model.as_deref(), Some("qwen-coder"));
         assert_eq!(args.preset.as_deref(), Some("coding"));
-        assert_eq!(args.ctx, Some(32768));
+        assert_eq!(args.ctx, Some(CtxArg::Value(32768)));
         assert_eq!(args.port, Some(41150));
         assert_eq!(args.reasoning, Some(ReasoningFlag::On));
         assert_eq!(args.mode, Some(LaunchMode::Chat));

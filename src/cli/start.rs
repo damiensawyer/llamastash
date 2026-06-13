@@ -18,14 +18,14 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::cli::cli_args::{Cli, LaunchMode as CliLaunchMode, ReasoningFlag, StartArgs};
+use crate::cli::cli_args::{Cli, CtxArg, LaunchMode as CliLaunchMode, ReasoningFlag, StartArgs};
 use crate::cli::client::connect_or_spawn;
 use crate::cli::exit_codes::{
   CliExit, CliResult, BINARY_NOT_FOUND, LAUNCH_FAILED, MODEL_NOT_FOUND, USAGE,
 };
 use crate::cli::resolve::{fetch_catalog, resolve_model_with_candidates, CatalogRow, ResolveError};
 use crate::cli::tail_args::parse_tail_args;
-use crate::config::{Config, TypedKnobs};
+use crate::config::{Config, KnobValue, TypedKnobs};
 use crate::ipc::Client;
 
 pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
@@ -48,8 +48,13 @@ pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
     PartialParams::default()
   };
 
-  if let Some(ctx) = args.ctx {
-    params.ctx = Some(ctx);
+  match args.ctx {
+    // A pinned count rides the top-level `ctx` (emitted inline as `-c`).
+    Some(CtxArg::Value(n)) => params.ctx = Some(n),
+    // `auto` sets the knob's Auto state so `--fit` governs the window;
+    // it must not also set top-level ctx (that would pin `-c`).
+    Some(CtxArg::Auto) => params.knobs.ctx = Some(KnobValue::Auto),
+    None => {}
   }
   if let Some(port) = args.port {
     params.port = Some(port);

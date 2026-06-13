@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use llamastash::cli::cli_args::{
-  Cli, Command, FavoritesAction, FavoritesArgs, LaunchMode as CliLaunchMode, ListArgs, LogsArgs,
-  PresetsAction, PresetsArgs, PullArgs, ReasoningFlag, StartArgs, StatusArgs, StopArgs,
+  Cli, Command, CtxArg, FavoritesAction, FavoritesArgs, LaunchMode as CliLaunchMode, ListArgs,
+  LogsArgs, PresetsAction, PresetsArgs, PullArgs, ReasoningFlag, StartArgs, StatusArgs, StopArgs,
 };
 use llamastash::cli::{dispatch, exit_codes};
 use llamastash::config::loader::{LoadedConfig, PortRange};
@@ -803,7 +803,7 @@ async fn start_ctx_above_native_succeeds_and_duplicate_launch_uses_new_port() {
     Command::Start(StartArgs {
       model: Some("m.gguf".into()),
       preset: None,
-      ctx: Some(131_072),
+      ctx: Some(CtxArg::Value(131_072)),
       port: None,
       reasoning: None,
       mode: Some(CliLaunchMode::Chat),

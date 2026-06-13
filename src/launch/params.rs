@@ -532,8 +532,9 @@ pub fn seed_layerless(resolved: &mut Resolved, mode: DefaultLaunchMode) {
   }
 }
 
-/// Set a single knob slot to [`KnobValue::Auto`], keyed by field.
-fn set_field_auto(knobs: &mut TypedKnobs, field: KnobField) {
+/// Set a single knob slot to [`KnobValue::Auto`], keyed by field. Used
+/// by the seeding rule and by the CLI `auto` literal parser.
+pub fn set_field_auto(knobs: &mut TypedKnobs, field: KnobField) {
   match field {
     KnobField::Ctx => knobs.ctx = Some(KnobValue::Auto),
     KnobField::Reasoning => knobs.reasoning = Some(KnobValue::Auto),
