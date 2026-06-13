@@ -7,6 +7,7 @@
 //! - [`presets`] / [`favorites`] — types persisted in
 //!   [`crate::daemon::state_store`].
 
+pub mod admission;
 pub mod binary;
 pub mod ctx_fit;
 pub mod defaults_table;

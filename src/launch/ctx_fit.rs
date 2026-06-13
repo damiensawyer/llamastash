@@ -172,7 +172,10 @@ fn ram_free(host: &HostMetricsSnapshot) -> u64 {
   host.ram_total_bytes.saturating_sub(host.ram_used_bytes)
 }
 
-fn parse_cache_type(raw: Option<&str>) -> CacheType {
+/// Parse a `--cache-type-{k,v}` tag (`q8_0`, `f16`, …) into a
+/// [`CacheType`], defaulting to `f16` when absent/unrecognised. Shared
+/// with U8 admission so the KV projection uses the same dtype mapping.
+pub fn parse_cache_type(raw: Option<&str>) -> CacheType {
   raw.and_then(CacheType::parse).unwrap_or_default()
 }
 

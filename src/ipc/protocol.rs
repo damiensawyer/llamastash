@@ -92,6 +92,18 @@ impl ErrorObject {
       data: None,
     }
   }
+
+  /// Attach structured `data` — used to carry a machine-readable
+  /// `cause` (e.g. `launch_refused`) so the proxy can map the error to
+  /// the right HTTP status and backoff policy without string-matching
+  /// the human message.
+  pub fn with_data(code: ErrorCode, message: impl Into<String>, data: Value) -> Self {
+    Self {
+      code: code.as_i32(),
+      message: message.into(),
+      data: Some(data),
+    }
+  }
 }
 
 /// JSON-RPC error codes. The first five (`ParseError`..`InternalError`)

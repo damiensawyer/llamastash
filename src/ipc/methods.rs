@@ -116,6 +116,11 @@ pub struct MethodContext {
   /// the right port, and `status` reads it for the `installed` signal.
   /// Defaults to disabled, so catalog-only tests never touch `lemond`.
   pub lemonade: LemonadeConfig,
+  /// Pre-spawn memory admission ledger (R4). Shared across every launch
+  /// entry point so check-and-reserve is atomic against concurrent
+  /// launches; settled (released) when each child reaches Ready / Error
+  /// / Stopped. In-memory by design.
+  pub admission: Arc<crate::launch::admission::Ledger>,
 }
 
 /// Wrapper around the in-memory `DaemonState` plus the directory
@@ -231,6 +236,7 @@ impl MethodContext {
       proxy_status: None,
       ipc_url: None,
       lemonade: LemonadeConfig::default(),
+      admission: Arc::new(crate::launch::admission::Ledger::default()),
     }
   }
 
@@ -1758,6 +1764,57 @@ pub(crate) async fn start_model_inner(
       }
     };
 
+  // Pre-spawn admission (R4): project this launch's demand floor and
+  // refuse *before* spawn if it won't fit the sampled budget minus the
+  // bytes other in-flight launches already reserved. This is the safety
+  // net `--fit` can't provide on UMA (its free reading conflates GTT
+  // with system RAM). Keyed by the reserved `port` (unique per in-flight
+  // launch); released when the child settles or on any failure below.
+  // Best-effort: skipped entirely when there is no host-metrics sample
+  // yet (the `port` reservation still gates the pool). Only the
+  // process-spawn path reaches here — Lemonade's umbrella returned
+  // above.
+  let mut admitted = false;
+  if identity.as_gguf().is_some() {
+    if let Some(host_slot) = ctx.host_metrics.as_ref() {
+      let snapshot = host_slot.read().await.clone();
+      if crate::launch::admission::is_sampled(&snapshot) {
+        let effective_ctx = launch_params.ctx.unwrap_or(env.fit_ctx_floor);
+        let free = crate::launch::admission::effective_free_bytes(&snapshot);
+        let gpu_backend = snapshot.gpu_backend.clone();
+        let model_path = launch_params.model_path.clone();
+        let knobs = launch_params.knobs.clone();
+        let arch_owned = arch.clone();
+        let demand = tokio::task::spawn_blocking(move || {
+          let header = read_gguf_header(&model_path, HeaderReadOptions::default())
+            .ok()?
+            .header;
+          Some(crate::launch::admission::project_demand(
+            &header,
+            arch_owned.as_deref(),
+            &knobs,
+            effective_ctx,
+            &gpu_backend,
+          ))
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(demand) = demand {
+          if let Err(refusal) = ctx.admission.try_admit(u64::from(port), demand, free) {
+            ctx.supervisors.release_reserved_port(port).await;
+            return Err(ErrorObject::with_data(
+              ErrorCode::InternalError,
+              format_admission_refusal(&refusal),
+              serde_json::json!({ "cause": "launch_refused" }),
+            ));
+          }
+          admitted = true;
+        }
+      }
+    }
+  }
+
   let spawn_result = supervisor_spawn(ManagedSpawn {
     id: id.clone(),
     params: launch_params.clone(),
@@ -1771,8 +1828,11 @@ pub(crate) async fn start_model_inner(
   let model = match spawn_result {
     Ok(m) => m,
     Err(e) => {
-      // Free the reserved port so a retry can re-use it.
+      // Free the reserved port + admission hold so a retry can re-use them.
       ctx.supervisors.release_reserved_port(port).await;
+      if admitted {
+        ctx.admission.release(u64::from(port));
+      }
       return Err(ErrorObject::new(
         ErrorCode::InternalError,
         format!("supervisor spawn: {e}"),
@@ -1843,6 +1903,19 @@ pub(crate) async fn start_model_inner(
     scaled_probe.timeout,
     ctx.shutdown.clone(),
   );
+
+  // Settle the admission reservation when the child leaves Loading
+  // (Ready: real allocation is now visible to the sampler; Error /
+  // Stopped: the slot is freed). Keyed by `port`; idempotent.
+  if admitted {
+    spawn_admission_settle(
+      ctx.admission.clone(),
+      model.clone(),
+      port,
+      scaled_probe.timeout,
+      ctx.shutdown.clone(),
+    );
+  }
 
   Ok(StartedLaunch {
     launch_id,
@@ -2011,6 +2084,57 @@ async fn lemonade_load_options(
     ctx_size: params.ctx,
     recipe_args,
   }
+}
+
+/// Human-readable admission refusal: the effective free (post-headroom),
+/// what other launches hold, this launch's projected demand, and the
+/// remediation menu — so the number is self-explaining and actionable.
+fn format_admission_refusal(refusal: &crate::launch::admission::Refusal) -> String {
+  let gib = |b: u64| format!("{:.1} GiB", b as f64 / (1024.0 * 1024.0 * 1024.0));
+  format!(
+    "launch refused: needs {} but only {} is free (effective {} after headroom, minus {} reserved by in-flight launches). \
+     Stop a resident model, pin a smaller --ctx, lower fit_ctx_floor, or retry once a model frees memory.",
+    gib(refusal.demand_bytes),
+    gib(refusal.available_bytes()),
+    gib(refusal.effective_free_bytes),
+    gib(refusal.reserved_bytes),
+  )
+}
+
+/// Poll the child until it leaves Loading (Ready / Error / Stopped) and
+/// drop its admission reservation. Mirrors the recorder's poll shape;
+/// bounded by the scaled probe budget and the shutdown token so a child
+/// that never settles can't leak the reservation forever.
+fn spawn_admission_settle(
+  ledger: Arc<crate::launch::admission::Ledger>,
+  model: ManagedModel,
+  port: u16,
+  probe_budget: Duration,
+  shutdown: ShutdownToken,
+) {
+  tokio::spawn(async move {
+    let deadline = Instant::now() + probe_budget;
+    loop {
+      match model.state().await {
+        ManagedState::Ready | ManagedState::Error { .. } | ManagedState::Stopped => {
+          ledger.release(u64::from(port));
+          return;
+        }
+        _ => {}
+      }
+      if Instant::now() > deadline {
+        ledger.release(u64::from(port));
+        return;
+      }
+      tokio::select! {
+        _ = shutdown.wait_until_triggered() => {
+          ledger.release(u64::from(port));
+          return;
+        }
+        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+      }
+    }
+  });
 }
 
 fn spawn_last_params_recorder(

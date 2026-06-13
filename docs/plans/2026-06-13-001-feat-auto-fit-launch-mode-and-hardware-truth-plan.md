@@ -439,7 +439,9 @@ sequenceDiagram
 
 ### Phase 3 — Budget authority & visibility (R4, R6, R7 carve-out, R8/R9 TUI, R16, R19, R1 TUI)
 
-- [ ] **Unit 8: admission control + reservation ledger**
+- [x] **Unit 8: admission control + reservation ledger** *(simplified per scope amendment)*
+
+> Done: `src/launch/admission.rs` — an atomic in-memory `Ledger` (check-and-reserve under one lock, keyed by the reserved `port`) plus `effective_free_bytes` (post-headroom; UMA/Apple = single RAM pool, discrete = VRAM+RAM summed) and `project_demand` (weights + KV at the effective ctx + the backend overhead band, reusing the `ctx_fit`/`gguf::memory` estimators + U1 `headroom`). `start_model_inner` refuses **before spawn** when demand > free − reservations, releasing the port and returning a `launch_refused`-tagged error (effective/demand/reserved numbers + remediation menu); the reservation settles on Ready/Error/Stopped (a small poller) and releases on spawn failure. All entry points (CLI/TUI/proxy) converge here. **Simplifications:** single combined budget (no per-pool greedy split); reservation = full demand held through Loading (conservative double-count, errs toward refusing never OOM — no reserve-minus-observed bookkeeping); best-effort (skipped when `unsampled`/no sampler); `--fit-target` UMA margin **not emitted** (admission is the safety net, as the plan itself notes); proxy refusals feed the existing retry-limiter rather than a separate no-backoff path. The headline 44+37 GiB / 60 GiB double-book regression is covered by `admission.rs` ledger unit tests; a full live-spawn concurrency test (needs a sampler-injection seam + memory-eating fixture) is deferred.
 
 **Goal:** Pre-spawn admission inside `start_model_inner` projecting demand against sampled budgets, with an atomic in-memory reservation ledger covering all entry points, reserve-minus-observed double-count handling, the UMA `--fit-target` margin translation, and the unsampled/post-restart window policy.
 
