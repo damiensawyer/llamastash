@@ -228,7 +228,9 @@ sequenceDiagram
 
 **Verification:** On the reference Strix Halo machine, sampled pool totals match `/sys/class/drm` values; a simulated dGPU fixture is not summed; Apple raw totals flow to display while admission math applies 0.75.
 
-- [ ] **Unit 2: shared hardware snapshot across surfaces, doctor hardware section, drift finding, GTT hint**
+- [x] **Unit 2: shared hardware snapshot across surfaces, doctor hardware section, drift finding, GTT hint**
+
+> Done: doctor hardware section (R12), `memory_drift` finding + baseline stamp/refresh (R13), `gtt_hint` (R14), `gpu_pool_total_bytes` baseline field, `DOCTOR_JSON_SCHEMA_VERSION` → 2, MEM/MEM*/`GPU (shared)` labels in the doctor section. **Folded into U3:** the R11 "rendered identically" cross-surface rendering of the init banner / `status` / TUI host pane uses U3's MEM-rename sweep (same files), so it lands there rather than half-applying the rename twice.
 
 **Goal:** One freshly-built hardware snapshot rendered identically by `status`, `doctor`, the init banner, and the TUI host pane; doctor gains a hardware section, a memory-drift finding with baseline refresh, and the GTT-cap hint.
 
@@ -261,7 +263,7 @@ sequenceDiagram
 
 - [ ] **Unit 3: MEM/MEM* rename + `GPU (shared)` row**
 
-**Goal:** Stop UMA machines reading as 2× physical memory: `RAM`→`MEM`, `RAM*`→`MEM*` everywhere, GPU row labelled `GPU (shared)` as a composition breakdown *of* the `MEM*` pool, one legend meaning for the asterisk.
+**Goal:** Stop UMA machines reading as 2× physical memory: `RAM`→`MEM`, `RAM*`→`MEM*` everywhere, GPU row labelled `GPU (shared)` as a composition breakdown *of* the `MEM*` pool, one legend meaning for the asterisk. **Absorbed from U2 (R11):** while renaming these surfaces, also wire the init banner / `status` human output / TUI host pane to render the same hardware field set the doctor section already uses (classification source, carve + GTT composition), so all four surfaces show one identical truth.
 
 **Requirements:** R15
 
