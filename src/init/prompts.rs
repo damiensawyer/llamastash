@@ -880,6 +880,7 @@ mod tests {
       revision: None,
       no_tui: true,
       integrations: Vec::new(),
+      step: None,
     }
   }
 

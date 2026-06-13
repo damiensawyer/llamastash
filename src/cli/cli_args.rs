@@ -540,20 +540,24 @@ pub struct InitArgs {
   /// with `--json` for agent consumption. Integrity-check failures
   /// still abort with the documented exit codes — they are never
   /// silently downgraded.
-  #[arg(long, action = ArgAction::SetTrue)]
+  ///
+  /// `global = true` so it works on either side of an `init <step>`
+  /// subcommand (`init --recommended models` and `init models
+  /// --recommended` both parse).
+  #[arg(long, action = ArgAction::SetTrue, global = true)]
   pub recommended: bool,
   /// Hidden alias for `--recommended` kept for agent/script
   /// compatibility.
-  #[arg(long, hide = true)]
+  #[arg(long, hide = true, global = true)]
   pub yes: bool,
   /// Emit a single structured summary at completion. Per-step progress
   /// goes to stderr (only in `--verbose`). Mutually compatible with
   /// `--recommended`.
-  #[arg(long)]
+  #[arg(long, global = true)]
   pub json: bool,
   /// Disable outbound network. Steps that require network are skipped
   /// with actionable hints. Equivalent to `LLAMASTASH_OFFLINE=1`.
-  #[arg(long, env = "LLAMASTASH_OFFLINE")]
+  #[arg(long, env = "LLAMASTASH_OFFLINE", global = true)]
   pub offline: bool,
   /// Run only these step(s). Repeatable; values are comma-separable.
   /// Mutually exclusive with `--skip`.
@@ -613,7 +617,7 @@ pub struct InitArgs {
   /// a successful interactive (non-`--json`, TTY) init prompts to
   /// launch the TUI in the same process; with `--recommended`, the
   /// TUI launches without prompting. This flag bypasses both.
-  #[arg(long, action = ArgAction::SetTrue)]
+  #[arg(long, action = ArgAction::SetTrue, global = true)]
   pub no_tui: bool,
 
   /// Pre-answer the integrations picker. Comma-separated tool ids:
@@ -630,6 +634,123 @@ pub struct InitArgs {
     action = ArgAction::Append,
   )]
   pub integrations: Vec<String>,
+
+  /// Run a single wizard step as a subcommand instead of the full
+  /// flow. `init server|models|config|integrations` is sugar for
+  /// `init --only <step>`, with the step's pre-answer flag carried on
+  /// the subcommand itself (e.g. `init server --install gh-releases`).
+  /// Bare `init` (no subcommand) runs every step, honoring the
+  /// `--only` / `--skip` aliases. See [`InitArgs::fold_step`].
+  #[command(subcommand)]
+  pub step: Option<InitStepCommand>,
+}
+
+/// First-class subcommands for the individual `init` steps. Each
+/// variant maps 1:1 to an [`InitStep`] and carries only that step's
+/// pre-answer override; [`InitArgs::fold_step`] collapses the chosen
+/// variant back into the flat `--only` shape the wizard consumes, so
+/// the orchestration in `init::wizard` never has to learn about the
+/// subcommand surface.
+#[derive(Subcommand, Debug)]
+pub enum InitStepCommand {
+  /// Install `llama-server` only (`init --only server`).
+  Server(InitServerArgs),
+  /// Recommend + download a model only (`init --only models`).
+  Models(InitModelsArgs),
+  /// Write `config.yaml` only (`init --only config`).
+  Config(InitConfigArgs),
+  /// Patch supported AI dev tools only (`init --only integrations`).
+  Integrations(InitIntegrationsArgs),
+}
+
+/// Pre-answer flags for `init server`. Mirrors the parent `--install`
+/// flag so the override reads naturally on the subcommand.
+#[derive(Args, Debug, Default)]
+pub struct InitServerArgs {
+  /// Pre-answer the install-method prompt. Same grammar as
+  /// `init --install` (`brew`, `gh-releases`, `existing`,
+  /// `custom:<PATH>`).
+  #[arg(long, value_name = "CHOICE", value_parser = parse_install_override)]
+  pub install: Option<InstallOverride>,
+}
+
+/// Pre-answer flags for `init models`. Mirrors the parent `--model`
+/// and `--revision` flags.
+#[derive(Args, Debug, Default)]
+pub struct InitModelsArgs {
+  /// Pre-answer the model-pick prompt (`recommended`, `none`, or
+  /// `<owner>/<repo>`).
+  #[arg(long, value_name = "CHOICE", value_parser = parse_model_override)]
+  pub model: Option<ModelOverride>,
+  /// Pin the HuggingFace revision used on the `--model owner/repo`
+  /// paste branch.
+  #[arg(long, value_name = "SHA", value_parser = parse_revision)]
+  pub revision: Option<String>,
+}
+
+/// Pre-answer flags for `init config`. Mirrors the parent
+/// `--config-step` flag.
+#[derive(Args, Debug, Default)]
+pub struct InitConfigArgs {
+  /// Pre-answer the config-write confirm (`write`, `skip`).
+  #[arg(long = "config-step", value_name = "CHOICE", value_enum)]
+  pub config_choice: Option<ConfigOverride>,
+}
+
+/// Pre-answer flags for `init integrations`. Mirrors the parent
+/// `--integrations` flag.
+#[derive(Args, Debug, Default)]
+pub struct InitIntegrationsArgs {
+  /// Comma-separated tool ids to patch (`opencode`, `aider`,
+  /// `continue`, `zed`, `pi`, `env-sh`). `none` skips the step.
+  #[arg(long, value_name = "TOOLS", value_delimiter = ',', action = ArgAction::Append)]
+  pub integrations: Vec<String>,
+}
+
+impl InitArgs {
+  /// Collapse an `init <step>` subcommand invocation into the flat
+  /// flag shape the wizard already understands: pin `only` to the
+  /// chosen step, clear `skip`, and copy the subcommand's pre-answer
+  /// override onto the parent (the subcommand value wins over a
+  /// parent flag of the same name). Bare `init` (no subcommand) is
+  /// returned unchanged, so `--only` / `--skip` keep working as
+  /// aliases.
+  pub fn fold_step(mut self) -> InitArgs {
+    let Some(step) = self.step.take() else {
+      return self;
+    };
+    match step {
+      InitStepCommand::Server(a) => {
+        self.only = vec![InitStep::Server];
+        if a.install.is_some() {
+          self.install = a.install;
+        }
+      }
+      InitStepCommand::Models(a) => {
+        self.only = vec![InitStep::Models];
+        if a.model.is_some() {
+          self.model = a.model;
+        }
+        if a.revision.is_some() {
+          self.revision = a.revision;
+        }
+      }
+      InitStepCommand::Config(a) => {
+        self.only = vec![InitStep::Config];
+        if a.config_choice.is_some() {
+          self.config_choice = a.config_choice;
+        }
+      }
+      InitStepCommand::Integrations(a) => {
+        self.only = vec![InitStep::Integrations];
+        if !a.integrations.is_empty() {
+          self.integrations = a.integrations;
+        }
+      }
+    }
+    self.skip = Vec::new();
+    self
+  }
 }
 
 /// Reject empty `--revision` values up-front so a downstream hf-hub
@@ -805,6 +926,7 @@ pub fn recommend_to_init_args(args: RecommendArgs) -> InitArgs {
     revision: args.revision,
     no_tui: true,
     integrations: Vec::new(),
+    step: None,
   }
 }
 
@@ -1134,6 +1256,98 @@ mod tests {
       }
       other => panic!("expected init, got {other:?}"),
     }
+  }
+
+  /// Extract `InitArgs` from a parsed `init` invocation, panicking on
+  /// any other command. Keeps the subcommand-fold tests terse.
+  fn init_args(args: &[&str]) -> InitArgs {
+    match parse(args).command {
+      Some(Command::Init(a)) => a,
+      other => panic!("expected init, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn init_step_subcommand_folds_to_only() {
+    // `init <step>` is sugar for `init --only <step>` — fold_step must
+    // pin `only` to that single step and clear `skip`.
+    for (argv, expected) in [
+      (vec!["init", "server"], InitStep::Server),
+      (vec!["init", "models"], InitStep::Models),
+      (vec!["init", "config"], InitStep::Config),
+      (vec!["init", "integrations"], InitStep::Integrations),
+    ] {
+      let folded = init_args(&argv).fold_step();
+      assert_eq!(
+        steps(&folded.only),
+        steps(&[expected]),
+        "{argv:?} must fold to only=[{expected:?}]"
+      );
+      assert!(folded.skip.is_empty(), "{argv:?} must clear skip");
+      assert!(folded.step.is_none(), "fold must consume the subcommand");
+    }
+  }
+
+  #[test]
+  fn init_bare_without_subcommand_is_unchanged_by_fold() {
+    // No subcommand → `--only` / `--skip` aliases must survive the fold
+    // untouched.
+    let only = init_args(&["init", "--only", "server,config"]).fold_step();
+    assert_eq!(steps(&only.only), vec!["server", "config"]);
+    let skip = init_args(&["init", "--skip", "models"]).fold_step();
+    assert_eq!(steps(&skip.skip), vec!["models"]);
+    assert!(skip.only.is_empty());
+  }
+
+  #[test]
+  fn init_step_carries_pre_answer_override() {
+    let server = init_args(&["init", "server", "--install", "gh-releases"]).fold_step();
+    assert_eq!(server.install, Some(InstallOverride::GhReleases));
+    assert_eq!(steps(&server.only), vec!["server"]);
+
+    let model = init_args(&["init", "models", "--model", "none"]).fold_step();
+    assert_eq!(model.model, Some(ModelOverride::None));
+
+    let revision = init_args(&["init", "models", "--revision", "abc123"]).fold_step();
+    assert_eq!(revision.revision.as_deref(), Some("abc123"));
+
+    let config = init_args(&["init", "config", "--config-step", "write"]).fold_step();
+    assert_eq!(config.config_choice, Some(ConfigOverride::Write));
+
+    let integrations =
+      init_args(&["init", "integrations", "--integrations", "opencode,aider"]).fold_step();
+    assert_eq!(integrations.integrations, vec!["opencode", "aider"]);
+  }
+
+  #[test]
+  fn init_global_flags_parse_on_either_side_of_subcommand() {
+    // `--json` / `--recommended` are `global = true`, so they bind
+    // whether they appear before or after the step subcommand.
+    for argv in [
+      vec!["init", "--json", "models"],
+      vec!["init", "models", "--json"],
+    ] {
+      let folded = init_args(&argv).fold_step();
+      assert!(folded.json, "{argv:?} must set --json");
+      assert_eq!(steps(&folded.only), vec!["models"]);
+    }
+    let folded = init_args(&["init", "server", "--recommended"]).fold_step();
+    assert!(folded.recommended);
+    assert_eq!(steps(&folded.only), vec!["server"]);
+  }
+
+  #[test]
+  fn init_step_subcommand_overrides_only_flag() {
+    // A stray `--only` alongside the subcommand must not win — the
+    // subcommand is authoritative.
+    let folded = init_args(&["init", "--only", "config", "server"]).fold_step();
+    assert_eq!(steps(&folded.only), vec!["server"]);
+  }
+
+  #[test]
+  fn init_unknown_step_subcommand_rejected() {
+    let result = Cli::try_parse_from(["llamastash", "init", "frobnicate"]);
+    assert!(result.is_err(), "unknown init subcommand must be rejected");
   }
 
   #[test]

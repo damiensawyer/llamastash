@@ -605,7 +605,20 @@ llamastash init [--recommended] [--yes] [--json] [--offline]
                [--only <STEPS>] [--skip <STEPS>]
                [--install <CHOICE>] [--model <CHOICE>]
                [--config-step <CHOICE>]
+
+llamastash init <step> [flags]   # run one step; <step> = server | models | config | integrations
 ```
+
+Each step is also a first-class subcommand. `llamastash init server` is sugar for `llamastash init --only server`, with that step's pre-answer flag carried on the subcommand itself; the global flags (`--recommended`, `--json`, `--offline`, `--no-tui`) work on either side of it:
+
+| Subcommand                 | Equivalent to                    | Step flag           |
+| -------------------------- | -------------------------------- | ------------------- |
+| `init server`              | `init --only server`             | `--install`         |
+| `init models`              | `init --only models`             | `--model`, `--revision` |
+| `init config`              | `init --only config`             | `--config-step`     |
+| `init integrations`        | `init --only integrations`       | `--integrations`    |
+
+Examples: `llamastash init server --install gh-releases`, `llamastash init models --json`, `llamastash init config --config-step write`. Bare `llamastash init` (no subcommand) still runs the full wizard and honors the `--only` / `--skip` flags.
 
 | Flag                     | Effect                                                                                                                                                                  |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -613,7 +626,7 @@ llamastash init [--recommended] [--yes] [--json] [--offline]
 | `--yes`                  | Hidden alias for `--recommended`. Preserved for script and agent compatibility.                                                                                         |
 | `--json`                 | Emit a structured summary (schema: `schema_version`, `steps_ran`, `steps_skipped`, `install`, `model`, `config`, `smoke`, `hardware`) and skip all human prose.         |
 | `--offline`              | Refuse outbound network. Useful for `--only config` / `--only server` reruns where the model and snapshot are already cached. `LLAMASTASH_OFFLINE=1` is equivalent.     |
-| `--only <STEPS>`         | Comma-separated list of `server,models,config` (other names rejected). Only the listed steps run.                                                                       |
+| `--only <STEPS>`         | Comma-separated list of `server,models,config,integrations` (other names rejected). Only the listed steps run. Or run one step as a subcommand: `init server`.            |
 | `--skip <STEPS>`         | Inverse of `--only`. Mutually exclusive with it (clap refuses both).                                                                                                    |
 | `--install <CHOICE>`     | Pre-answer the install-method prompt. Values: `brew`, `gh-releases`, `existing`, `custom:<PATH>`. Override beats `--recommended`.                                       |
 | `--model <CHOICE>`       | Pre-answer the model-pick prompt. Values: `recommended`, `none`, `<owner>/<repo>[:<filename>.gguf]`.                                                                    |
