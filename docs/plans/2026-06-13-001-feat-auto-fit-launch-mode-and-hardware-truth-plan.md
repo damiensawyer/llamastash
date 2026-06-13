@@ -519,9 +519,9 @@ sequenceDiagram
 
 **Verification:** On the reference machine, an oversized Auto launch shows real resolved ctx/layers in all four surfaces; strict mode demonstrably stops a degraded launch and no follower ever connects to a Ready port; repeated AutoStart requests for a strict-refused model do not thrash-reload.
 
-- [ ] **Unit 10: TUI knob editor Auto UX**
+- [x] **Unit 10: TUI knob editor Auto UX** *(core per scope amendment; all-Auto toggle + label-rename polish deferred)*
 
-**Goal:** The picker cycles Inherited/Auto/Set, renders `Auto (fit)` / `Auto` / `Auto (unavailable)`, renders a remembered-Auto-resolving Inherited row correctly, shows the `Default`→`Inherited` rename, supports the reversible all-Auto keybinding toggle with a discard notice, and keeps the legend at glance level.
+> Done: the picker cycle gained an **Auto stop** for every knob kind — `Inherited → Auto → presets… → wrap` (`ring_next` + `CycleState`), with bools quad-stating (`Inherited → Auto → on → off`) and the device row inserting Auto between default and the selectors. `field_is_auto`/`set_field_auto` back the picker's `user_is_auto`/`set_user_auto`; `effective_is_auto` drives the value label so an Auto row (user-cycled or resolved/seeded) renders `auto`. Backspace resets to inherited (existing). In-file picker/events/smoke tests updated to the new ring + an `effective_is_auto` test. **No `Auto (unavailable)`** (no gate — scope amendment). **Deferred:** the reversible all-Auto keybinding + discard notice, the `Default`→`Inherited` source-chip *label* rename (cosmetic; `LayerLabel` carries compound provenance strings), the `Auto (fit)` vs plain `Auto` distinction (all knobs are fit-capable now), and the remembered-Auto origin-chip nuance.
 
 **Requirements:** R1 (TUI + Inherited rename), R8 (rendering), R9 (Lemonade rows unchanged)
 

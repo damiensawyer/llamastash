@@ -4217,12 +4217,16 @@ mod tests {
     // arrive on the wire.
     app.open_launch_picker();
     let p = app.launch_picker.as_mut().unwrap();
+    // Ring inserts an Auto stop first (Inherited → Auto → presets/on…),
+    // so step twice to land on a concrete value.
     p.field = PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx);
-    p.cycle_focused_value_next();
+    p.cycle_focused_value_next(); // → Auto
+    p.cycle_focused_value_next(); // → first ctx preset
     let expected_ctx = p.user_knobs.ctx.set_value().copied();
-    // Round-8: tri-state cycle — None → Some(true).
+    assert!(expected_ctx.is_some(), "ctx should be a concrete preset");
     p.field = PickerField::Knob(crate::launch::flag_aliases::KnobField::Reasoning);
-    p.cycle_focused_value_next();
+    p.cycle_focused_value_next(); // → Auto
+    p.cycle_focused_value_next(); // → on
 
     let (tx, mut rx) = mpsc::channel::<WriterCmd>(8);
     pump_input_with_writer(&mut app, key(KeyCode::Enter, KeyModifiers::NONE), Some(&tx));
@@ -4713,14 +4717,15 @@ mod tests {
     // Round-7: ←/→ change the focused field's value (was bound to
     // pane-cycle pre-round-7). Outside Settings the keys stay
     // unbound so they don't double as pane navigation.
-    use crate::tui::launch_picker::{PickerField, CTX_PRESETS};
+    use crate::tui::launch_picker::PickerField;
     let mut app = App::new(Default::default());
     app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
     app.go_top();
     app.focus = Focus::RightPane;
     app.right_tab = RightTab::Settings;
 
-    // Auto-stages the picker on first key; cursor lands on Ctx.
+    // Auto-stages the picker on first key; cursor lands on Ctx. The
+    // first → stop in the ring is Auto (Inherited → Auto → presets…).
     pump_input(&mut app, key(KeyCode::Right, KeyModifiers::NONE));
     let p = app.launch_picker.as_ref().expect("picker auto-staged");
     assert_eq!(
@@ -4729,15 +4734,15 @@ mod tests {
     );
     assert_eq!(
       p.user_knobs.ctx,
-      Some(KnobValue::Set(CTX_PRESETS[0])),
-      "→ advances Ctx preset"
+      Some(KnobValue::Auto),
+      "→ advances Ctx to the Auto stop"
     );
 
     pump_input(&mut app, key(KeyCode::Left, KeyModifiers::NONE));
     assert_eq!(
       app.launch_picker.as_ref().unwrap().user_knobs.ctx,
       None,
-      "← walks Ctx back to native"
+      "← walks Auto back to inherited"
     );
     // Pane focus must not have moved.
     assert_eq!(app.focus, Focus::RightPane);

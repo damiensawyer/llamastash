@@ -194,7 +194,6 @@ fn arrows_in_settings_tab_cycle_fields_and_values() {
   use llamastash::launch::flag_aliases::KnobField;
   use llamastash::tui::keybindings::Focus;
   use llamastash::tui::launch_picker::PickerField;
-  use llamastash::tui::launch_picker::CTX_PRESETS;
   use llamastash::tui::RightTab;
   let mut app = App::new(AppOptions::default());
   app.models = vec![fake_model("/m/qwen.gguf", "/m")];
@@ -208,13 +207,13 @@ fn arrows_in_settings_tab_cycle_fields_and_values() {
     picker.user_knobs.ctx, None,
     "ctx defaults to native (no user override)"
   );
-  // → advances the focused field's value.
+  // → advances the focused field's value; the first ring stop is Auto.
   pump_input(&mut app, key(KeyCode::Right, KeyModifiers::NONE));
   assert_eq!(
     app.launch_picker.as_ref().unwrap().user_knobs.ctx,
-    Some(KnobValue::Set(CTX_PRESETS[0]))
+    Some(KnobValue::Auto)
   );
-  // ← walks it back to native.
+  // ← walks it back to inherited.
   pump_input(&mut app, key(KeyCode::Left, KeyModifiers::NONE));
   assert_eq!(app.launch_picker.as_ref().unwrap().user_knobs.ctx, None);
   // ↓ moves the cursor to the next field.
@@ -223,11 +222,11 @@ fn arrows_in_settings_tab_cycle_fields_and_values() {
     app.launch_picker.as_ref().unwrap().field,
     PickerField::Knob(KnobField::Reasoning)
   );
-  // → walks the reasoning tri-state forward (None → Some(true)).
+  // → walks the reasoning ring forward (Inherited → Auto).
   pump_input(&mut app, key(KeyCode::Right, KeyModifiers::NONE));
   assert_eq!(
     app.launch_picker.as_ref().unwrap().user_knobs.reasoning,
-    Some(KnobValue::Set(true))
+    Some(KnobValue::Auto)
   );
 }
 

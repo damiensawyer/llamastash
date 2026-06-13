@@ -286,50 +286,101 @@ impl LaunchPickerState {
     }
   }
 
+  /// True when the user explicitly cycled this knob to `Auto`.
+  fn user_is_auto(&self, field: KnobField) -> bool {
+    crate::launch::field_is_auto(&self.user_knobs, field)
+  }
+
+  /// Set the user override for `field` to `Auto` (delegate to `--fit`).
+  fn set_user_auto(&mut self, field: KnobField) {
+    crate::launch::set_field_auto(&mut self.user_knobs, field);
+  }
+
   fn cycle_u32(&mut self, field: KnobField, presets: &[u32], forward: bool) {
-    let current = self.user_value_u32(field);
-    let next = cycle_through(current, presets, forward);
-    self.set_user_u32(field, next);
+    let cur = if self.user_is_auto(field) {
+      CycleState::Auto
+    } else {
+      match self.user_value_u32(field) {
+        Some(v) => CycleState::Set(v),
+        None => CycleState::Inherited,
+      }
+    };
+    match ring_next(cur, presets, forward) {
+      CycleState::Inherited => self.set_user_u32(field, None),
+      CycleState::Auto => self.set_user_auto(field),
+      CycleState::Set(v) => self.set_user_u32(field, Some(v)),
+    }
   }
 
   fn cycle_f32(&mut self, field: KnobField, presets: &[f32], forward: bool) {
-    let current = self.user_value_f32(field);
-    let next = cycle_through(current, presets, forward);
-    self.set_user_f32(field, next);
+    let cur = if self.user_is_auto(field) {
+      CycleState::Auto
+    } else {
+      match self.user_value_f32(field) {
+        Some(v) => CycleState::Set(v),
+        None => CycleState::Inherited,
+      }
+    };
+    match ring_next(cur, presets, forward) {
+      CycleState::Inherited => self.set_user_f32(field, None),
+      CycleState::Auto => self.set_user_auto(field),
+      CycleState::Set(v) => self.set_user_f32(field, Some(v)),
+    }
   }
 
   /// Cycle a constrained-string knob (`cache_type_*`, `split_mode`)
-  /// through its allowed `set`.
+  /// through `Inherited → Auto → set… → wrap`.
   fn cycle_str_set(&mut self, field: KnobField, set: &'static [&'static str], forward: bool) {
-    // Find the current user-set value inside the `&'static [&'static str]`
-    // catalog so cycle_through's `T = &'static str` lifetime detaches
-    // from `&self` — that lets us call `set_user_str(&mut self, ...)`
-    // immediately after without dragging a borrow. Avoids the prior
-    // `Vec<String>` + `Vec<&str>` allocation pair on every keypress.
-    let current: Option<&'static str> = self
-      .user_value_str(field)
-      .and_then(|s| set.iter().copied().find(|t| *t == s));
-    let next = cycle_through(current, set, forward);
-    self.set_user_str(field, next.map(|s| s.to_string()));
+    let cur = if self.user_is_auto(field) {
+      CycleState::Auto
+    } else {
+      // Detach the `&'static str` from `&self` so `set_user_str(&mut …)`
+      // can run right after without dragging a borrow.
+      match self
+        .user_value_str(field)
+        .and_then(|s| set.iter().copied().find(|t| *t == s))
+      {
+        Some(v) => CycleState::Set(v),
+        None => CycleState::Inherited,
+      }
+    };
+    match ring_next(cur, set, forward) {
+      CycleState::Inherited => self.set_user_str(field, None),
+      CycleState::Auto => self.set_user_auto(field),
+      CycleState::Set(v) => self.set_user_str(field, Some(v.to_string())),
+    }
   }
 
   fn cycle_bool(&mut self, field: KnobField, forward: bool) {
-    // Tri-state: default ↔ on ↔ off (wrap).
-    let current = self.user_value_bool(field);
-    let next = if forward {
-      match current {
-        None => Some(true),
-        Some(true) => Some(false),
-        Some(false) => None,
-      }
+    // Quad-state ring: Inherited → Auto → on → off → wrap.
+    let cur = if self.user_is_auto(field) {
+      CycleState::Auto
     } else {
-      match current {
-        None => Some(false),
-        Some(false) => Some(true),
-        Some(true) => None,
+      match self.user_value_bool(field) {
+        Some(b) => CycleState::Set(b),
+        None => CycleState::Inherited,
       }
     };
-    self.set_user_bool(field, next);
+    let next = if forward {
+      match cur {
+        CycleState::Inherited => CycleState::Auto,
+        CycleState::Auto => CycleState::Set(true),
+        CycleState::Set(true) => CycleState::Set(false),
+        CycleState::Set(false) => CycleState::Inherited,
+      }
+    } else {
+      match cur {
+        CycleState::Inherited => CycleState::Set(false),
+        CycleState::Set(false) => CycleState::Set(true),
+        CycleState::Set(true) => CycleState::Auto,
+        CycleState::Auto => CycleState::Inherited,
+      }
+    };
+    match next {
+      CycleState::Inherited => self.set_user_bool(field, None),
+      CycleState::Auto => self.set_user_auto(field),
+      CycleState::Set(b) => self.set_user_bool(field, Some(b)),
+    }
   }
 
   /// Cycle the Device row through the flat catalog. The cycle space is
@@ -348,29 +399,31 @@ impl LaunchPickerState {
       .iter()
       .map(|d| d.selector.as_str())
       .collect();
-    let current = self.user_value_str(field).filter(|s| !s.is_empty());
-    // Current position in the cycle: None = default (index "0"),
-    // Some(sel) = its catalog index + 1.
-    let cur_pos: usize = match current {
-      None => 0,
-      Some(sel) => selectors
-        .iter()
-        .position(|s| *s == sel)
-        .map(|i| i + 1)
-        .unwrap_or(0),
+    // Cycle positions: 0 = Inherited (None), 1 = Auto (let `--fit` /
+    // llama-server pick), 2+i = selector[i].
+    let cur_pos: usize = if self.user_is_auto(field) {
+      1
+    } else {
+      match self.user_value_str(field).filter(|s| !s.is_empty()) {
+        None => 0,
+        Some(sel) => selectors
+          .iter()
+          .position(|s| *s == sel)
+          .map(|i| i + 2)
+          .unwrap_or(0),
+      }
     };
-    let len = selectors.len() + 1; // +1 for the default slot
+    let len = selectors.len() + 2; // +Inherited +Auto
     let next_pos = if forward {
       (cur_pos + 1) % len
     } else {
       (cur_pos + len - 1) % len
     };
-    let next = if next_pos == 0 {
-      None
-    } else {
-      Some(selectors[next_pos - 1].to_string())
-    };
-    self.set_user_str(field, next);
+    match next_pos {
+      0 => self.set_user_str(field, None),
+      1 => self.set_user_auto(field),
+      i => self.set_user_str(field, Some(selectors[i - 2].to_string())),
+    }
   }
 
   /// Backspace on a focused row: clear the user override and re-
@@ -477,6 +530,17 @@ impl LaunchPickerState {
         .get(&field)
         .copied()
         .unwrap_or_else(|| crate::launch::flag_aliases::spec_for(field).fallback_label)
+    }
+  }
+
+  /// Whether the row's *effective* state is `Auto` — either the user
+  /// cycled it to Auto, or (untouched) it resolved to Auto via the
+  /// seeding rule / a remembered Auto. Drives the `Auto` value label.
+  pub fn effective_is_auto(&self, field: KnobField) -> bool {
+    if self.user_has(field) {
+      self.user_is_auto(field)
+    } else {
+      crate::launch::field_is_auto(&self.resolved, field)
     }
   }
 
@@ -683,6 +747,57 @@ impl LaunchPickerState {
 /// `presets` is assumed to be sorted in ascending order — every
 /// caller in [`LaunchPickerState::cycle_knob`] passes a hand-curated
 /// ascending list.
+/// A knob's position in the Auto-aware cycle ring:
+/// `Inherited → Auto → Set(preset)… → wrap`.
+enum CycleState<T> {
+  /// `None` knob — inherits from the resolver chain.
+  Inherited,
+  /// Delegated to `--fit`.
+  Auto,
+  /// Pinned to a concrete value.
+  Set(T),
+}
+
+/// Step a value knob one slot around the ring `Inherited → Auto →
+/// preset[0] → … → preset[last] → Inherited`. Custom (off-preset)
+/// values snap to the nearest preset in the travel direction via
+/// [`cycle_through`]; falling off the top end lands on `Inherited`,
+/// off the bottom on `Auto`.
+fn ring_next<T: PartialEq + PartialOrd + Copy>(
+  current: CycleState<T>,
+  presets: &[T],
+  forward: bool,
+) -> CycleState<T> {
+  match current {
+    CycleState::Inherited => {
+      if forward {
+        CycleState::Auto
+      } else {
+        // Backward from Inherited wraps to the last preset.
+        cycle_through(None, presets, false).map_or(CycleState::Auto, CycleState::Set)
+      }
+    }
+    CycleState::Auto => {
+      if forward {
+        cycle_through(None, presets, true).map_or(CycleState::Inherited, CycleState::Set)
+      } else {
+        CycleState::Inherited
+      }
+    }
+    CycleState::Set(v) => match cycle_through(Some(v), presets, forward) {
+      Some(p) => CycleState::Set(p),
+      // Off the top → Inherited; off the bottom → Auto.
+      None => {
+        if forward {
+          CycleState::Inherited
+        } else {
+          CycleState::Auto
+        }
+      }
+    },
+  }
+}
+
 fn cycle_through<T: PartialEq + PartialOrd + Copy>(
   current: Option<T>,
   presets: &[T],
@@ -743,6 +858,13 @@ mod tests {
     let mut s = LaunchPickerState::for_model("qwen");
     s.field = PickerField::Knob(KnobField::Ctx);
     assert_eq!(s.user_knobs.ctx, None);
+    // Ring: Inherited → Auto → presets… → wrap to Inherited.
+    s.cycle_focused_value_next();
+    assert_eq!(
+      s.user_knobs.ctx,
+      Some(KnobValue::Auto),
+      "first stop is Auto"
+    );
     s.cycle_focused_value_next();
     assert_eq!(s.user_knobs.ctx, Some(KnobValue::Set(CTX_PRESETS[0])));
     for preset in CTX_PRESETS.iter().skip(1) {
@@ -750,19 +872,29 @@ mod tests {
       assert_eq!(s.user_knobs.ctx, Some(KnobValue::Set(*preset)));
     }
     s.cycle_focused_value_next();
-    assert_eq!(s.user_knobs.ctx, None, "wraps back to native");
+    assert_eq!(s.user_knobs.ctx, None, "wraps back to inherited");
   }
 
   #[test]
-  fn reasoning_cycle_walks_tri_state_in_both_directions() {
+  fn reasoning_cycle_walks_quad_state_in_both_directions() {
     let mut s = LaunchPickerState::for_model("qwen");
     s.field = PickerField::Knob(KnobField::Reasoning);
+    // Forward: Inherited → Auto → on → off → Inherited.
+    s.cycle_focused_value_next();
+    assert_eq!(s.user_knobs.reasoning, Some(KnobValue::Auto));
     s.cycle_focused_value_next();
     assert_eq!(s.user_knobs.reasoning, Some(KnobValue::Set(true)));
     s.cycle_focused_value_next();
     assert_eq!(s.user_knobs.reasoning, Some(KnobValue::Set(false)));
     s.cycle_focused_value_next();
     assert_eq!(s.user_knobs.reasoning, None);
+    // Backward from Inherited lands on off (the far end of the ring).
+    s.cycle_focused_value_prev();
+    assert_eq!(s.user_knobs.reasoning, Some(KnobValue::Set(false)));
+    s.cycle_focused_value_prev();
+    assert_eq!(s.user_knobs.reasoning, Some(KnobValue::Set(true)));
+    s.cycle_focused_value_prev();
+    assert_eq!(s.user_knobs.reasoning, Some(KnobValue::Auto));
   }
 
   #[test]
@@ -857,21 +989,54 @@ mod tests {
     let mut s = LaunchPickerState::for_model("qwen");
     s.field = PickerField::Knob(KnobField::NGpuLayers);
     s.cycle_focused_value_next();
+    assert_eq!(
+      s.user_knobs.n_gpu_layers,
+      Some(KnobValue::Auto),
+      "Auto stop first"
+    );
+    s.cycle_focused_value_next();
     assert_eq!(s.user_knobs.n_gpu_layers, Some(KnobValue::Set(0)));
     s.cycle_focused_value_next();
     assert_eq!(s.user_knobs.n_gpu_layers, Some(KnobValue::Set(16)));
   }
 
   #[test]
-  fn cycle_knob_flash_attn_walks_tristate() {
+  fn cycle_knob_flash_attn_walks_quadstate() {
     let mut s = LaunchPickerState::for_model("qwen");
     s.field = PickerField::Knob(KnobField::FlashAttn);
+    // Ring: Inherited → Auto → on → off → Inherited.
+    s.cycle_focused_value_next();
+    assert_eq!(s.user_knobs.flash_attn, Some(KnobValue::Auto));
     s.cycle_focused_value_next();
     assert_eq!(s.user_knobs.flash_attn, Some(KnobValue::Set(true)));
     s.cycle_focused_value_next();
     assert_eq!(s.user_knobs.flash_attn, Some(KnobValue::Set(false)));
     s.cycle_focused_value_next();
     assert_eq!(s.user_knobs.flash_attn, None);
+  }
+
+  #[test]
+  fn effective_is_auto_tracks_user_then_resolved_state() {
+    let mut s = LaunchPickerState::for_model("qwen");
+    assert!(
+      !s.effective_is_auto(KnobField::Ctx),
+      "fresh knob is not Auto"
+    );
+    // A user-cycled Auto reads as Auto.
+    s.set_user_auto(KnobField::Ctx);
+    assert!(s.effective_is_auto(KnobField::Ctx));
+    // An untouched knob reflects the resolved (seeded / remembered) Auto.
+    s.set_resolved(
+      TypedKnobs {
+        n_gpu_layers: Some(KnobValue::Auto),
+        ..TypedKnobs::default()
+      },
+      BTreeMap::new(),
+    );
+    assert!(
+      s.effective_is_auto(KnobField::NGpuLayers),
+      "resolved Auto shows when the user hasn't overridden the row"
+    );
   }
 
   #[test]
@@ -1007,18 +1172,20 @@ mod tests {
   fn cycle_device_walks_default_then_each_selector_and_wraps() {
     let mut s = LaunchPickerState::for_model("test");
     s.device_catalog = catalog_two_vendors();
-    // Start at default (no override).
+    // Ring: Inherited → Auto → Vulkan0 → Vulkan1 → ROCm0 → wrap.
     assert_eq!(s.user_value_str(KnobField::Device), None);
-    // Forward through every catalog selector in order.
+    s.cycle_device(KnobField::Device, true);
+    assert!(s.user_is_auto(KnobField::Device), "first stop is Auto");
     s.cycle_device(KnobField::Device, true);
     assert_eq!(s.user_value_str(KnobField::Device), Some("Vulkan0".into()));
     s.cycle_device(KnobField::Device, true);
     assert_eq!(s.user_value_str(KnobField::Device), Some("Vulkan1".into()));
     s.cycle_device(KnobField::Device, true);
     assert_eq!(s.user_value_str(KnobField::Device), Some("ROCm0".into()));
-    // One more wraps back to default.
+    // One more wraps back to inherited (no override, not Auto).
     s.cycle_device(KnobField::Device, true);
     assert_eq!(s.user_value_str(KnobField::Device), None);
+    assert!(!s.user_is_auto(KnobField::Device));
   }
 
   #[test]
@@ -1038,6 +1205,8 @@ mod tests {
     // made llama-server bail with `invalid device`.
     let mut s = LaunchPickerState::for_model("test");
     s.device_catalog = catalog_two_vendors();
+    // Two steps past Inherited → Auto → the first real selector.
+    s.cycle_device(KnobField::Device, true);
     s.cycle_device(KnobField::Device, true);
     let stored = s.user_value_str(KnobField::Device).unwrap().to_string();
     assert!(

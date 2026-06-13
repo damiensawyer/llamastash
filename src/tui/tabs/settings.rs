@@ -396,6 +396,11 @@ fn bool_label(v: &Option<KnobValue<bool>>) -> String {
 }
 
 fn format_knob_value(state: &LaunchPickerState, field: KnobField) -> String {
+  // The Auto stop renders as `auto` regardless of value kind — fit
+  // governs the knob, so there is no concrete value to show.
+  if state.effective_is_auto(field) {
+    return "auto".into();
+  }
   match field {
     KnobField::Ctx
     | KnobField::NGpuLayers

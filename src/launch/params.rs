@@ -541,6 +541,33 @@ pub fn seed_layerless(resolved: &mut Resolved, mode: DefaultLaunchMode) {
   }
 }
 
+/// True when the knob slot is explicitly [`KnobValue::Auto`], keyed by
+/// field. The counterpart to [`set_field_auto`]; used by the TUI picker
+/// to render/cycle the Auto stop.
+pub fn field_is_auto(knobs: &TypedKnobs, field: KnobField) -> bool {
+  match field {
+    KnobField::Ctx => knobs.ctx.is_auto(),
+    KnobField::Reasoning => knobs.reasoning.is_auto(),
+    KnobField::NGpuLayers => knobs.n_gpu_layers.is_auto(),
+    KnobField::NCpuMoe => knobs.n_cpu_moe.is_auto(),
+    KnobField::Threads => knobs.threads.is_auto(),
+    KnobField::CacheTypeK => knobs.cache_type_k.is_auto(),
+    KnobField::CacheTypeV => knobs.cache_type_v.is_auto(),
+    KnobField::FlashAttn => knobs.flash_attn.is_auto(),
+    KnobField::Mlock => knobs.mlock.is_auto(),
+    KnobField::NoMmap => knobs.no_mmap.is_auto(),
+    KnobField::Parallel => knobs.parallel.is_auto(),
+    KnobField::BatchSize => knobs.batch_size.is_auto(),
+    KnobField::UbatchSize => knobs.ubatch_size.is_auto(),
+    KnobField::RopeFreqScale => knobs.rope_freq_scale.is_auto(),
+    KnobField::Keep => knobs.keep.is_auto(),
+    KnobField::Device => knobs.device.is_auto(),
+    KnobField::TensorSplit => knobs.tensor_split.is_auto(),
+    KnobField::MainGpu => knobs.main_gpu.is_auto(),
+    KnobField::SplitMode => knobs.split_mode.is_auto(),
+  }
+}
+
 /// Set a single knob slot to [`KnobValue::Auto`], keyed by field. Used
 /// by the seeding rule and by the CLI `auto` literal parser.
 pub fn set_field_auto(knobs: &mut TypedKnobs, field: KnobField) {

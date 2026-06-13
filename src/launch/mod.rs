@@ -23,5 +23,8 @@ pub use binary::{locate as locate_binary, LocateError, LocateInputs};
 pub use defaults_table::lookup as lookup_defaults;
 pub use favorites::{FavoriteEntry, Favorites};
 pub use mode::LaunchMode;
-pub use params::{compose, resolve_layered, seed_layerless, LaunchParams, LayerLabel, Resolved};
+pub use params::{
+  compose, field_is_auto, resolve_layered, seed_layerless, set_field_auto, LaunchParams,
+  LayerLabel, Resolved,
+};
 pub use presets::{NamedPreset, Presets};
