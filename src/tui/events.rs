@@ -1030,6 +1030,20 @@ fn apply_arrow_in_pane(app: &mut App, dir: ArrowDir) {
         ArrowDir::Down => app.rerank.scroll_down(),
       },
     },
+    // Composer focuses: ↑/↓ scroll the tab's output viewport. The
+    // input field doesn't use arrows (no in-buffer cursor), so they
+    // scroll the response area while focus stays on the prompt — which
+    // is where the user sits right after asking a question. Rerank
+    // keeps ↑/↓ for its query/candidate field cycle, so it is not
+    // routed here (it scrolls via the right-pane focus instead).
+    Focus::ChatInput => match dir {
+      ArrowDir::Up => app.chat.scroll_up(),
+      ArrowDir::Down => app.chat.scroll_down(),
+    },
+    Focus::EmbedInput => match dir {
+      ArrowDir::Up => app.embed.scroll_up(),
+      ArrowDir::Down => app.embed.scroll_down(),
+    },
     _ => match dir {
       ArrowDir::Up => app.move_up(),
       ArrowDir::Down => app.move_down(),
@@ -3111,6 +3125,41 @@ mod tests {
       }
       other => panic!("expected DeleteModel confirm, got {other:?}"),
     }
+  }
+
+  #[test]
+  fn arrows_scroll_chat_output_while_composing() {
+    // Issue #31: in the chat tab the response wouldn't scroll with the
+    // arrow keys — ↑/↓ were unbound in the composer focus, so they
+    // never reached the chat viewport. They must scroll the output
+    // while focus stays on the prompt (where the user sits after
+    // sending), not move the model list.
+    let mut app = App::new(Default::default());
+    app.focus = Focus::ChatInput;
+    assert_eq!(app.chat.scroll_offset, 0);
+    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(
+      app.chat.scroll_offset, 1,
+      "Up in the chat composer must scroll the response viewport"
+    );
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(
+      app.chat.scroll_offset, 0,
+      "Down must scroll the response viewport back"
+    );
+    assert_eq!(
+      app.focus,
+      Focus::ChatInput,
+      "scrolling must not change focus"
+    );
+
+    // Embed composer scrolls its own output the same way.
+    app.focus = Focus::EmbedInput;
+    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(
+      app.embed.scroll_offset, 1,
+      "Up in the embed composer must scroll its output"
+    );
   }
 
   #[test]
