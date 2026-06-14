@@ -357,7 +357,9 @@ fn format_bytes(n: u64) -> String {
   const GIB: f64 = MIB * 1024.0;
   let nf = n as f64;
   if nf >= GIB {
-    format!("{:.2} GiB", nf / GIB)
+    // One decimal, matching the canonical `detection::fmt_gib` so every
+    // memory surface prints GiB to the same precision.
+    format!("{:.1} GiB", nf / GIB)
   } else if nf >= MIB {
     format!("{:.1} MiB", nf / MIB)
   } else if nf >= KIB {
@@ -493,7 +495,7 @@ mod tests {
     assert_eq!(format_bytes(1023), "1023 B");
     assert_eq!(format_bytes(1024), "1 KiB");
     assert!(format_bytes(2 * 1024 * 1024).starts_with("2.0 MiB"));
-    assert!(format_bytes(3 * 1024 * 1024 * 1024).starts_with("3.00 GiB"));
+    assert!(format_bytes(3 * 1024 * 1024 * 1024).starts_with("3.0 GiB"));
   }
 
   #[test]

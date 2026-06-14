@@ -2104,7 +2104,9 @@ async fn lemonade_load_options(
 /// what other launches hold, this launch's projected demand, and the
 /// remediation menu — so the number is self-explaining and actionable.
 fn format_admission_refusal(refusal: &crate::launch::admission::Refusal) -> String {
-  let gib = |b: u64| format!("{:.1} GiB", b as f64 / (1024.0 * 1024.0 * 1024.0));
+  // One canonical GiB formatter (bytes ÷ 1024³, 1 decimal) shared with
+  // every other memory surface — see `crate::init::detection::fmt_gib`.
+  let gib = crate::init::detection::fmt_gib;
   format!(
     "launch refused: needs {} but only {} is free (effective {} after headroom, minus {} reserved by in-flight launches). \
      Stop a resident model, pin a smaller --ctx, lower fit_ctx_floor, or retry once a model frees memory.",

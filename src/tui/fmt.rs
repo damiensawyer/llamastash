@@ -55,6 +55,10 @@ pub(crate) fn format_tokens(n: u64) -> String {
 /// from `total`, so `MEM` / `VRAM` rows render as `2.5/4.0G` rather
 /// than `2.5G/4.0G`. Each value follows the same 1-decimal-under-10
 /// rule as [`format_bytes`].
+///
+/// Units are **binary** and abbreviated for the width-constrained Host
+/// pane: `K`/`M`/`G` mean KiB/MiB/GiB (÷1024), the same values the
+/// spelled-out `GiB` surfaces (`doctor` / `status` / `init`) print.
 pub(crate) fn format_bytes_pair(used: u64, total: u64) -> String {
   const KIB: u64 = 1024;
   const MIB: u64 = KIB * 1024;
