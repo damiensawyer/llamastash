@@ -157,16 +157,29 @@ target/debug/llamastash                                 # TUI: pan through every
 
 For TUI changes specifically, **launch the TUI and look at the panel you touched** — golden snapshots catch byte-exact regressions but not "the field is empty in real life because the running daemon doesn't surface it yet." A fresh daemon restart is part of the validation.
 
-Agents (no interactive terminal) can drive the TUI through
-`scripts/tui_drive.py`: it spawns the working-tree binary in a pty, feeds a
-scripted key sequence, and prints a plain-text screen capture after each step
-(needs `pip install pyte`; the child inherits `LLAMASTASH_*` env vars, so
-pair it with an isolated state dir). Example — stage the launch picker on a
-filtered row and read the staged form:
+Agents (no interactive terminal) can drive the TUI in a pty. Two drivers live
+under `scripts/tui/` (both render the live screen as plain text via `pyte`;
+both inherit `LLAMASTASH_*` env vars, so pair them with an isolated state dir).
+See `scripts/tui/README.md` for the full contract — when to use which:
 
-```bash
-python3 scripts/tui_drive.py '[["", 4, "boot"], ["/gemma|<enter>", 2, "staged"]]'
-```
+- **`scripts/tui/tui_drive.py`** — quick, throwaway inspection. JSON-on-argv,
+  zero deps beyond `pyte`, prints each screen to stdout. No assertions, no exit
+  code. Use it to *look* at a flow. Example — stage the launch picker on a
+  filtered row and read the staged form:
+
+  ```bash
+  python3 scripts/tui/tui_drive.py '[["", 4, "boot"], ["/gemma|<enter>", 2, "staged"]]'
+  ```
+
+- **`scripts/tui/harness.py`** — repeatable UAT / regression checks. A
+  line-based program file with `expect:`/`refute:` assertions, PASS/FAIL
+  accounting, a non-zero exit code for CI, and persisted `snap:` screenshots.
+  Use it to *gate* on a flow. Needs `pexpect` on top of `pyte`; it also answers
+  crossterm's `ESC[6n` so the TUI can't abort mid-init:
+
+  ```bash
+  python3 scripts/tui/harness.py scripts/tui/example.prog /tmp/ls-tui-out
+  ```
 
 One-frame renders without key input are cheaper via the built-in
 `llamastash --render --render-size 160x45` (`make render` renders all sizes).
