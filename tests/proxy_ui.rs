@@ -379,6 +379,24 @@ async fn two_running_shows_chooser_then_cookie_pins() {
     "cookie must pin to beta, got: {text}"
   );
 
+  // `/ui/switch` ignores the pin and re-shows the chooser so the user can
+  // pick another model; the pinned one is marked current.
+  let (status, _h, body) = http_get(addr, "/ui/switch", &[("Cookie", "ls_ui_target=L2")]).await;
+  assert_eq!(
+    status, 200,
+    "/ui/switch must serve the chooser, not forward"
+  );
+  let text = String::from_utf8(body).expect("utf8 body");
+  assert!(
+    text.contains("Choose a model"),
+    "expected switcher chooser: {text}"
+  );
+  assert!(text.contains("/ui/?target=L1") && text.contains("/ui/?target=L2"));
+  assert!(
+    text.matches(">current<").count() == 1,
+    "exactly the pinned model is marked current: {text}"
+  );
+
   let _ = alpha.stop(Duration::from_secs(3)).await;
   let _ = beta.stop(Duration::from_secs(3)).await;
   shutdown_listener(shutdown, handle).await;

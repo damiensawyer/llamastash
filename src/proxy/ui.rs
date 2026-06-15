@@ -85,11 +85,43 @@ pub(crate) async fn serve(state: Arc<ProxyState>, req: Request<Incoming>) -> Pro
   }
 
   let running = collect_running(&state).await;
+
+  // `/ui/switch` always shows the chooser, ignoring any cookie pin, so a
+  // user already pinned to one model can switch to another. The stock UI
+  // is single-model with no in-page switcher and we don't inject one, so
+  // this reserved URL is the switch affordance. Zero running still shows
+  // the no-model page.
+  if is_switch_path(req.uri().path()) {
+    let active = active_pin(req.headers(), &running);
+    let body = if running.is_empty() {
+      no_model_html()
+    } else {
+      chooser_html(&running, active.as_deref())
+    };
+    return Ok(html_response(StatusCode::OK, body));
+  }
+
   match resolve_target(req.headers(), running) {
     UiTarget::Forward(entry) => forward_ui(&state, req, entry).await,
-    UiTarget::Chooser(entries) => Ok(html_response(StatusCode::OK, chooser_html(&entries))),
+    // No valid pin here by construction, so nothing is marked active.
+    UiTarget::Chooser(entries) => Ok(html_response(StatusCode::OK, chooser_html(&entries, None))),
     UiTarget::None => Ok(html_response(StatusCode::OK, no_model_html())),
   }
+}
+
+/// `/ui/switch` (with or without a trailing slash) — the forced model
+/// switcher. Reserved by us; the stock UI lives at `/ui/` and never
+/// serves a `/switch` route.
+fn is_switch_path(path: &str) -> bool {
+  path == "/ui/switch" || path == "/ui/switch/"
+}
+
+/// The current cookie pin, but only when it maps to a model that is
+/// actually running — so the switcher marks the live target, never a
+/// stale one.
+fn active_pin(headers: &HeaderMap, running: &[RunningEntry]) -> Option<String> {
+  let pin = read_target_cookie(headers)?;
+  running.iter().any(|e| e.launch_id == pin).then_some(pin)
 }
 
 /// Apply the four-step selection rule over the running list.
@@ -275,13 +307,21 @@ fn set_target_cookie_redirect(launch_id: &str) -> ProxyResponse {
 
 // ─── static pages ─────────────────────────────────────────────────────
 
-/// Minimal model-chooser page (>1 running, no valid cookie). Each link
-/// pins the cookie via `/ui/?target=<launch_id>` and reloads.
-fn chooser_html(running: &[RunningEntry]) -> String {
+/// Minimal model-chooser page. Used both for the auto-chooser (>1
+/// running, no valid cookie) and the `/ui/switch` switcher. Each link
+/// pins the cookie via `/ui/?target=<launch_id>` and reloads. `active`
+/// is the currently-pinned, still-running launch id (the switcher passes
+/// it so the live model is marked); `None` for the first-time chooser.
+fn chooser_html(running: &[RunningEntry], active: Option<&str>) -> String {
   let mut items = String::new();
   for e in running {
+    let current = if active == Some(e.launch_id.as_str()) {
+      " <span class=\"current\">current</span>"
+    } else {
+      ""
+    };
     items.push_str(&format!(
-      "<li><a href=\"/ui/?target={id}\">{name}<span class=\"port\">:{port}</span></a></li>",
+      "<li><a href=\"/ui/?target={id}\">{name}<span class=\"port\">:{port}{current}</span></a></li>",
       id = escape_html(&e.launch_id),
       name = escape_html(&e.name),
       port = e.port,
@@ -292,7 +332,10 @@ fn chooser_html(running: &[RunningEntry]) -> String {
     &format!(
       "<h1>Choose a model</h1>\
        <p>Several models are running. Pick the one whose web UI you want to open.</p>\
-       <ul class=\"models\">{items}</ul>"
+       <ul class=\"models\">{items}</ul>\
+       <p class=\"tip\">Already on a model? Open \
+       <a href=\"/ui/switch\"><code>/ui/switch</code></a> to come back here and pick \
+       another.</p>"
     ),
   )
 }
@@ -338,6 +381,9 @@ ul.models a{display:flex;justify-content:space-between;align-items:center;\
 padding:.75rem 1rem;background:#363a4f;border-radius:.5rem}\
 ul.models a:hover{background:#494d64}\
 .port{color:#939ab7;font-variant-numeric:tabular-nums}\
+.current{color:#a6da95;font-variant-numeric:normal;margin-left:.5rem;\
+text-transform:uppercase;font-size:.72em;letter-spacing:.05em}\
+p.tip{color:#939ab7;font-size:.9em;margin-top:1.5rem}\
 code,kbd{background:#363a4f;border-radius:.25rem;padding:.1rem .35rem;\
 font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}";
 
@@ -488,13 +534,51 @@ mod tests {
   #[test]
   fn chooser_html_links_each_model_and_escapes() {
     let running = vec![entry("L1", 41100, "qwen3"), entry("L2", 41101, "gem<ma")];
-    let html = chooser_html(&running);
+    let html = chooser_html(&running, None);
     assert!(html.contains("/ui/?target=L1"));
     assert!(html.contains("/ui/?target=L2"));
     assert!(html.contains(":41100"));
     // The angle bracket in the model name is escaped, not raw.
     assert!(html.contains("gem&lt;ma"));
     assert!(!html.contains("gem<ma"));
+    // The switcher hint surfaces /ui/switch for discoverability.
+    assert!(html.contains("/ui/switch"));
+    // No active pin passed → no rendered `current` badge (the CSS rule
+    // `.current` is always present, so match the badge text, not the class).
+    assert!(!html.contains(">current<"));
+  }
+
+  #[test]
+  fn chooser_html_marks_the_active_model() {
+    let running = vec![entry("L1", 41100, "a"), entry("L2", 41101, "b")];
+    let html = chooser_html(&running, Some("L2"));
+    // The active entry carries the `current` badge; the other does not.
+    assert!(html.contains("class=\"current\">current"));
+    assert_eq!(html.matches(">current<").count(), 1);
+  }
+
+  #[test]
+  fn is_switch_path_matches_with_and_without_trailing_slash() {
+    assert!(is_switch_path("/ui/switch"));
+    assert!(is_switch_path("/ui/switch/"));
+    assert!(!is_switch_path("/ui/"));
+    assert!(!is_switch_path("/ui/switchboard"));
+  }
+
+  #[test]
+  fn active_pin_only_when_cookie_maps_to_a_running_model() {
+    let running = vec![entry("L1", 41100, "a"), entry("L2", 41101, "b")];
+    assert_eq!(
+      active_pin(&headers_with_cookie("ls_ui_target=L2"), &running),
+      Some("L2".to_string())
+    );
+    // Stale pin (not running) → no active mark.
+    assert_eq!(
+      active_pin(&headers_with_cookie("ls_ui_target=L9"), &running),
+      None
+    );
+    // No cookie at all.
+    assert_eq!(active_pin(&HeaderMap::new(), &running), None);
   }
 
   #[test]

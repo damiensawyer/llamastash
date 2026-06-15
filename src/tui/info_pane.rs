@@ -45,9 +45,9 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
 }
 
 /// Render the proxy listener's state. Always on (the third row): when
-/// the proxy is up, the row reports `<listen> · ui <listen>/ui` so both
-/// the live OpenAI-compat endpoint and the browser web-UI entry point
-/// are one glance away; when disabled or absent, the row renders an
+/// the proxy is up, the row reports `<listen> · webui <listen>/ui` so
+/// both the live OpenAI-compat endpoint and the browser web-UI entry
+/// point are one glance away; when disabled or absent, the row renders an
 /// explicit `disabled` / `—` so the reader can tell "off by config"
 /// from "not reported yet". Labels match the wire `status` values
 /// (R161) and the success/error palette signals liveness without
@@ -60,17 +60,18 @@ fn proxy_row<'a>(app: &'a App, palette: &'a Palette) -> Line<'a> {
       let listen = info.listen.as_deref().unwrap_or("");
       match info.status.as_str() {
         "listening" => {
-          // `<listen> (auth)? · ui <listen>/ui`. The endpoints render in
-          // the success tone (live); the ` · ui ` label rides the row's
-          // label colour so `ui` reads as a sibling of `proxy`, not part
-          // of the API endpoint. The `(auth)` flag sits right after the
-          // API endpoint so it reads as a listener property, not a UI one.
+          // `<listen> (auth)? · webui <listen>/ui`. The endpoints render
+          // in the success tone (live); the ` · webui ` label rides the
+          // row's label colour so `webui` reads as a sibling of `proxy`,
+          // not part of the API endpoint. The `(auth)` flag sits right
+          // after the API endpoint so it reads as a listener property,
+          // not a UI one.
           let mut endpoint = listen.to_string();
           if info.auth.as_deref() == Some("enforced") {
             endpoint.push_str(" (auth)");
           }
           spans.push(Span::styled(endpoint, palette.success_style()));
-          spans.push(Span::styled(" · ui ", palette.label_style()));
+          spans.push(Span::styled(" · webui ", palette.label_style()));
           spans.push(Span::styled(
             format!("{listen}/ui"),
             palette.success_style(),
@@ -1201,8 +1202,8 @@ mod tests {
       .find(|r| r.contains("proxy"))
       .expect("proxy row must render when daemon_info.proxy is set");
     assert!(
-      proxy_row.contains("127.0.0.1:11434 · ui 127.0.0.1:11434/ui"),
-      "expected `127.0.0.1:11434 · ui 127.0.0.1:11434/ui`: {proxy_row:?}"
+      proxy_row.contains("127.0.0.1:11434 · webui"),
+      "expected `127.0.0.1:11434 · webui ...`: {proxy_row:?}"
     );
     // Keyless loopback must not gain an auth marker.
     assert!(
@@ -1230,12 +1231,12 @@ mod tests {
       .iter()
       .find(|r| r.contains("proxy"))
       .expect("proxy row");
-    // `<listen> (auth) · ui <listen>/ui`: the auth flag sits on the API
-    // endpoint and the `· ui` segment opens the browser entry point.
-    // (The trailing ui URL is clipped by the narrow test panel.)
+    // `<listen> (auth) · webui <listen>/ui`: the auth flag sits on the
+    // API endpoint and the `· webui` segment opens the browser entry
+    // point. (The trailing webui URL is clipped by the narrow test panel.)
     assert!(
-      proxy_row.contains("0.0.0.0:11434 (auth)") && proxy_row.contains("· ui"),
-      "expected LAN listener with auth marker + ui segment: {proxy_row:?}"
+      proxy_row.contains("0.0.0.0:11434 (auth)") && proxy_row.contains("· webui"),
+      "expected LAN listener with auth marker + webui segment: {proxy_row:?}"
     );
   }
 
@@ -1255,13 +1256,13 @@ mod tests {
     };
     let palette = app.palette();
     let line = proxy_row(&app, palette);
-    // The ` · ui ` segment carries the label colour (same as the `proxy`
+    // The ` · webui ` segment carries the label colour (same as the `proxy`
     // row label, the first span), not the success endpoint tone.
     let ui_span = line
       .spans
       .iter()
-      .find(|s| s.content.as_ref() == " · ui ")
-      .expect("a ` · ui ` label span");
+      .find(|s| s.content.as_ref() == " · webui ")
+      .expect("a ` · webui ` label span");
     assert_eq!(
       ui_span.style,
       palette.label_style(),
@@ -1392,7 +1393,7 @@ mod tests {
     assert!(
       rows
         .iter()
-        .any(|r| r.contains("proxy") && r.contains("127.0.0.1:11434 · ui 127.0.0.1:11434/ui")),
+        .any(|r| r.contains("proxy") && r.contains("127.0.0.1:11434 · webui")),
       "expected proxy row alongside the server row: {rows:#?}"
     );
   }

@@ -50,6 +50,12 @@ asset/API requests pinned to the model whose UI is loaded.
 `GET /` stays the Ollama identity handshake — untouched. `GET /ui` 302s to `/ui/` (trailing slash so
 `./` resolves correctly).
 
+**Switching once pinned (added during implementation).** Because the cookie keeps `/ui/` forwarding
+to the pinned model, there is a reserved `/ui/switch` path that always renders the chooser regardless
+of the cookie (marking the active model), so a user can re-pick without clearing the cookie by hand.
+`/ui/?target=<launch_id>` remains the direct re-pin. Still no injection into the stock UI — the
+switch affordance is an out-of-band URL, surfaced via a hint on the chooser page and in `docs/usage.md`.
+
 ## Implementation steps
 
 1. **`src/proxy/router.rs`** — add to the `route()` match: `GET /ui` → redirect to `/ui/`; and a
