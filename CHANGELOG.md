@@ -4,6 +4,10 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Added
+
+- Browser web UI through the proxy at `/ui` — opens the running model's stock llama.cpp UI on one port-stable origin, with a chooser when several run and HTTP Basic auth (the proxy key as the password) for LAN access.
+
 ## [0.0.3] — 2026-06-11
 
 ### Added

@@ -236,6 +236,19 @@ async fn handle(
   }
 
   match (method.as_str(), path.as_str()) {
+    // Stock llama-server serves its web UI at `/`; mirror that with a
+    // tiny recognisable page so the proxy's `/ui/` forwarding tests can
+    // assert the body came from the backend (and not from a llamastash
+    // chooser / no-model page).
+    ("GET", "/") | ("GET", "/index.html") => {
+      write_response(
+        &mut wr,
+        200,
+        "text/html; charset=utf-8",
+        b"<!doctype html><title>fake-llama-webui</title><body>fake webui</body>",
+      )
+      .await?;
+    }
     ("GET", "/health") => {
       let elapsed = started_at.elapsed().as_millis() as u64;
       if elapsed < args.health_delay_ms {

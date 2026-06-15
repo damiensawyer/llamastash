@@ -62,16 +62,24 @@ pub async fn route(state: Arc<ProxyState>, req: Request<Incoming>) -> ProxyRespo
   // Bearer auth on the data plane. The liveness / identity probes
   // (`GET|HEAD /`, `GET /health`) stay open so health checks and the
   // Ollama handshake work without a key; everything else (`/v1/*`,
-  // `/api/*`) requires the configured `Authorization: Bearer <key>`.
-  // When no key is configured `enforced()` is `false` and we skip the
-  // check before touching the headers — the loopback default path is
-  // unchanged (no added allocation, one boolean test).
+  // `/api/*`, `/ui*`) requires the configured key. When no key is
+  // configured `enforced()` is `false` and we skip the check before
+  // touching the headers — the loopback default path is unchanged (no
+  // added allocation, one boolean test).
   let auth_exempt = matches!(
     (&method, path.as_str()),
     (&Method::GET | &Method::HEAD, "/") | (&Method::GET, "/health")
   );
+  // `/ui*` is a browser surface: on auth failure it gets a `Basic`
+  // challenge so the browser prompts (the API path keeps `Bearer`).
+  // `check` itself accepts both schemes — only the challenge differs.
+  let is_ui = path == "/ui" || path.starts_with("/ui/");
   if !auth_exempt && state.auth.enforced() && !state.auth.check(req.headers()) {
-    return unauthorized();
+    return if is_ui {
+      unauthorized_basic()
+    } else {
+      unauthorized()
+    };
   }
 
   // Route table — OpenAI compat (`/v1/...`) is the primary surface;
@@ -96,6 +104,13 @@ pub async fn route(state: Arc<ProxyState>, req: Request<Incoming>) -> ProxyRespo
     (&Method::GET, "/api/version") => ollama_version(),
     (&Method::GET, "/api/ps") => ollama_ps(state).await,
     (&Method::POST, "/api/show") => ollama_show(state, req).await,
+    // Web-UI surface. `GET /ui` 302s to `/ui/` (trailing slash so the
+    // stock UI's relative base resolves); every `/ui/...` request —
+    // any method, for assets + base-relative API calls — delegates to
+    // the `ui` module, which strips the prefix and reverse-proxies to
+    // the chosen backend. See docs/plans/2026-06-15-001-...-plan.md.
+    (&Method::GET, "/ui") => super::ui::redirect_to_ui_slash(),
+    (_, p) if p.starts_with("/ui/") => super::ui::serve(state, req).await,
     _ => not_found(),
   }
 }
@@ -696,17 +711,36 @@ fn not_found() -> ProxyResponse {
 /// plus a `WWW-Authenticate: Bearer` challenge. The message is
 /// deliberately generic — it never echoes the supplied token.
 fn unauthorized() -> ProxyResponse {
-  let bytes = serde_json::to_vec(&ErrorResponse {
-    error: ErrorObject::new("invalid_request_error", "missing or invalid API key")
-      .with_code("invalid_api_key"),
-  })
-  .expect("json encoding of fixed shape");
-  let mut resp = json_response(StatusCode::UNAUTHORIZED, bytes);
+  let mut resp = json_response(StatusCode::UNAUTHORIZED, unauthorized_body());
   resp.headers_mut().insert(
     hyper::header::WWW_AUTHENTICATE,
     hyper::header::HeaderValue::from_static("Bearer"),
   );
   Ok(resp)
+}
+
+/// `401 Unauthorized` for the `/ui*` browser surface. Same OpenAI-shaped
+/// body as [`unauthorized`], but the challenge is `Basic` so a browser
+/// navigating to `/ui` pops its native credential prompt; the user
+/// pastes the proxy key as the password and the browser resends it
+/// per-origin. See the proxy-UI plan §"LAN /ui + browser auth".
+fn unauthorized_basic() -> ProxyResponse {
+  let mut resp = json_response(StatusCode::UNAUTHORIZED, unauthorized_body());
+  resp.headers_mut().insert(
+    hyper::header::WWW_AUTHENTICATE,
+    hyper::header::HeaderValue::from_static("Basic realm=\"llamastash\""),
+  );
+  Ok(resp)
+}
+
+/// Shared 401 body for both challenge variants. Deliberately generic —
+/// it never echoes the supplied credential.
+fn unauthorized_body() -> Vec<u8> {
+  serde_json::to_vec(&ErrorResponse {
+    error: ErrorObject::new("invalid_request_error", "missing or invalid API key")
+      .with_code("invalid_api_key"),
+  })
+  .expect("json encoding of fixed shape")
 }
 
 /// Build an OpenAI-shaped error response from a `(status, type,

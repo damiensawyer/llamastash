@@ -45,13 +45,13 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
 }
 
 /// Render the proxy listener's state. Always on (the third row): when
-/// the proxy is up, the row reports `listening 127.0.0.1:<port>` so
-/// the live OpenAI-compat endpoint is one glance away; when disabled
-/// or absent, the row renders an explicit `disabled` / `—` so the
-/// reader can tell the difference between "off by config" and "not
-/// reported yet". Labels match the wire `status` values (R161) and
-/// the success/error palette signals liveness without forcing the
-/// user to read the endpoint.
+/// the proxy is up, the row reports `<listen> · ui <listen>/ui` so both
+/// the live OpenAI-compat endpoint and the browser web-UI entry point
+/// are one glance away; when disabled or absent, the row renders an
+/// explicit `disabled` / `—` so the reader can tell "off by config"
+/// from "not reported yet". Labels match the wire `status` values
+/// (R161) and the success/error palette signals liveness without
+/// forcing the user to read the endpoint.
 fn proxy_row<'a>(app: &'a App, palette: &'a Palette) -> Line<'a> {
   let (body, body_style) = match app.daemon_info.proxy.as_ref() {
     None => ("—".to_string(), palette.muted_style()),
@@ -59,12 +59,14 @@ fn proxy_row<'a>(app: &'a App, palette: &'a Palette) -> Line<'a> {
       let listen = info.listen.as_deref().unwrap_or("");
       match info.status.as_str() {
         "listening" => {
-          // Flag a LAN-exposed, authenticated listener so the operator
-          // sees auth is on; keyless loopback renders unchanged.
-          let mut body = format!("listening {listen}");
+          // `<listen> (auth)? · ui <listen>/ui`. The `(auth)` flag sits
+          // right after the API endpoint so it reads as a listener
+          // property, not a UI one; keyless loopback renders unchanged.
+          let mut body = listen.to_string();
           if info.auth.as_deref() == Some("enforced") {
             body.push_str(" (auth)");
           }
+          body.push_str(&format!(" · ui {listen}/ui"));
           (body, palette.success_style())
         }
         "port_in_use" => (format!("port_in_use {listen}"), palette.error_style()),
@@ -88,7 +90,7 @@ fn proxy_row<'a>(app: &'a App, palette: &'a Palette) -> Line<'a> {
 }
 
 fn daemon_row<'a>(app: &'a App, _budget: usize, palette: &'a Palette) -> Line<'a> {
-  // Layout: `port    48134  pid 1234  up 3h12m`. The panel title is
+  // Layout: `port    48134 · pid 1234 · up 3h12m`. The panel title is
   // already "Daemon", so a leading `daemon  ` label would just
   // repeat it. The full control-plane URL is loopback-only and the
   // host half is always `127.0.0.1`, so we surface the port (the
@@ -116,9 +118,9 @@ fn daemon_row<'a>(app: &'a App, _budget: usize, palette: &'a Palette) -> Line<'a
   Line::from(vec![
     Span::styled(LABEL_PORT, palette.label_style()),
     Span::styled(port_val, palette.text_style()),
-    Span::styled("  pid ", palette.label_style()),
+    Span::styled(" · pid ", palette.label_style()),
     Span::styled(pid_val, palette.text_style()),
-    Span::styled("  up ", palette.label_style()),
+    Span::styled(" · up ", palette.label_style()),
     Span::styled(uptime_val, palette.text_style()),
   ])
 }
@@ -961,6 +963,26 @@ mod tests {
   }
 
   #[test]
+  fn daemon_row_uses_middot_separators() {
+    // `port    48134 · pid 4242 · up 3h12m` — the chunks are joined by
+    // ` · ` (the TUI's separator convention), not the old double-space.
+    let mut app = App::new(AppOptions::default());
+    app.daemon_connected = true;
+    app.daemon_info = DaemonInfo {
+      pid: Some(4242),
+      ipc_url: Some("http://127.0.0.1:48134".into()),
+      uptime_seconds: Some(3 * 3600 + 12 * 60),
+      ..Default::default()
+    };
+    let rows = render_lines(&app);
+    let daemon_row = rows.iter().find(|r| r.contains("port ")).unwrap();
+    assert!(
+      daemon_row.contains("· pid ") && daemon_row.contains("· up "),
+      "expected ` · pid ` / ` · up ` middot separators: {daemon_row:?}"
+    );
+  }
+
+  #[test]
   fn daemon_row_renders_em_dash_port_when_ipc_url_missing() {
     // A pre-Phase-A daemon (or a status response that hasn't landed
     // yet) leaves `ipc_url = None`. The row must still render a
@@ -1162,8 +1184,8 @@ mod tests {
       .find(|r| r.contains("proxy"))
       .expect("proxy row must render when daemon_info.proxy is set");
     assert!(
-      proxy_row.contains("listening 127.0.0.1:11434"),
-      "expected `listening 127.0.0.1:11434`: {proxy_row:?}"
+      proxy_row.contains("127.0.0.1:11434 · ui 127.0.0.1:11434/ui"),
+      "expected `127.0.0.1:11434 · ui 127.0.0.1:11434/ui`: {proxy_row:?}"
     );
     // Keyless loopback must not gain an auth marker.
     assert!(
@@ -1191,9 +1213,12 @@ mod tests {
       .iter()
       .find(|r| r.contains("proxy"))
       .expect("proxy row");
+    // `<listen> (auth) · ui <listen>/ui`: the auth flag sits on the API
+    // endpoint and the `· ui` segment opens the browser entry point.
+    // (The trailing ui URL is clipped by the narrow test panel.)
     assert!(
-      proxy_row.contains("listening 0.0.0.0:11434") && proxy_row.contains("(auth)"),
-      "expected LAN listener with auth marker: {proxy_row:?}"
+      proxy_row.contains("0.0.0.0:11434 (auth)") && proxy_row.contains("· ui"),
+      "expected LAN listener with auth marker + ui segment: {proxy_row:?}"
     );
   }
 
@@ -1312,7 +1337,7 @@ mod tests {
     assert!(
       rows
         .iter()
-        .any(|r| r.contains("proxy") && r.contains("listening 127.0.0.1:11434")),
+        .any(|r| r.contains("proxy") && r.contains("127.0.0.1:11434 · ui 127.0.0.1:11434/ui")),
       "expected proxy row alongside the server row: {rows:#?}"
     );
   }

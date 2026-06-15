@@ -12,7 +12,10 @@
 //! request headers ([`ProxyAuth::enforced`] is a single bool), so the
 //! benchmarked hot path is unchanged.
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{
+  engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+  Engine,
+};
 use hyper::header::{HeaderMap, AUTHORIZATION};
 use rand::TryRngCore;
 
@@ -96,18 +99,53 @@ impl ProxyAuth {
   }
 
   /// Whether the request is authorized: `true` when auth is disabled
-  /// or the `Authorization: Bearer <key>` matches the configured key;
-  /// `false` on a missing / malformed / wrong token.
+  /// or the `Authorization` header presents the configured key. Two
+  /// schemes are accepted, both compared in constant time:
+  ///
+  /// - `Bearer <key>` — the API path (OpenAI SDKs, agent harnesses).
+  /// - `Basic base64(user:<key>)` — the browser path. A browser can't
+  ///   send a `Bearer` header by navigating, but it speaks Basic
+  ///   natively: on a `WWW-Authenticate: Basic` challenge it prompts,
+  ///   the user pastes the proxy key as the **password**, and the
+  ///   browser resends it per-origin. The username is ignored. This is
+  ///   what makes the `/ui` surface reachable over LAN with the same
+  ///   auto-provisioned key (plan §"LAN /ui + browser auth").
+  ///
+  /// `false` on a missing / malformed / wrong credential.
   pub fn check(&self, headers: &HeaderMap) -> bool {
     let Some(key) = &self.key else {
       return true;
     };
-    headers
-      .get(AUTHORIZATION)
-      .and_then(|v| v.to_str().ok())
-      .and_then(extract_bearer)
-      .is_some_and(|tok| key.verify(tok))
+    let Some(value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
+      return false;
+    };
+    if let Some(tok) = extract_bearer(value) {
+      return key.verify(tok);
+    }
+    if let Some(pass) = extract_basic_password(value) {
+      return key.verify(&pass);
+    }
+    false
   }
+}
+
+/// Pull the password out of a `Basic base64(user:pass)` header value.
+/// The username half is discarded — browsers send the proxy key as the
+/// password. Returns `None` when the scheme isn't `Basic`, the base64
+/// is malformed, the decoded bytes aren't UTF-8, or there's no `:`
+/// separator. Browsers encode Basic credentials with standard (padded)
+/// base64, so we decode with the `STANDARD` engine, not the URL-safe
+/// one used for key generation.
+fn extract_basic_password(header: &str) -> Option<String> {
+  let encoded = header
+    .strip_prefix("Basic ")
+    .or_else(|| header.strip_prefix("basic "))?;
+  let decoded = STANDARD.decode(encoded.trim()).ok()?;
+  let text = String::from_utf8(decoded).ok()?;
+  // RFC 7617: split on the first colon — the password may itself
+  // contain colons, the userid may not.
+  let (_user, pass) = text.split_once(':')?;
+  Some(pass.to_string())
 }
 
 #[cfg(test)]
@@ -164,9 +202,28 @@ mod tests {
     assert!(auth.enforced());
     // Correct token passes.
     assert!(auth.check(&headers_with("Bearer sk-llamastash-k3y")));
-    // Wrong token, missing header, and non-Bearer scheme all reject.
+    // Wrong token and missing header reject.
     assert!(!auth.check(&headers_with("Bearer nope")));
     assert!(!auth.check(&HeaderMap::new()));
+    // A non-base64 `Basic` value is malformed → reject (no panic).
     assert!(!auth.check(&headers_with("Basic sk-llamastash-k3y")));
+  }
+
+  #[test]
+  fn enabled_auth_accepts_basic_with_key_as_password() {
+    // Browser path: the key rides in as the Basic *password*; the
+    // username half is ignored. Same key, different scheme.
+    let auth = ProxyAuth::new(Some("sk-llamastash-k3y".into()));
+    let ok = format!("Basic {}", STANDARD.encode("x:sk-llamastash-k3y"));
+    assert!(auth.check(&headers_with(&ok)));
+    // An empty username is fine too (RFC 7617 allows it).
+    let ok_empty_user = format!("Basic {}", STANDARD.encode(":sk-llamastash-k3y"));
+    assert!(auth.check(&headers_with(&ok_empty_user)));
+    // Wrong password rejects.
+    let bad = format!("Basic {}", STANDARD.encode("x:wrong"));
+    assert!(!auth.check(&headers_with(&bad)));
+    // No colon separator → malformed → reject.
+    let no_colon = format!("Basic {}", STANDARD.encode("sk-llamastash-k3y"));
+    assert!(!auth.check(&headers_with(&no_colon)));
   }
 }
