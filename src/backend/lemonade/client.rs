@@ -256,7 +256,14 @@ impl LemonadeClient {
 }
 
 fn transport(e: reqwest::Error) -> LemonadeError {
-  LemonadeError::Transport(e.to_string())
+  let mut msg = e.to_string();
+  let mut src = std::error::Error::source(&e);
+  while let Some(s) = src {
+    msg.push_str(" -> ");
+    msg.push_str(&s.to_string());
+    src = s.source();
+  }
+  LemonadeError::Transport(msg)
 }
 
 fn ensure_success(resp: &reqwest::Response) -> Result<(), LemonadeError> {

@@ -15,6 +15,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Fixed
 
+- Lemonade preload now waits for the `lemond` umbrella to be ready before loading a model, so an explicit launch on a cold daemon no longer flips to `error` on a transient connection failure.
 - `--flash-attn auto` no longer leaves a dangling positional token in the argv tail.
 - `status` no longer reports `GPU: CPU only` during the daemon's first second (before the metrics sampler ticks); it reads the live host snapshot like the TUI, and the pre-sample window reads `detecting`.
 

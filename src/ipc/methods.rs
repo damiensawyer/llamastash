@@ -1981,6 +1981,12 @@ async fn start_delegated_lemonade(
 ) -> Result<StartedLaunch, ErrorObject> {
   use crate::backend::lemonade::{ensure_umbrella, umbrella_launch_id, LemonadeClient};
 
+  // The preload must not POST `/api/v1/load` until the umbrella's HTTP
+  // server is actually accepting connections; bound the readiness wait by
+  // the umbrella's own probe budget (its probe resolves to Ready/Error
+  // first, so this is only a backstop for an umbrella that never settles).
+  let ready_timeout = spec.umbrella.probe.timeout + Duration::from_secs(2);
+
   let umbrella = match ensure_umbrella(
     &ctx.supervisors,
     umbrella_port,
@@ -2021,7 +2027,19 @@ async fn start_delegated_lemonade(
     let registry = ctx.supervisors.clone();
     let name = spec.model.name.clone();
     let params = params.clone();
+    let umbrella = umbrella.clone();
     tokio::spawn(async move {
+      // `ensure_umbrella` returns at `Loading`; the load POST would race
+      // the umbrella's bind and hit connection-refused on a cold start.
+      // Wait for `/live` to pass (Ready) before talking to it.
+      if let Err(cause) = umbrella.wait_until_ready(ready_timeout).await {
+        let cause = format!("lemonade umbrella not ready: {cause}");
+        log::warn!("lemonade: preload of `{name}` aborted: {cause}");
+        registry
+          .set_delegated_state(&name, ManagedState::Error { cause })
+          .await;
+        return;
+      }
       let outcome = match LemonadeClient::new(serving_port) {
         Ok(client) => {
           let opts = lemonade_load_options(&client, &name, &params).await;

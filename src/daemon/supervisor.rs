@@ -292,6 +292,34 @@ impl ManagedModel {
     *self.inner.ready_at.read().await
   }
 
+  /// Block until the model is `Ready`, or report why it won't be.
+  ///
+  /// [`spawn`] returns at `Loading` and flips to `Ready` only once the
+  /// background probe sees the child's endpoint answer — so a caller that
+  /// must talk to that endpoint has to wait for it, or it races the
+  /// child's bind and hits connection-refused on a cold start (the
+  /// Lemonade preload path). Polls the state until `Ready` (`Ok`), a
+  /// terminal non-ready state (`Err` with the cause), or `timeout`
+  /// elapses while still starting up (`Err`).
+  pub async fn wait_until_ready(&self, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+      match self.state().await {
+        ManagedState::Ready => return Ok(()),
+        ManagedState::Error { cause } => return Err(cause),
+        ManagedState::Stopping | ManagedState::Stopped => {
+          return Err("stopped before becoming ready".to_string());
+        }
+        ManagedState::Launching | ManagedState::Loading => {
+          if Instant::now() >= deadline {
+            return Err(format!("not ready within {timeout:?}"));
+          }
+          tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+      }
+    }
+  }
+
   /// Latest per-PID resource reading (CPU% + RSS). Mirrors the
   /// shape `resources::sample()` returns. `None` until the per-launch
   /// sampler has emitted its first non-priming reading.
@@ -1154,6 +1182,54 @@ mod tests {
     assert!(m.transition(ManagedState::Ready).await);
     assert!(m.transition(ManagedState::Stopping).await);
     assert!(m.transition(ManagedState::Stopped).await);
+  }
+
+  #[tokio::test]
+  async fn wait_until_ready_returns_immediately_when_ready() {
+    let m = test_model(ManagedState::Ready);
+    assert!(m.wait_until_ready(Duration::from_secs(1)).await.is_ok());
+  }
+
+  #[tokio::test]
+  async fn wait_until_ready_propagates_error_cause() {
+    let m = test_model(ManagedState::Error {
+      cause: "probe timeout".into(),
+    });
+    let err = m
+      .wait_until_ready(Duration::from_secs(1))
+      .await
+      .expect_err("error state must not report ready");
+    assert_eq!(err, "probe timeout");
+  }
+
+  #[tokio::test]
+  async fn wait_until_ready_errs_when_stopped_before_ready() {
+    let m = test_model(ManagedState::Stopped);
+    assert!(m.wait_until_ready(Duration::from_secs(1)).await.is_err());
+  }
+
+  #[tokio::test]
+  async fn wait_until_ready_observes_a_late_ready_transition() {
+    // The Lemonade preload's exact shape: handle is at Loading, a
+    // separate task flips it to Ready shortly after — the waiter must
+    // see it rather than racing ahead.
+    let m = test_model(ManagedState::Loading);
+    let probe = m.clone();
+    tokio::spawn(async move {
+      tokio::time::sleep(Duration::from_millis(60)).await;
+      probe.transition(ManagedState::Ready).await;
+    });
+    assert!(m.wait_until_ready(Duration::from_secs(2)).await.is_ok());
+  }
+
+  #[tokio::test]
+  async fn wait_until_ready_times_out_if_never_ready() {
+    let m = test_model(ManagedState::Loading);
+    let err = m
+      .wait_until_ready(Duration::from_millis(80))
+      .await
+      .expect_err("a stuck-Loading model must time out");
+    assert!(err.contains("not ready within"), "got {err}");
   }
 
   #[tokio::test]
