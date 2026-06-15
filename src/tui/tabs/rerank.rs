@@ -48,12 +48,16 @@ impl RerankTabState {
     self.scroll_offset = 0;
   }
 
+  /// Scroll the output up one line (toward the top). `scroll_offset`
+  /// is the top-of-viewport index, so up *decreases* it; clamps at 0.
   pub fn scroll_up(&mut self) {
-    self.scroll_offset = self.scroll_offset.saturating_add(1);
+    self.scroll_offset = self.scroll_offset.saturating_sub(1);
   }
 
+  /// Scroll the output down one line (toward the end). Increases the
+  /// offset; the render clamps it to the wrapped content height.
   pub fn scroll_down(&mut self) {
-    self.scroll_offset = self.scroll_offset.saturating_sub(1);
+    self.scroll_offset = self.scroll_offset.saturating_add(1);
   }
 
   pub fn record_error(&mut self, msg: String) {

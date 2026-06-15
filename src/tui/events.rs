@@ -3137,15 +3137,24 @@ mod tests {
     let mut app = App::new(Default::default());
     app.focus = Focus::ChatInput;
     assert_eq!(app.chat.scroll_offset, 0);
+    // `scroll_offset` is the top-of-viewport line: ↓ moves toward the
+    // end (increments), ↑ moves back toward the top (decrements). At
+    // the top (offset 0) ↑ is a no-op — it must not scroll the wrong
+    // way (the original bug pushed the offset *up* on ↑).
     pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(
-      app.chat.scroll_offset, 1,
-      "Up in the chat composer must scroll the response viewport"
+      app.chat.scroll_offset, 0,
+      "Up at the top of the response must stay pinned, not scroll down"
     );
     pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(
+      app.chat.scroll_offset, 1,
+      "Down in the chat composer must scroll the response toward the end"
+    );
+    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(
       app.chat.scroll_offset, 0,
-      "Down must scroll the response viewport back"
+      "Up must scroll the response back toward the top"
     );
     assert_eq!(
       app.focus,
@@ -3155,10 +3164,10 @@ mod tests {
 
     // Embed composer scrolls its own output the same way.
     app.focus = Focus::EmbedInput;
-    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(
       app.embed.scroll_offset, 1,
-      "Up in the embed composer must scroll its output"
+      "Down in the embed composer must scroll its output toward the end"
     );
   }
 
@@ -4996,21 +5005,22 @@ mod tests {
   fn arrow_keys_in_right_pane_scroll_chat_output() {
     // Round-8: Chat/Embed/Rerank output panes get arrow-key
     // scroll mirroring the Logs pane. Editing focus is not
-    // active, so ↑/↓ walk the response viewport.
+    // active, so ↑/↓ walk the response viewport. ↓ moves toward
+    // the end (offset increments), ↑ back toward the top.
     let mut app = App::new(Default::default());
     app.focus = Focus::RightPane;
     app.right_tab = RightTab::Chat;
-    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(app.chat.scroll_offset, 1);
-    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(app.chat.scroll_offset, 2);
-    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(app.chat.scroll_offset, 1);
-    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
-    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(
       app.chat.scroll_offset, 0,
-      "Down past zero must clamp to 0, not underflow"
+      "Up past zero must clamp to 0, not underflow"
     );
   }
 
@@ -5019,10 +5029,10 @@ mod tests {
     let mut app = App::new(Default::default());
     app.focus = Focus::RightPane;
     app.right_tab = RightTab::Embed;
-    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(app.embed.scroll_offset, 1);
     app.right_tab = RightTab::Rerank;
-    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(app.rerank.scroll_offset, 1);
   }
 

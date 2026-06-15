@@ -35,9 +35,10 @@ pub struct InputPaneOpts<'a> {
   /// Whether to render the body in BOLD (used by Chat while a
   /// stream is in flight). Has no effect on the prompts or status.
   pub bold_body: bool,
-  /// Top-of-viewport offset into `body`. 0 = pinned to top; larger
-  /// values scroll content upward (round-8 added arrow-key scroll
-  /// for Chat/Embed/Rerank output, mirroring the Logs pane).
+  /// Top-of-viewport offset into `body`. 0 = pinned to the top;
+  /// larger values reveal content further down (scroll toward the
+  /// end). The render clamps it to the wrapped content height so it
+  /// can't scroll past the last line into a blank pane.
   pub scroll_offset: u16,
 }
 
@@ -62,13 +63,18 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, opts: InputPaneOpts<'_>, palett
   let body_idx = opts.prompts.len();
   let status_idx = body_idx + 1;
 
-  let mut body_widget = Paragraph::new(opts.body)
-    .wrap(Wrap { trim: false })
-    .scroll((opts.scroll_offset, 0));
+  let body_area = layout[body_idx];
+  let mut body_widget = Paragraph::new(opts.body).wrap(Wrap { trim: false });
   if opts.bold_body {
     body_widget = body_widget.style(Style::default().add_modifier(Modifier::BOLD));
   }
-  frame.render_widget(body_widget, layout[body_idx]);
+  // Clamp the offset to the wrapped content height so scrolling past
+  // the last line shows the tail pinned to the bottom, not a blank
+  // pane. `line_count` accounts for wrapping at the body width.
+  let wrapped = body_widget.line_count(body_area.width) as u16;
+  let max_offset = wrapped.saturating_sub(body_area.height);
+  let body_widget = body_widget.scroll((opts.scroll_offset.min(max_offset), 0));
+  frame.render_widget(body_widget, body_area);
   frame.render_widget(Paragraph::new(opts.status), layout[status_idx]);
 }
 
@@ -120,11 +126,7 @@ mod tests {
     assert_eq!(text, "⇧+Enter:newline · Esc:clear");
   }
 
-  #[test]
-  fn input_pane_render_accepts_scroll_offset_without_panicking() {
-    // Round-8: the input pane carries a scroll offset for the body
-    // viewport. A non-zero offset shouldn't panic the renderer or
-    // produce an empty buffer even when body is short.
+  fn render_body_frame(body: Vec<Line<'static>>, scroll_offset: u16) -> String {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::Terminal;
@@ -137,12 +139,10 @@ mod tests {
           Rect::new(0, 0, 40, 10),
           InputPaneOpts {
             prompts: &[],
-            body: (0..6)
-              .map(|i| Line::from(Span::raw(format!("line {i}"))))
-              .collect(),
+            body,
             status: Line::from(""),
             bold_body: false,
-            scroll_offset: 2,
+            scroll_offset,
           },
           palette,
         );
@@ -157,7 +157,18 @@ mod tests {
       }
       rows.push(r.trim_end().to_string());
     }
-    let frame = rows.join("\n");
+    rows.join("\n")
+  }
+
+  #[test]
+  fn input_pane_render_applies_scroll_offset() {
+    // Round-8: the input pane carries a scroll offset for the body
+    // viewport. With content taller than the pane, a non-zero offset
+    // skips earlier lines without panicking or blanking the buffer.
+    let body: Vec<Line<'static>> = (0..20)
+      .map(|i| Line::from(Span::raw(format!("line {i}"))))
+      .collect();
+    let frame = render_body_frame(body, 2);
     // With offset 2 the first body row shown should be "line 2".
     assert!(
       frame.contains("line 2"),
@@ -166,6 +177,21 @@ mod tests {
     assert!(
       !frame.contains("line 0"),
       "scroll_offset must hide skipped lines: {frame}"
+    );
+  }
+
+  #[test]
+  fn input_pane_clamps_scroll_offset_to_content_height() {
+    // Over-scrolling past the last line must pin the tail to the
+    // bottom, not blank the pane. A short body with a huge offset
+    // clamps back to 0 so every line stays visible.
+    let body: Vec<Line<'static>> = (0..3)
+      .map(|i| Line::from(Span::raw(format!("line {i}"))))
+      .collect();
+    let frame = render_body_frame(body, 999);
+    assert!(
+      frame.contains("line 0") && frame.contains("line 2"),
+      "huge offset on a short body must clamp, keeping content visible: {frame}"
     );
   }
 
