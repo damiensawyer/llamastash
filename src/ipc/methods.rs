@@ -23,6 +23,7 @@ use super::protocol::{ErrorCode, ErrorObject, Request, Response, JSONRPC_VERSION
 use crate::backend::identity::ModelIdentity;
 use crate::backend::{Backend, LaunchPlan};
 use crate::config::loader::{LemonadeConfig, PortRange};
+use crate::config::{KnobValue, KnobValueOpt};
 use crate::daemon::host_metrics::{HostMetricsSnapshot, SamplerHandles};
 use crate::daemon::orphans::ExternalProcess;
 use crate::daemon::probe::ProbeOptions;
@@ -115,6 +116,11 @@ pub struct MethodContext {
   /// the right port, and `status` reads it for the `installed` signal.
   /// Defaults to disabled, so catalog-only tests never touch `lemond`.
   pub lemonade: LemonadeConfig,
+  /// Pre-spawn memory admission ledger (R4). Shared across every launch
+  /// entry point so check-and-reserve is atomic against concurrent
+  /// launches; settled (released) when each child reaches Ready / Error
+  /// / Stopped. In-memory by design.
+  pub admission: Arc<crate::launch::admission::Ledger>,
 }
 
 /// Wrapper around the in-memory `DaemonState` plus the directory
@@ -195,6 +201,15 @@ pub struct LaunchEnv {
   /// full set once the probe completes; a launch in that brief window
   /// finds no selector match and falls back to the default `binary`.
   pub device_catalog: Arc<RwLock<Vec<crate::launch::list_devices::LaunchDevice>>>,
+  /// Seed mode for knobs no layer filled (R1). Sourced from
+  /// `Config.default_launch_mode` (+ `LLAMASTASH_DEFAULT_LAUNCH_MODE`).
+  pub default_launch_mode: crate::config::DefaultLaunchMode,
+  /// `--fit-ctx` floor (R7). Consumed by `compose` in U6; carried here
+  /// so the launch path reads one resolved value. Validated upstream.
+  pub fit_ctx_floor: u32,
+  /// Strict-fit mode (R19). Consumed by the admission/strict path in
+  /// U8; carried here so it rides the same launch env.
+  pub strict_fit: bool,
 }
 
 impl MethodContext {
@@ -221,6 +236,7 @@ impl MethodContext {
       proxy_status: None,
       ipc_url: None,
       lemonade: LemonadeConfig::default(),
+      admission: Arc::new(crate::launch::admission::Ledger::default()),
     }
   }
 
@@ -407,6 +423,11 @@ fn respond(id: Value, result: Result<Value, ErrorObject>) -> Response {
 /// `status` is read-only; never triggers any state-machine transitions.
 async fn status_response(ctx: &MethodContext) -> Value {
   let snap = ctx.supervisors.snapshot().await;
+  // Post-launch actuals (R6) live on the persisted running snapshot
+  // (stamped by the recorder on Ready); the live status row is built
+  // from the supervisor, so cross-reference by (id, port) to surface
+  // the resolved context.
+  let running = ctx.state.snapshot().await.running;
   let mut models: Vec<Value> = Vec::with_capacity(snap.len());
   for (launch_id, model) in snap {
     let state = model.state().await;
@@ -442,6 +463,12 @@ async fn status_response(ctx: &MethodContext) -> Value {
     let latest = model.latest_resource().await;
     let latest_rss_bytes = latest.as_ref().map(|r| r.rss_bytes);
     let latest_cpu_pct = latest.as_ref().map(|r| r.cpu_percent);
+    let actuals = running
+      .iter()
+      .find(|r| r.port == model.port())
+      .map(|r| r.actuals);
+    let resolved_ctx = actuals.and_then(|a| a.resolved_ctx);
+    let ctx_clamped = actuals.map(|a| a.ctx_clamped).unwrap_or(false);
     let row = json!({
       "launch_id": launch_id,
       "id": model.id(),
@@ -453,6 +480,12 @@ async fn status_response(ctx: &MethodContext) -> Value {
       "params": params_json,
       "latest_rss_bytes": latest_rss_bytes,
       "latest_cpu_pct": latest_cpu_pct,
+      // Resolved context window `--fit` chose (R6); null until the
+      // post-Ready `/props` fetch lands or when the build omits it.
+      "resolved_ctx": resolved_ctx,
+      // True when `--fit` had to clamp ctx to the floor under memory
+      // pressure (R19 soft notice); strict mode refuses such launches.
+      "ctx_clamped": ctx_clamped,
     });
     models.push(row);
   }
@@ -1327,11 +1360,12 @@ fn supported_methods() -> Vec<&'static str> {
   v
 }
 
-/// Upper bound on `ctx` (token-window) advertised on the IPC. The TUI
-/// picker caps at 131_072 but CLI + direct JSON-RPC callers bypass
-/// that; this stops a buggy or malicious request from sending
-/// `--ctx u32::MAX` straight to llama-server.
-const MAX_CTX_TOKENS: u32 = 1_048_576;
+// Upper bound on `ctx` (token-window) advertised on the IPC. The TUI
+// picker caps at 131_072 but CLI + direct JSON-RPC callers bypass
+// that; this stops a buggy or malicious request from sending
+// `--ctx u32::MAX` straight to llama-server. Shared with config
+// validation via `crate::config::MAX_CTX_TOKENS`.
+use crate::config::MAX_CTX_TOKENS;
 
 /// Output of [`start_model_inner`] — everything the caller needs to
 /// observe the launch from the outside. The IPC handler projects
@@ -1408,7 +1442,7 @@ pub(crate) async fn start_model_inner(
   // managed-multiplexer dispatch below select Lemonade rather than crashing on
   // the missing GGUF. Every other path is a local GGUF: one header read yields
   // both the canonical id and the arch.
-  let (id, arch, identity): (ModelId, Option<String>, ModelIdentity) =
+  let (id, arch, native_ctx, identity): (ModelId, Option<String>, Option<u32>, ModelIdentity) =
     match crate::backend::lemonade::registry_name_from_path(&parsed.model_path) {
       Some(name) => {
         let backend_id = crate::backend::identity::BackendModelId {
@@ -1417,17 +1451,18 @@ pub(crate) async fn start_model_inner(
         };
         // A synthetic ModelId keeps the file-keyed plumbing (log path, running
         // snapshot retention) working; the sentinel header hash marks it as
-        // not-a-GGUF. Arch is `None` — lemond owns the recipe, not us.
+        // not-a-GGUF. Arch + native_ctx are `None` — lemond owns the recipe,
+        // not us, so the strict-fit ctx gate never applies to a Lemonade row.
         let synthetic = ModelId {
           path: parsed.model_path.clone(),
           header_blake3: [0u8; 32],
         };
-        (synthetic, None, ModelIdentity::Backend(backend_id))
+        (synthetic, None, None, ModelIdentity::Backend(backend_id))
       }
       None => {
-        let (id, arch) = resolve_model_id_and_arch(&parsed.model_path)?;
+        let (id, arch, native_ctx) = resolve_model_id_and_arch(&parsed.model_path)?;
         let identity: ModelIdentity = id.clone().into();
-        (id, arch, identity)
+        (id, arch, native_ctx, identity)
       }
     };
 
@@ -1536,10 +1571,10 @@ pub(crate) async fn start_model_inner(
   // `knobs.{ctx,reasoning}` overrides winning if the caller set both.
   let mut user_knobs = parsed.knobs.clone();
   if user_knobs.ctx.is_none() {
-    user_knobs.ctx = parsed.ctx;
+    user_knobs.ctx = parsed.ctx.map(KnobValue::Set);
   }
   if user_knobs.reasoning.is_none() {
-    user_knobs.reasoning = parsed.reasoning;
+    user_knobs.reasoning = parsed.reasoning.map(KnobValue::Set);
   }
 
   // Pull the model's last_params from persisted state so a returning
@@ -1564,7 +1599,7 @@ pub(crate) async fn start_model_inner(
   };
   // yaml + built-in share the `ArchDefault` chip — yaml wins per
   // field via precedence order.
-  let resolved = crate::launch::params::resolve_layered(&[
+  let mut resolved = crate::launch::params::resolve_layered(&[
     (crate::launch::params::LayerLabel::User, &user_knobs),
     (
       crate::launch::params::LayerLabel::LastUsed,
@@ -1576,51 +1611,53 @@ pub(crate) async fn start_model_inner(
       &builtin_knobs,
     ),
   ]);
+  // Seed knobs no layer filled per the default launch mode (R1): under
+  // `Auto` a layer-less knob delegates to `--fit`. Argv-neutral in this
+  // unit (an Auto knob emits nothing, exactly like the unset slot it
+  // replaces) — the fit-flag emission lands in U6 and the picker
+  // rendering in U10. The mode is `Config.default_launch_mode`
+  // (+ `LLAMASTASH_DEFAULT_LAUNCH_MODE`), threaded through `LaunchEnv`.
+  crate::launch::params::seed_layerless(&mut resolved, env.default_launch_mode);
   // Project resolved ctx/reasoning back onto the top-level
   // `LaunchParams` fields — `compose` emits them inline (ctx as
   // `-c <N>`, reasoning as the `--jinja --reasoning-format deepseek`
   // bundle).
-  launch_params.ctx = resolved.knobs.ctx;
-  launch_params.reasoning = resolved.knobs.reasoning.unwrap_or(false);
+  // An `Auto` ctx/reasoning collapses to "no inline flag" here
+  // (`set_value()` → `None`): `compose` emits nothing and `--fit`
+  // governs ctx, the chat template governs reasoning.
+  launch_params.ctx = resolved.knobs.ctx.set_value().copied();
+  launch_params.reasoning = resolved
+    .knobs
+    .reasoning
+    .set_value()
+    .copied()
+    .unwrap_or(false);
   launch_params.knobs = resolved.knobs;
+  // Close the `knobs.ctx` bypass of `MAX_CTX_TOKENS` (the early check
+  // only saw the top-level `parsed.ctx`): validate the *resolved* ctx,
+  // which folds in both `parsed.ctx` and a typed `knobs.ctx` set via the
+  // editor or last-params.
+  if let Some(c) = launch_params.ctx {
+    if c > MAX_CTX_TOKENS {
+      return Err(ErrorObject::new(
+        ErrorCode::InvalidParams,
+        format!("ctx {c} exceeds maximum {MAX_CTX_TOKENS}"),
+      ));
+    }
+  }
   // Leave `device` exactly as the resolver chain set it. When no layer
   // selected one it stays `None`, so `compose()` emits no `--device`
   // and `llama-server` keeps its default (auto-select / split across
   // every visible GPU) — the documented backwards-compatible behavior.
 
-  // VRAM-aware ctx auto-fit. When every resolver layer left ctx
-  // unset, the spawn would otherwise rely on llama.cpp's `--fit`,
-  // which mis-reports unified-memory free space on Linux 7+ iGPUs
-  // (Strix Halo) and collapses to the 4096 floor. Compute the right
-  // ctx from the GGUF attention geometry + the daemon's
-  // host-metrics snapshot. `None` (header missing the attention
-  // fields, snapshot not ready, budget too tight) leaves ctx unset
-  // so `--fit` still gets the final word.
-  if launch_params.ctx.is_none() && identity.as_gguf().is_some() {
-    if let Some(host_slot) = ctx.host_metrics.as_ref() {
-      let snapshot = host_slot.read().await.clone();
-      let model_path = launch_params.model_path.clone();
-      let knobs = launch_params.knobs.clone();
-      // GGUF header read is sync file I/O — push it onto the blocking
-      // pool so the tokio worker stays free (matches the proxy's
-      // `canonical_id_for_row` pattern).
-      let fitted = tokio::task::spawn_blocking(move || {
-        crate::launch::ctx_fit::compute_ctx(&model_path, &knobs, &snapshot)
-      })
-      .await
-      .ok()
-      .flatten();
-      if let Some(fitted) = fitted {
-        launch_params.ctx = Some(fitted);
-        launch_params.knobs.ctx = Some(fitted);
-        log::info!(
-          target: "llamastash::ctx_fit",
-          "auto-fit ctx={fitted} for {}",
-          launch_params.model_path.display(),
-        );
-      }
-    }
-  }
+  // Context sizing is delegated to llama-server's `--fit`: when `ctx`
+  // is unset (Auto / Inherited), `compose` emits `--fit-ctx <floor>` so
+  // fit sizes the window for the available memory but never collapses
+  // below the floor. llamastash keeps budget *authority* via U8
+  // admission (the sysfs-backed pool reading), not by computing ctx
+  // here — the old `ctx_fit` GPU path is retired. A pinned `ctx`
+  // suppresses the floor (fit honors the pin).
+  launch_params.fit_ctx_floor = Some(env.fit_ctx_floor);
 
   // Reject loopback-breaking / auth-bypass extras flags before
   // spawn. `compose` strips defensively too, but failing fast here
@@ -1660,7 +1697,8 @@ pub(crate) async fn start_model_inner(
   let selector = launch_params
     .knobs
     .device
-    .as_deref()
+    .set_value()
+    .map(String::as_str)
     .filter(|s| !s.is_empty())
     .map(str::to_string);
   let launch_binary = match selector {
@@ -1744,6 +1782,75 @@ pub(crate) async fn start_model_inner(
       }
     };
 
+  // Pre-spawn admission (R4): project this launch's demand floor and
+  // refuse *before* spawn if it won't fit the sampled budget minus the
+  // bytes other in-flight launches already reserved. This is the safety
+  // net `--fit` can't provide on UMA (its free reading conflates GTT
+  // with system RAM). Keyed by the reserved `port` (unique per in-flight
+  // launch); released when the child settles or on any failure below.
+  // Best-effort: skipped entirely when there is no host-metrics sample
+  // yet (the `port` reservation still gates the pool). Only the
+  // process-spawn path reaches here — Lemonade's umbrella returned
+  // above.
+  let mut admitted = false;
+  if identity.as_gguf().is_some() {
+    if let Some(host_slot) = ctx.host_metrics.as_ref() {
+      let snapshot = host_slot.read().await.clone();
+      if crate::launch::admission::is_sampled(&snapshot) {
+        let effective_ctx = launch_params.ctx.unwrap_or(env.fit_ctx_floor);
+        let free = crate::launch::admission::effective_free_bytes(&snapshot);
+        let gpu_backend = snapshot.gpu_backend.clone();
+        let model_path = launch_params.model_path.clone();
+        let knobs = launch_params.knobs.clone();
+        let arch_owned = arch.clone();
+        // Shard-aware weight total (sums every split sibling); the
+        // per-shard `weights_bytes(header)` would only see the primary
+        // shard. Computed above for probe scaling — reused here so a
+        // split GGUF is not under-projected and wrongly admitted.
+        let weights_total = total_weight_bytes;
+        let demand = tokio::task::spawn_blocking(move || {
+          let header = read_gguf_header(&model_path, HeaderReadOptions::default())
+            .ok()?
+            .header;
+          Some(crate::launch::admission::project_demand(
+            &header,
+            arch_owned.as_deref(),
+            &knobs,
+            effective_ctx,
+            &gpu_backend,
+            weights_total,
+          ))
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(demand) = demand {
+          if let Err(refusal) = ctx.admission.try_admit(u64::from(port), demand, free) {
+            ctx.supervisors.release_reserved_port(port).await;
+            return Err(ErrorObject::with_data(
+              ErrorCode::ResourceExhausted,
+              format_admission_refusal(&refusal),
+              serde_json::json!({ "cause": "launch_refused" }),
+            ));
+          }
+          admitted = true;
+        }
+      }
+    }
+  }
+
+  // Strict-fit ctx-clamp gate (R19): only meaningful when ctx is
+  // delegated to `--fit` (`ctx == None`) and we know the trained window
+  // to compare its resolution against. A pinned ctx or unknown window
+  // leaves the gate off. `strict_fit` then decides whether a floor-pinned
+  // resolution withholds Ready (refuse) or just flags a soft notice.
+  let fit_gate = (launch_params.ctx.is_none() && native_ctx.is_some()).then(|| {
+    crate::daemon::supervisor::FitGate {
+      floor: env.fit_ctx_floor,
+      native: native_ctx.unwrap_or(0),
+      strict: env.strict_fit,
+    }
+  });
   let spawn_result = supervisor_spawn(ManagedSpawn {
     id: id.clone(),
     params: launch_params.clone(),
@@ -1752,13 +1859,17 @@ pub(crate) async fn start_model_inner(
     log_path: log_path.clone(),
     plan: launch_spec,
     origin,
+    fit_gate,
   })
   .await;
   let model = match spawn_result {
     Ok(m) => m,
     Err(e) => {
-      // Free the reserved port so a retry can re-use it.
+      // Free the reserved port + admission hold so a retry can re-use them.
       ctx.supervisors.release_reserved_port(port).await;
+      if admitted {
+        ctx.admission.release(u64::from(port));
+      }
       return Err(ErrorObject::new(
         ErrorCode::InternalError,
         format!("supervisor spawn: {e}"),
@@ -1793,6 +1904,7 @@ pub(crate) async fn start_model_inner(
         port,
         started_at,
         params: launch_params.clone(),
+        actuals: Default::default(),
       });
     })
     .await;
@@ -1805,17 +1917,43 @@ pub(crate) async fn start_model_inner(
   // Persist the *user-supplied* knob deltas, not the full resolved set
   // — so source chips in the picker stay meaningful (a knob the user
   // never touched keeps re-resolving from yaml / built-in / model
-  // default instead of being frozen as `(last used)`).
+  // default instead of being frozen as `(last used)`). "Remembered
+  // values win" depends on this: only what the user actually set
+  // (including an explicit `Auto` sentinel) is remembered, so the
+  // resolver re-derives the rest next launch. The resolved top-level
+  // `ctx`/`reasoning` and the force-copied `device` are dropped too —
+  // they were resolver output, not user intent, and re-pinning them
+  // would freeze a value the user never chose.
   let mut persist_params = launch_params.clone();
   persist_params.knobs = user_knobs;
-  persist_params.knobs.device = launch_params.knobs.device.clone();
+  persist_params.ctx = None;
+  persist_params.reasoning = false;
   spawn_last_params_recorder(
     ctx.state.clone(),
     model.clone(),
     identity.clone(),
     persist_params,
+    // Slow HIP/Metal loads routinely exceed the old fixed 180 s wall
+    // clock; key the recorder's deadline off the same size-scaled probe
+    // budget the supervisor uses (base +2 h cap) so a slow load still
+    // reaches Ready *and* gets its params recorded — otherwise the next
+    // launch finds no remembered value and wrongly seeds Auto.
+    scaled_probe.timeout,
     ctx.shutdown.clone(),
   );
+
+  // Settle the admission reservation when the child leaves Loading
+  // (Ready: real allocation is now visible to the sampler; Error /
+  // Stopped: the slot is freed). Keyed by `port`; idempotent.
+  if admitted {
+    spawn_admission_settle(
+      ctx.admission.clone(),
+      model.clone(),
+      port,
+      scaled_probe.timeout,
+      ctx.shutdown.clone(),
+    );
+  }
 
   Ok(StartedLaunch {
     launch_id,
@@ -1842,6 +1980,12 @@ async fn start_delegated_lemonade(
   params: LaunchParams,
 ) -> Result<StartedLaunch, ErrorObject> {
   use crate::backend::lemonade::{ensure_umbrella, umbrella_launch_id, LemonadeClient};
+
+  // The preload must not POST `/api/v1/load` until the umbrella's HTTP
+  // server is actually accepting connections; bound the readiness wait by
+  // the umbrella's own probe budget (its probe resolves to Ready/Error
+  // first, so this is only a backstop for an umbrella that never settles).
+  let ready_timeout = spec.umbrella.probe.timeout + Duration::from_secs(2);
 
   let umbrella = match ensure_umbrella(
     &ctx.supervisors,
@@ -1883,7 +2027,19 @@ async fn start_delegated_lemonade(
     let registry = ctx.supervisors.clone();
     let name = spec.model.name.clone();
     let params = params.clone();
+    let umbrella = umbrella.clone();
     tokio::spawn(async move {
+      // `ensure_umbrella` returns at `Loading`; the load POST would race
+      // the umbrella's bind and hit connection-refused on a cold start.
+      // Wait for `/live` to pass (Ready) before talking to it.
+      if let Err(cause) = umbrella.wait_until_ready(ready_timeout).await {
+        let cause = format!("lemonade umbrella not ready: {cause}");
+        log::warn!("lemonade: preload of `{name}` aborted: {cause}");
+        registry
+          .set_delegated_state(&name, ManagedState::Error { cause })
+          .await;
+        return;
+      }
       let outcome = match LemonadeClient::new(serving_port) {
         Ok(client) => {
           let opts = lemonade_load_options(&client, &name, &params).await;
@@ -1929,6 +2085,7 @@ async fn start_delegated_lemonade(
         port: serving_port,
         started_at,
         params: params.clone(),
+        actuals: Default::default(),
       });
     })
     .await;
@@ -1986,27 +2143,113 @@ async fn lemonade_load_options(
   }
 }
 
+/// Human-readable admission refusal: the effective free (post-headroom),
+/// what other launches hold, this launch's projected demand, and the
+/// remediation menu — so the number is self-explaining and actionable.
+fn format_admission_refusal(refusal: &crate::launch::admission::Refusal) -> String {
+  // One canonical GiB formatter (bytes ÷ 1024³, 1 decimal) shared with
+  // every other memory surface — see `crate::init::detection::fmt_gib`.
+  let gib = crate::init::detection::fmt_gib;
+  format!(
+    "launch refused: needs {} but only {} is free (effective {} after headroom, minus {} reserved by in-flight launches). \
+     Stop a resident model, pin a smaller --ctx, lower fit_ctx_floor, or retry once a model frees memory.",
+    gib(refusal.demand_bytes),
+    gib(refusal.available_bytes()),
+    gib(refusal.effective_free_bytes),
+    gib(refusal.reserved_bytes),
+  )
+}
+
+/// Poll the child until it leaves Loading (Ready / Error / Stopped) and
+/// drop its admission reservation. Mirrors the recorder's poll shape;
+/// bounded by the scaled probe budget and the shutdown token so a child
+/// that never settles can't leak the reservation forever.
+///
+/// Best-effort hand-off: the reservation drops on Ready, but the 1 Hz
+/// host-metrics sampler may not yet reflect the child's freshly-committed
+/// allocation, so a concurrent launch in that sub-second window can see
+/// stale free *and* no reservation. The window is bounded by one sample
+/// tick and the in-process load check is the final OOM backstop, so this
+/// is accepted rather than papered over with a longer hold.
+fn spawn_admission_settle(
+  ledger: Arc<crate::launch::admission::Ledger>,
+  model: ManagedModel,
+  port: u16,
+  probe_budget: Duration,
+  shutdown: ShutdownToken,
+) {
+  tokio::spawn(async move {
+    let deadline = Instant::now() + probe_budget;
+    loop {
+      match model.state().await {
+        ManagedState::Ready | ManagedState::Error { .. } | ManagedState::Stopped => {
+          ledger.release(u64::from(port));
+          return;
+        }
+        _ => {}
+      }
+      if Instant::now() > deadline {
+        ledger.release(u64::from(port));
+        return;
+      }
+      tokio::select! {
+        _ = shutdown.wait_until_triggered() => {
+          ledger.release(u64::from(port));
+          return;
+        }
+        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+      }
+    }
+  });
+}
+
 fn spawn_last_params_recorder(
   state: PersistedState,
   model: ManagedModel,
   id: ModelIdentity,
   params: LaunchParams,
+  probe_budget: Duration,
   shutdown: ShutdownToken,
 ) {
   tokio::spawn(async move {
-    // The supervisor's probe runs with at most a 120s timeout in
-    // production. Cap our wait at the same horizon so we don't
-    // leak tasks for models that never come up. The poll also
-    // observes the daemon's shutdown token so SIGTERM during a
-    // pending Loading state doesn't block clean process exit on
-    // this task's 180s wall clock.
-    let deadline = Instant::now() + Duration::from_secs(180);
+    // Wait out the same size-scaled probe budget the supervisor uses
+    // (base 120 s + up to 2 h for very large weights) so a slow load
+    // still gets its params recorded on the Loading → Ready transition.
+    // The poll also observes the daemon's shutdown token so SIGTERM
+    // during a pending Loading state doesn't block clean process exit.
+    let deadline = Instant::now() + probe_budget;
     loop {
       match model.state().await {
         ManagedState::Ready => {
           state
             .mutate(|s| s.upsert_last_params(id.clone(), params.clone()))
             .await;
+          // Post-launch actuals (R6): stamp what `--fit` actually chose
+          // on the running snapshot so `status` / the TUI Running view /
+          // `show` can render the resolved context. The supervisor's
+          // readiness gate already fetched `/props` for fit-governed
+          // launches (to run the strict-fit ctx-clamp check) and stashed
+          // the result on the model, so reuse it instead of fetching
+          // twice; only fall back to a fetch when the gate didn't run
+          // (pinned ctx / no trained-window metadata). Best-effort — an
+          // empty result (no `/props`, transport error) leaves the row
+          // "unavailable".
+          if let Some(port) = params.port {
+            let mut actuals = model.actuals().await;
+            if actuals.is_empty() {
+              actuals = crate::daemon::actuals::fetch(port, Duration::from_secs(5)).await;
+            }
+            if !actuals.is_empty() {
+              let id = id.clone();
+              state
+                .mutate(move |s| {
+                  if let Some(snap) = s.running.iter_mut().find(|r| r.id == id && r.port == port) {
+                    snap.actuals = actuals;
+                  }
+                })
+                .await;
+            }
+          }
           return;
         }
         ManagedState::Error { .. } | ManagedState::Stopped => return,
@@ -2058,7 +2301,7 @@ async fn collect_in_use_ports(ctx: &MethodContext) -> Vec<u16> {
 }
 
 fn resolve_model_id(path: &std::path::Path) -> Result<ModelId, ErrorObject> {
-  let (id, _) = resolve_model_id_and_arch(path)?;
+  let (id, _, _) = resolve_model_id_and_arch(path)?;
   Ok(id)
 }
 
@@ -2069,7 +2312,7 @@ fn resolve_model_id(path: &std::path::Path) -> Result<ModelId, ErrorObject> {
 /// just means the `defaults_table` lookup falls back to the `*` row.
 fn resolve_model_id_and_arch(
   path: &std::path::Path,
-) -> Result<(ModelId, Option<String>), ErrorObject> {
+) -> Result<(ModelId, Option<String>, Option<u32>), ErrorObject> {
   let header = read_gguf_header(path, HeaderReadOptions::default()).map_err(|e| {
     ErrorObject::new(
       ErrorCode::InvalidParams,
@@ -2077,8 +2320,14 @@ fn resolve_model_id_and_arch(
     )
   })?;
   let id = compute_model_id(path, &header.raw);
-  let arch = crate::gguf::metadata::summarise(&header.header).arch;
-  Ok((id, arch))
+  let summary = crate::gguf::metadata::summarise(&header.header);
+  // Trained context window (`<arch>.context_length`), clamped into u32.
+  // Feeds the strict-fit ctx-clamp gate: a `--fit` resolution pinned to
+  // the floor is only "degraded" when the model could have gone higher.
+  let native_ctx = summary
+    .native_ctx
+    .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+  Ok((id, summary.arch, native_ctx))
 }
 
 /// Does the caller's `extras` tail already manage the multimodal
@@ -2722,6 +2971,7 @@ mod tests {
         PathBuf::from(format!("lemonade://{name}")),
         LaunchMode::Chat,
       ),
+      actuals: Default::default(),
     }
   }
 
@@ -2930,6 +3180,9 @@ mod tests {
       probe: ProbeOptions::default(),
       arch_defaults: Default::default(),
       device_catalog: Arc::new(RwLock::new(Vec::new())),
+      default_launch_mode: Default::default(),
+      fit_ctx_floor: 16384,
+      strict_fit: false,
     };
 
     // Lemonade enabled but pointed at a binary that does not exist. The

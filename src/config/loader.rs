@@ -19,6 +19,19 @@ use crate::util::paths::user_config_file;
 /// pathological YAML can't OOM the process.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
+/// Hard ceiling on any context-window value (`-c`, `knobs.ctx`, the
+/// `fit_ctx_floor` config). 2^20 tokens — far above any real model's
+/// trained window, low enough that a fat-fingered value is caught
+/// before it reaches `llama-server`. Centralised here so the CLI,
+/// daemon admission, and config validation share one bound.
+pub const MAX_CTX_TOKENS: u32 = 1_048_576;
+
+/// Factory `fit_ctx_floor`: the `--fit-ctx` floor llamastash passes so
+/// `--fit` never collapses the window below a usable size on the
+/// unified-memory hosts where its free reading mis-reports (the 4096
+/// upstream floor is too small for real chat sessions).
+pub const DEFAULT_FIT_CTX_FLOOR: u32 = 16384;
+
 /// User-authored YAML config, with sensible defaults via `#[serde(default)]`.
 ///
 /// Every field is optional in the file; missing fields use the built-in
@@ -99,6 +112,27 @@ pub struct Config {
   /// three wins — see `cli::daemon::compose_daemon_options`). llamastash
   /// never installs `lemond`; the user sets it up and points us at it.
   pub lemonade: LemonadeConfig,
+  /// How a knob no layer supplied a value for is seeded at launch
+  /// (R1). `auto` (factory) delegates layer-less knobs to `--fit`;
+  /// `inherited` leaves them unset (pre-Auto behavior). Env override:
+  /// `LLAMASTASH_DEFAULT_LAUNCH_MODE=auto|inherited`.
+  #[serde(default)]
+  pub default_launch_mode: DefaultLaunchMode,
+  /// `--fit-ctx` floor passed to fit-capable `llama-server` so the
+  /// context window never collapses below a usable size (R7). Factory
+  /// [`DEFAULT_FIT_CTX_FLOOR`]; validated `1..=MAX_CTX_TOKENS`. Env
+  /// override: `LLAMASTASH_FIT_CTX_FLOOR`.
+  #[serde(default = "default_fit_ctx_floor")]
+  pub fit_ctx_floor: u32,
+  /// Strict-fit mode (R19): when true, refuse (rather than degrade) a
+  /// launch that fit could not place as requested. Factory `false`.
+  /// Env override: `LLAMASTASH_STRICT_FIT=1`.
+  #[serde(default)]
+  pub strict_fit: bool,
+}
+
+fn default_fit_ctx_floor() -> u32 {
+  DEFAULT_FIT_CTX_FLOOR
 }
 
 /// OpenAI-compat proxy router configuration.
@@ -315,58 +349,173 @@ impl Default for LemonadeConfig {
   }
 }
 
+/// A single typed-knob slot's *state*. A knob is either pinned to an
+/// explicit value (`Set`) or delegated to llama-server's `--fit`
+/// placement (`Auto`). The third state — *Inherited* — is the
+/// absence of a `KnobValue`: `None` on the `Option<KnobValue<T>>`
+/// field, which the layered resolver fills from the next layer down,
+/// or which falls through to llama-server's own default.
+///
+/// **Serde shape:** `Set(v)` serialises as the bare scalar `v` exactly
+/// as the pre-tri-state `Option<T>` field did, so existing `state.json`
+/// / `config.yaml` values load unchanged. `Auto` serialises as the
+/// object sentinel `{"auto": true}`. The object form is deliberate:
+/// `"auto"` is a *legal value* for several string knobs (`split_mode`,
+/// `device`, `cache_type_*`, `tensor_split`), so a bare string `"auto"`
+/// must round-trip as `Set("auto")`, never the Auto state. An object
+/// sentinel cannot collide with any bare scalar of any field type, and
+/// no string/number/bool knob value is ever a map — so a map with an
+/// `auto` key unambiguously means the Auto state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum KnobValue<T> {
+  /// Explicitly pinned to a concrete value; emits the flag verbatim.
+  Set(T),
+  /// Delegated to `--fit`; emits no flag (fit governs placement).
+  Auto,
+}
+
+impl<T> KnobValue<T> {
+  /// True when this knob is delegated to `--fit`.
+  pub fn is_auto(&self) -> bool {
+    matches!(self, KnobValue::Auto)
+  }
+
+  /// Borrow the concrete value when `Set`; `None` when `Auto`.
+  pub fn as_set(&self) -> Option<&T> {
+    match self {
+      KnobValue::Set(v) => Some(v),
+      KnobValue::Auto => None,
+    }
+  }
+
+  /// Take the concrete value when `Set`; `None` when `Auto`.
+  pub fn into_set(self) -> Option<T> {
+    match self {
+      KnobValue::Set(v) => Some(v),
+      KnobValue::Auto => None,
+    }
+  }
+}
+
+impl<T: Serialize> Serialize for KnobValue<T> {
+  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    match self {
+      KnobValue::Set(v) => v.serialize(serializer),
+      KnobValue::Auto => {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry("auto", &true)?;
+        map.end()
+      }
+    }
+  }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for KnobValue<T> {
+  fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    // Untagged probe: a map carrying an `auto` key is the sentinel;
+    // anything else is a bare scalar value. Self-describing formats
+    // (serde_json, serde_yaml) buffer and retry, so this is
+    // format-agnostic. Sentinel is tried first; no scalar knob value
+    // is a map, so it never shadows a legitimate `Set`.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr<T> {
+      Sentinel { auto: bool },
+      Set(T),
+    }
+    match Repr::<T>::deserialize(deserializer)? {
+      // `{"auto": true}` is the sentinel we emit. A map with
+      // `auto: false` is not a shape we write, but no scalar knob value
+      // is ever a map, so treat any `auto`-keyed map as the Auto state
+      // rather than erroring.
+      Repr::Sentinel { auto } => {
+        let _ = auto;
+        Ok(KnobValue::Auto)
+      }
+      Repr::Set(v) => Ok(KnobValue::Set(v)),
+    }
+  }
+}
+
+/// Ergonomic accessors over an `Option<KnobValue<T>>` knob slot, so the
+/// many sites that read the old two-state `Option<T>` value keep their
+/// shape. `None` (Inherited) and `Auto` both collapse to "no concrete
+/// value" — the correct view for argv emission and value display, where
+/// Auto emits/shows nothing just like an unset field.
+pub trait KnobValueOpt<T> {
+  /// Borrow the concrete value when the knob is `Set`; `None` when
+  /// unset (Inherited) or `Auto`.
+  fn set_value(&self) -> Option<&T>;
+  /// True when the knob is explicitly delegated to `--fit`.
+  fn is_auto(&self) -> bool;
+}
+
+impl<T> KnobValueOpt<T> for Option<KnobValue<T>> {
+  fn set_value(&self) -> Option<&T> {
+    match self {
+      Some(KnobValue::Set(v)) => Some(v),
+      _ => None,
+    }
+  }
+  fn is_auto(&self) -> bool {
+    matches!(self, Some(KnobValue::Auto))
+  }
+}
+
 /// Typed launch knobs the supervisor argvifies into `llama-server`
 /// flags. Used everywhere a structured per-launch tuning surface is
 /// needed: persistence (`LaunchParams.knobs`), IPC wire shape, the
 /// built-in `(arch, gpu_backend)` defaults table, the YAML
 /// `arch_defaults` escape hatch, and the Settings-tab typed editor.
 ///
-/// Every field is `Option<T>` so a partial entry only contributes the
-/// keys it supplies — `None` means "inherit from the next layer
-/// down" in the layered resolver. Field names mirror llama-server's
-/// flag names (snake-cased) so they're grep-able directly against
-/// the binary's log output.
+/// Every field is `Option<KnobValue<T>>` — a tri-state per knob:
+/// `None` means "inherit from the next layer down" in the layered
+/// resolver, `Some(KnobValue::Set(v))` pins an explicit value, and
+/// `Some(KnobValue::Auto)` delegates the knob to llama-server's
+/// `--fit`. Field names mirror llama-server's flag names (snake-cased)
+/// so they're grep-able directly against the binary's log output.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct TypedKnobs {
   /// Context window length. Maps to `-c` (`--ctx-size`). `None` means
   /// no flag is sent — llama-server reads `context_length` from the
   /// GGUF header.
-  pub ctx: Option<u32>,
+  pub ctx: Option<KnobValue<u32>>,
   /// Reasoning toggle. `Some(true)` bundles `--jinja --reasoning-format
   /// deepseek` at argv time; `Some(false)` / `None` send nothing and
   /// let the model's chat template decide.
-  pub reasoning: Option<bool>,
+  pub reasoning: Option<KnobValue<bool>>,
   /// Layers offloaded to the GPU. Maps to `--n-gpu-layers`. Use 99
   /// for "all" (llama-server caps internally).
-  pub n_gpu_layers: Option<u32>,
+  pub n_gpu_layers: Option<KnobValue<u32>>,
   /// MoE expert layers kept on CPU. Maps to `--n-cpu-moe`. Keeps the
   /// MoE weights of the first N layers in system RAM while the rest
   /// offload to GPU — the counterpart to `n_gpu_layers` for MoE
   /// models that don't fit VRAM.
-  pub n_cpu_moe: Option<u32>,
+  pub n_cpu_moe: Option<KnobValue<u32>>,
   /// CPU threads. Maps to `--threads`.
-  pub threads: Option<u32>,
+  pub threads: Option<KnobValue<u32>>,
   /// K-cache quantisation tag (e.g. `q8_0`). Maps to `--cache-type-k`.
-  pub cache_type_k: Option<String>,
+  pub cache_type_k: Option<KnobValue<String>>,
   /// V-cache quantisation tag. Maps to `--cache-type-v`.
-  pub cache_type_v: Option<String>,
+  pub cache_type_v: Option<KnobValue<String>>,
   /// Flash-attention. Maps to `--flash-attn` (boolean flag).
-  pub flash_attn: Option<bool>,
+  pub flash_attn: Option<KnobValue<bool>>,
   /// Lock model in RAM. Maps to `--mlock`.
-  pub mlock: Option<bool>,
+  pub mlock: Option<KnobValue<bool>>,
   /// Disable mmap (forces full load into RAM). Maps to `--no-mmap`.
-  pub no_mmap: Option<bool>,
+  pub no_mmap: Option<KnobValue<bool>>,
   /// Concurrent request slots. Maps to `--parallel`.
-  pub parallel: Option<u32>,
+  pub parallel: Option<KnobValue<u32>>,
   /// Prompt batch size. Maps to `--batch-size`.
-  pub batch_size: Option<u32>,
+  pub batch_size: Option<KnobValue<u32>>,
   /// Physical (ubatch) batch size. Maps to `--ubatch-size`.
-  pub ubatch_size: Option<u32>,
+  pub ubatch_size: Option<KnobValue<u32>>,
   /// RoPE frequency scaling factor. Maps to `--rope-freq-scale`.
-  pub rope_freq_scale: Option<f32>,
+  pub rope_freq_scale: Option<KnobValue<f32>>,
   /// Tokens to retain on context shift. Maps to `--keep`.
-  pub keep: Option<u32>,
+  pub keep: Option<KnobValue<u32>>,
   /// GPU device to target (`--device`). `None` lets llama-server
   /// auto-select (the default, which may split across all GPUs on
   /// Vulkan). When set, the value is a real `llama-server` device
@@ -374,21 +523,21 @@ pub struct TypedKnobs {
   /// (`"Vulkan0"`, `"CUDA0"`, `"ROCm0"`) — sourced from the launch
   /// device catalog, never a bare index. The daemon spawns the binary
   /// that owns the selector (see [`crate::launch::list_devices`]).
-  pub device: Option<String>,
+  pub device: Option<KnobValue<String>>,
   /// Proportional split of the model across multiple GPUs. Maps to
   /// `--tensor-split` (e.g. `"3,1"` puts 75% on GPU 0 and 25% on
   /// GPU 1). Forwarded verbatim; one comma-separated value per GPU.
   /// Only meaningful on multi-GPU hosts.
-  pub tensor_split: Option<String>,
+  pub tensor_split: Option<KnobValue<String>>,
   /// Primary GPU index that holds non-split tensors (and the KV cache
   /// under `split_mode = row`). Maps to `--main-gpu`. Only meaningful
   /// on multi-GPU hosts.
-  pub main_gpu: Option<u32>,
+  pub main_gpu: Option<KnobValue<u32>>,
   /// How llama-server splits the model across GPUs. Maps to
   /// `--split-mode` (`none` = single GPU, `layer` = llama-server's
   /// default by-layer split, `row` = by-row split). Only meaningful
   /// on multi-GPU hosts.
-  pub split_mode: Option<String>,
+  pub split_mode: Option<KnobValue<String>>,
 }
 
 impl TypedKnobs {
@@ -420,6 +569,22 @@ impl TypedKnobs {
   }
 }
 
+/// How a knob *no layer supplied a value for* is seeded at launch
+/// composition (R1 seeding rule). Selects only the seed for layer-less
+/// knobs — knobs any layer set (user / last-used / arch / preset) keep
+/// that value ("remembered values win").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefaultLaunchMode {
+  /// Layer-less knobs seed to [`KnobValue::Auto`] — delegate placement
+  /// to llama-server's `--fit`. Factory default.
+  #[default]
+  Auto,
+  /// Layer-less knobs stay Inherited (`None`) and fall through to
+  /// llama-server's own default — the pre-Auto behavior.
+  Inherited,
+}
+
 impl Default for Config {
   fn default() -> Self {
     Self {
@@ -437,6 +602,9 @@ impl Default for Config {
       arch_defaults: BTreeMap::new(),
       proxy: ProxyConfig::default(),
       lemonade: LemonadeConfig::default(),
+      default_launch_mode: DefaultLaunchMode::default(),
+      fit_ctx_floor: DEFAULT_FIT_CTX_FLOOR,
+      strict_fit: false,
     }
   }
 }
@@ -642,6 +810,96 @@ mod tests {
   };
 
   use super::*;
+
+  #[test]
+  fn knob_value_set_serialises_as_bare_scalar() {
+    // The bare-scalar shape is the back-compat contract: a `Set` must
+    // serialise exactly as the old `Option<T>` value did.
+    assert_eq!(
+      serde_json::to_string(&KnobValue::Set(8192u32)).unwrap(),
+      "8192"
+    );
+    assert_eq!(
+      serde_json::to_string(&KnobValue::Set(true)).unwrap(),
+      "true"
+    );
+    assert_eq!(
+      serde_json::to_string(&KnobValue::Set("q8_0".to_string())).unwrap(),
+      "\"q8_0\""
+    );
+  }
+
+  #[test]
+  fn knob_value_auto_serialises_as_object_sentinel() {
+    assert_eq!(
+      serde_json::to_string(&KnobValue::<u32>::Auto).unwrap(),
+      "{\"auto\":true}"
+    );
+  }
+
+  #[test]
+  fn knob_value_round_trips_every_kind() {
+    // absent / sentinel / value for u32, bool, String.
+    for json in ["8192", "{\"auto\":true}"] {
+      let v: KnobValue<u32> = serde_json::from_str(json).unwrap();
+      let back = serde_json::to_string(&v).unwrap();
+      assert_eq!(back, json, "u32 round-trip for {json}");
+    }
+    let set: KnobValue<u32> = serde_json::from_str("99").unwrap();
+    assert_eq!(set, KnobValue::Set(99));
+    let auto: KnobValue<bool> = serde_json::from_str("{\"auto\":true}").unwrap();
+    assert_eq!(auto, KnobValue::Auto);
+  }
+
+  #[test]
+  fn string_knob_value_literal_auto_round_trips_as_set_not_sentinel() {
+    // `split_mode = "auto"` is a legal upstream value and must stay
+    // `Set("auto")`, distinct from the Auto state. This is the whole
+    // reason the sentinel is an object, not the bare string "auto".
+    let v: KnobValue<String> = serde_json::from_str("\"auto\"").unwrap();
+    assert_eq!(v, KnobValue::Set("auto".to_string()));
+    assert_eq!(serde_json::to_string(&v).unwrap(), "\"auto\"");
+
+    // And it survives a full TypedKnobs round-trip on a string knob.
+    let knobs = TypedKnobs {
+      split_mode: Some(KnobValue::Set("auto".to_string())),
+      device: Some(KnobValue::Auto),
+      ..TypedKnobs::default()
+    };
+    let s = serde_json::to_string(&knobs).unwrap();
+    let back: TypedKnobs = serde_json::from_str(&s).unwrap();
+    assert_eq!(back.split_mode, Some(KnobValue::Set("auto".to_string())));
+    assert_eq!(back.device, Some(KnobValue::Auto));
+  }
+
+  #[test]
+  fn typed_knobs_tri_state_round_trips_through_json_and_yaml() {
+    let knobs = TypedKnobs {
+      ctx: Some(KnobValue::Set(16384)),
+      n_gpu_layers: Some(KnobValue::Auto),
+      flash_attn: None,
+      cache_type_k: Some(KnobValue::Set("q8_0".to_string())),
+      ..TypedKnobs::default()
+    };
+    let json = serde_json::to_string(&knobs).unwrap();
+    assert_eq!(serde_json::from_str::<TypedKnobs>(&json).unwrap(), knobs);
+    let yaml = serde_yaml::to_string(&knobs).unwrap();
+    assert_eq!(serde_yaml::from_str::<TypedKnobs>(&yaml).unwrap(), knobs);
+  }
+
+  #[test]
+  fn old_typed_knobs_file_with_bare_scalars_loads_as_set() {
+    // A pre-tri-state state.json / config.yaml carries bare scalars and
+    // omits unset fields. It must load unchanged: bare scalar → Set,
+    // absent → None. (Relies on TypedKnobs not setting
+    // `deny_unknown_fields`.)
+    let old = r#"{"ctx": 8192, "n_gpu_layers": 99, "cache_type_k": "q8_0"}"#;
+    let k: TypedKnobs = serde_json::from_str(old).unwrap();
+    assert_eq!(k.ctx, Some(KnobValue::Set(8192)));
+    assert_eq!(k.n_gpu_layers, Some(KnobValue::Set(99)));
+    assert_eq!(k.cache_type_k, Some(KnobValue::Set("q8_0".to_string())));
+    assert_eq!(k.flash_attn, None);
+  }
 
   fn temp_test_dir(name: &str) -> PathBuf {
     let suffix = SystemTime::now()
@@ -924,17 +1182,23 @@ arch_defaults:
       .arch_defaults
       .get("qwen2")
       .expect("qwen2 entry present");
-    assert_eq!(qwen2.n_gpu_layers, Some(99));
-    assert_eq!(qwen2.flash_attn, Some(true));
-    assert_eq!(qwen2.cache_type_k.as_deref(), Some("q8_0"));
-    assert_eq!(qwen2.cache_type_v.as_deref(), Some("q8_0"));
+    assert_eq!(qwen2.n_gpu_layers, Some(KnobValue::Set(99)));
+    assert_eq!(qwen2.flash_attn, Some(KnobValue::Set(true)));
+    assert_eq!(
+      qwen2.cache_type_k.set_value().map(String::as_str),
+      Some("q8_0")
+    );
+    assert_eq!(
+      qwen2.cache_type_v.set_value().map(String::as_str),
+      Some("q8_0")
+    );
     let llama = loaded
       .config
       .arch_defaults
       .get("llama")
       .expect("llama entry present");
-    assert_eq!(llama.threads, Some(8));
-    assert_eq!(llama.parallel, Some(4));
+    assert_eq!(llama.threads, Some(KnobValue::Set(8)));
+    assert_eq!(llama.parallel, Some(KnobValue::Set(4)));
     assert!(
       llama.n_gpu_layers.is_none(),
       "partial entry leaves rest None"

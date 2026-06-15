@@ -136,7 +136,7 @@ impl clap::Args for KnobFlags {
 mod tests {
   use super::*;
   use crate::cli::tail_args::parse_tail_args;
-  use crate::config::TypedKnobs;
+  use crate::config::{KnobValue, KnobValueOpt, TypedKnobs};
   use clap::{Args, FromArgMatches};
 
   /// Build a throwaway command with the derived flags, parse `argv`,
@@ -186,10 +186,10 @@ mod tests {
       "--cache-type-k",
       "q8_0",
     ]);
-    assert_eq!(k.threads, Some(8));
-    assert_eq!(k.n_gpu_layers, Some(99));
-    assert_eq!(k.device.as_deref(), Some("Vulkan0"));
-    assert_eq!(k.cache_type_k.as_deref(), Some("q8_0"));
+    assert_eq!(k.threads, Some(KnobValue::Set(8)));
+    assert_eq!(k.n_gpu_layers, Some(KnobValue::Set(99)));
+    assert_eq!(k.device.set_value().map(String::as_str), Some("Vulkan0"));
+    assert_eq!(k.cache_type_k.set_value().map(String::as_str), Some("q8_0"));
   }
 
   #[test]
@@ -203,27 +203,33 @@ mod tests {
       "--split-mode",
       "row",
     ]);
-    assert_eq!(k.tensor_split.as_deref(), Some("3,1"));
-    assert_eq!(k.main_gpu, Some(1));
-    assert_eq!(k.split_mode.as_deref(), Some("row"));
+    assert_eq!(k.tensor_split.set_value().map(String::as_str), Some("3,1"));
+    assert_eq!(k.main_gpu, Some(KnobValue::Set(1)));
+    assert_eq!(k.split_mode.set_value().map(String::as_str), Some("row"));
   }
 
   #[test]
   fn bare_bool_is_true() {
-    assert_eq!(knobs(&["test", "--flash-attn"]).flash_attn, Some(true));
+    assert_eq!(
+      knobs(&["test", "--flash-attn"]).flash_attn,
+      Some(KnobValue::Set(true))
+    );
   }
 
   #[test]
   fn bool_equals_false_disables() {
     assert_eq!(
       knobs(&["test", "--flash-attn=false"]).flash_attn,
-      Some(false)
+      Some(KnobValue::Set(false))
     );
   }
 
   #[test]
   fn bool_space_form_off() {
-    assert_eq!(knobs(&["test", "--mlock", "off"]).mlock, Some(false));
+    assert_eq!(
+      knobs(&["test", "--mlock", "off"]).mlock,
+      Some(KnobValue::Set(false))
+    );
   }
 
   #[test]

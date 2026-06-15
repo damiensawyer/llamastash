@@ -326,6 +326,15 @@ Every non-interactive subcommand returns a documented exit code so agent scripts
 
 Linux (x86_64, aarch64), macOS (Apple Silicon, Intel), and Windows 11 (x86_64). One binary, one TUI, one CLI — the daemon's control plane is bearer-token-authed HTTP loopback on every platform, and the supervisor uses the OS's native process-group semantics (POSIX `setsid` + signals, Windows Job Objects + CTRL+BREAK). Windows AMD GPU detection and `aarch64-pc-windows-msvc` are on the roadmap.
 
+### Supported llama-server version
+
+LlamaStash hands GPU/CPU placement and context sizing to llama.cpp's `--fit` (on by default), so it needs a `llama-server` that has it.
+
+- **Minimum: build `b7410`** (2025-12-15), the first release carrying `--fit` / `--fit-ctx` (llama.cpp [PR #16653](https://github.com/ggml-org/llama.cpp/pull/16653)). Older builds abort on the unknown argument the moment a model launches.
+- **Recommended: a recent build** (`b8500`+, 2026). The May 2026 AMD GPU-stack updates (kernel, amdgpu firmware, ROCm) materially improved `--fit` on unified memory; verified on `b9245`.
+
+llama.cpp has no semantic versioning, no stable branch, and no stability policy ([discussion #16111](https://github.com/ggml-org/llama.cpp/discussions/16111)) — it tags ~10-14 rolling builds a day. So the build number is a floor for _flag existence_, not a behaviour guarantee; LlamaStash's own pre-spawn admission control is what actually prevents out-of-memory launches regardless of build. `llamastash init` installs a known-good build for your hardware.
+
 ## Roadmap
 
 Tracked in detail in [`TODO.md`](https://github.com/llamastash/llamastash/blob/main/TODO.md). The headline items on deck:

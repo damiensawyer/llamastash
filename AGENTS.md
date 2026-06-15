@@ -221,7 +221,7 @@ OpenCode / Pi / SDK ──HTTP──► Proxy listener (127.0.0.1:11434, loopbac
 
 ## CLI agent surface (Units 8 + 10/13)
 
-Every read-and-mutation command supports `--json` and emits a wrapped object: `{"models":[…]}`, `{"favorites":[…]}`, `{"presets":[…]}`, `{"last_params":[…]}`, `{"stopped":[…],"count":N}`, `{"steps_ran":[…],"install":{…},"model":{…},"config":{…},"smoke":{…},"hardware":{…}}` for `init`, `{"schema_version":1,"findings":[{"id":…,"severity":…,"message":…,"fix_hint":…,"safe_to_log":true}],"baseline":{…}}` for `doctor`. Stable shapes for agent consumption. Exit codes follow `<sysexits.h>` numerically but with project-specific meanings — pin against the table in `src/cli/exit_codes.rs`, not the libc constants. `stop --all` in a non-TTY context refuses without `--yes`. The IPC `capabilities` method enumerates supported methods so clients can feature-detect.
+Every read-and-mutation command supports `--json` and emits a wrapped object: `{"models":[…]}`, `{"favorites":[…]}`, `{"presets":[…]}`, `{"last_params":[…]}`, `{"stopped":[…],"count":N}`, `{"steps_ran":[…],"install":{…},"model":{…},"config":{…},"smoke":{…},"hardware":{…}}` for `init`, `{"schema_version":2,"findings":[{"id":…,"severity":…,"message":…,"fix_hint":…,"safe_to_log":true}],"baseline":{…},"hardware":{…}}` for `doctor` (schema `2` added the `hardware` section and the `memory_drift` / `gtt_hint` finding ids). Stable shapes for agent consumption. Exit codes follow `<sysexits.h>` numerically but with project-specific meanings — pin against the table in `src/cli/exit_codes.rs`, not the libc constants. `stop --all` in a non-TTY context refuses without `--yes`. The IPC `capabilities` method enumerates supported methods so clients can feature-detect.
 
 ### Exit-code table
 
@@ -250,7 +250,7 @@ set of synthetic codes inside its JSON report's
 
 The `status` method response carries the following top-level objects beyond the legacy `models` / `external` / `gpu` shapes:
 
-- `host` — always an object (no `null`). Populated by the daemon's host-metrics sampler at 1 Hz. Fields: `cpu_pct` (f32, 0..=100 mean across cores), `ram_used_bytes` / `ram_total_bytes` (u64), `gpu_util_pct` / `gpu_mem_used_bytes` / `gpu_mem_total_bytes` / `gpu_temp_c` (each `Option`, omitted on backends that don't surface them), `gpu_backend` (string), `gpu_device_count` (u32), `gpu_devices` (`Option<[…]>`, present only on multi-GPU/multi-backend hosts).
+- `host` — always an object (no `null`). Populated by the daemon's host-metrics sampler at 1 Hz. Fields: `cpu_pct` (f32, 0..=100 mean across cores), `ram_used_bytes` / `ram_total_bytes` (u64), `gpu_util_pct` / `gpu_mem_used_bytes` / `gpu_mem_total_bytes` / `gpu_temp_c` (each `Option`, omitted on backends that don't surface them), `gpu_backend` (string), `gpu_device_count` (u32), `gpu_devices` (`Option<[…]>`, present only on multi-GPU/multi-backend hosts), `unified` (bool — GPU shares one physical pool with the CPU: Apple Silicon, or an AMD/Intel UMA APU), `uma_shared_total_bytes` / `uma_shared_used_bytes` (`Option`, the system-RAM-backed portion of a UMA pool — AMD GTT), and `uma_class_source` (`Option`, how the unified-vs-discrete verdict was reached: `"explicit_dxgi_uma"`, `"carve_signature"`, or `"discrete"`; `null` on Apple Metal and non-classifying backends).
   - `gpu_backend` values: `"cpu_only"`, `"nvidia"`, `"amd"`, `"apple_metal"`, `"unknown"` (Vulkan-only fallback), `"multi"` (two or more backends each found a device), or the sentinel `"unsampled"` returned in the brief window between daemon start and the sampler's first tick. Clients gating UI on backend kind should treat `"unsampled"` as "not yet known", not as a real reading.
   - `gpu_devices` — when two or more GPUs are visible, one row per device: `{selector, backend, name, total_memory_bytes, used_memory_bytes?, utilization_pct?, temperature_c?}` (`?` = omitted when the vendor tool doesn't surface it). `selector` is a backend-prefixed *display* label (`Nvidia0`, `Amd0`), not a `--device` value — launch selection draws from a separate `llama-server --list-devices` catalog. Lets a dashboard render per-card stats instead of one aggregate row; omitted on single-GPU hosts.
 - `daemon.build` — semver string from `CARGO_PKG_VERSION`; matches `--version`.
@@ -289,9 +289,11 @@ The static `(architecture, gpu_backend) → TypedKnobs` defaults table
 lives in `src/launch/defaults_table.rs`. When `data/benchmark-snapshot.json`
 adds a new recommender pick, audit the table coverage:
 
-- Architectures listed in the snapshot but missing from `COVERED_ARCHS`
-  fall through to the conservative `*` row (which only seeds
-  `n_gpu_layers: 99` on GPU backends).
+- The table no longer pins `n_gpu_layers` on any (arch, backend):
+  offload placement is delegated to llama-server's `--fit` (a layer-less
+  `n_gpu_layers` is seeded `Auto` by the resolver and emits no `-ngl`).
+  Architectures missing from `COVERED_ARCHS` fall through to the empty
+  `*` row.
 - `FLASH_ATTN_ELIGIBLE` is opt-in only — extend it once measurement
   confirms a new architecture supports flash-attn cleanly on NVIDIA
   / Apple Metal. AMD/HIP flash-attn coverage stays uneven; leave to

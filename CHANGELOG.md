@@ -8,6 +8,21 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 - Browser web UI through the proxy at `/ui` — opens the running model's stock llama.cpp UI on one port-stable origin, with a chooser when several run (and `/ui/switch` to re-pick) plus HTTP Basic auth (the proxy key as the password) for LAN access.
 
+### Changed
+
+- **Breaking: Auto launch mode is the new default.** Instead of pinning `n_gpu_layers=99` and a computed context size, LlamaStash delegates GPU/CPU placement and context sizing to llama-server's `--fit`, and keeps memory-budget authority itself with pre-spawn admission control: it refuses a launch that would not fit the sampled free memory rather than letting concurrent models OOM the machine. A fit-capable `llama-server` is now required.
+- Every launch knob accepts the literal `auto` (`--n-gpu-layers auto`, `start --ctx auto`, and an Auto stop in the TUI knob cycle); a value you pin still wins.
+- New config options with `LLAMASTASH_*` env overrides: `default_launch_mode` (`auto`|`inherited`), `fit_ctx_floor` (default 16384), `strict_fit`.
+- TUI host pane, init banner, and help legend rename `RAM`/`RAM*` to `MEM`/`MEM*` so unified-memory machines stop reading as roughly twice their physical memory.
+- `doctor` gained a hardware section (CPU, memory, GPU pool composition, classification source), a memory-drift finding, and a GTT-cap hint; `status --json` reports the fit-resolved context as `resolved_ctx` once a model is up.
+- Hardware reporting now uses one consistent vocabulary across `status`, `doctor`, `init`, and the TUI: the GPU is named by vendor (`AMD`/`NVIDIA`/`Apple`), memory always prints `GiB`, a unified APU pool reads `unified`/`MEM*` rather than `VRAM`, and `doctor` is the superset (it adds CPU instruction sets and an OS line). `doctor` and `status` now print the same one-line GPU summary, e.g. `AMD · 124.5 GiB (carve signature)`.
+
+### Fixed
+
+- Lemonade preload now waits for the `lemond` umbrella to be ready before loading a model, so an explicit launch on a cold daemon no longer flips to `error` on a transient connection failure.
+- `--flash-attn auto` no longer leaves a dangling positional token in the argv tail.
+- `status` no longer reports `GPU: CPU only` during the daemon's first second (before the metrics sampler ticks); it reads the live host snapshot like the TUI, and the pre-sample window reads `detecting`.
+
 ## [0.0.3] — 2026-06-11
 
 ### Added

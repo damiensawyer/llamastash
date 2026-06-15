@@ -184,6 +184,9 @@ async fn start_model_replies_promptly_and_records_preload_outcome() {
     probe: fast_probe(),
     arch_defaults: Default::default(),
     device_catalog: Default::default(),
+    default_launch_mode: Default::default(),
+    fit_ctx_floor: 16384,
+    strict_fit: false,
   };
   let ctx = MethodContext::new(ShutdownToken::new())
     .with_supervisors(registry.clone())
@@ -349,6 +352,7 @@ async fn status_projects_delegated_models_and_stop_unloads_them() {
           PathBuf::from(format!("lemonade://{name}")),
           LaunchMode::Chat,
         ),
+        actuals: Default::default(),
       })
     })
     .await;

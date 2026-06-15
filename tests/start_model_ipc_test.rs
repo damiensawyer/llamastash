@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use llamastash::config::loader::PortRange;
+use llamastash::config::KnobValue;
 use llamastash::daemon::state_store;
 use llamastash::daemon::{run_foreground, DaemonOptions};
 use llamastash::gguf::test_fixtures::build_minimal_gguf;
@@ -553,7 +554,8 @@ async fn last_params_persists_only_user_supplied_knob_deltas() {
   let deadline = std::time::Instant::now() + Duration::from_secs(60);
   loop {
     let s = state_store::load(&state_dir).expect("load state");
-    if !s.last_params.is_empty() && s.last_params[0].params.knobs.threads == Some(4) {
+    if !s.last_params.is_empty() && s.last_params[0].params.knobs.threads == Some(KnobValue::Set(4))
+    {
       break;
     }
     if std::time::Instant::now() > deadline {
@@ -595,7 +597,7 @@ async fn last_params_persists_only_user_supplied_knob_deltas() {
   let knobs = loop {
     let s = state_store::load(&state_dir).expect("load state");
     if let Some(entry) = s.last_params.first() {
-      if entry.params.knobs.mlock == Some(true) {
+      if entry.params.knobs.mlock == Some(KnobValue::Set(true)) {
         break entry.params.knobs.clone();
       }
     }
@@ -608,7 +610,7 @@ async fn last_params_persists_only_user_supplied_knob_deltas() {
   // The contract: only the call-2 delta survives on disk.
   assert_eq!(
     knobs.mlock,
-    Some(true),
+    Some(KnobValue::Set(true)),
     "user-supplied mlock must persist verbatim"
   );
   assert_eq!(
@@ -661,4 +663,70 @@ async fn start_model_returns_error_when_binary_unconfigured() {
   let _ = client.call("shutdown", None).await;
   let _ = timeout(Duration::from_secs(3), daemon).await;
   std::fs::remove_dir_all(&state).ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_surfaces_resolved_ctx_actuals_from_props() {
+  // A launch with no pinned ctx emits `--fit-ctx <floor>`; the fake
+  // server's `/props` reports it as the resolved n_ctx; the daemon's
+  // post-Ready actuals fetch stamps it on the running snapshot and
+  // `status` surfaces it (R6).
+  let state = unique_temp("actuals");
+  let model_dir = unique_temp("actuals-models");
+  let model_path = model_dir.join("m.gguf");
+  std::fs::write(&model_path, build_minimal_gguf("llama")).unwrap();
+  let model_path_canon = llamastash::util::paths::canonicalize(&model_path).unwrap();
+
+  let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+  let base = probe.local_addr().unwrap().port();
+  drop(probe);
+  let range = PortRange {
+    start: base,
+    end: base.saturating_add(8),
+  };
+
+  // `DaemonOptions::rooted_at` defaults `fit_ctx_floor` to 16384.
+  let opts = DaemonOptions {
+    binary: Some(fake_binary()),
+    port_range: range,
+    ..DaemonOptions::rooted_at(state.clone())
+  };
+  let socket = opts.state_dir.clone();
+  let daemon = tokio::spawn(async move { run_foreground(opts).await });
+  wait_for_socket(&socket).await;
+  let mut client = Client::connect(&socket).await.expect("connect");
+
+  client
+    .call(
+      "start_model",
+      Some(json!({"model_path": &model_path_canon, "mode": "chat"})),
+    )
+    .await
+    .expect("start_model");
+
+  // The actuals fetch runs asynchronously on the Ready transition, so
+  // poll status rather than racing it.
+  let deadline = std::time::Instant::now() + Duration::from_secs(30);
+  let mut resolved = None;
+  while std::time::Instant::now() < deadline {
+    let status = client.call("status", None).await.unwrap();
+    if let Some(rc) = status["models"]
+      .as_array()
+      .and_then(|ms| ms.iter().find_map(|m| m["resolved_ctx"].as_u64()))
+    {
+      resolved = Some(rc);
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+  assert_eq!(
+    resolved,
+    Some(16384),
+    "status must surface the fit-resolved ctx read from /props"
+  );
+
+  let _ = client.call("shutdown", None).await;
+  let _ = timeout(Duration::from_secs(3), daemon).await;
+  std::fs::remove_dir_all(&state).ok();
+  std::fs::remove_dir_all(&model_dir).ok();
 }

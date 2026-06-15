@@ -18,6 +18,7 @@ fn save_then_load_round_trips_a_real_world_snapshot() {
     gpu_vendor: Some("nvidia".into()),
     vram_gb: Some(24.0),
     gpu_device_count: Some(1),
+    gpu_pool_total_bytes: Some(24 * 1024 * 1024 * 1024),
     llama_server_version: Some("b9219".into()),
     install_method: Some(InstallMethod::GhReleases),
     init_date: Some("2026-05-19T00:00:00Z".into()),

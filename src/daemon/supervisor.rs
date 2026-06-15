@@ -153,6 +153,34 @@ pub struct ManagedSpawn {
   /// How this launch entered the supervisor. Defaults to `Manual`
   /// (safe — never evicted) for callers that don't care.
   pub origin: LaunchOrigin,
+  /// Strict-fit ctx-clamp readiness gate (R19), populated by the caller
+  /// only for fit-governed launches. `None` leaves the readiness path
+  /// untouched (pinned ctx, missing trained-window metadata, Lemonade
+  /// rows). See [`FitGate`].
+  pub fit_gate: Option<FitGate>,
+}
+
+/// Resolved inputs for the strict-fit ctx-clamp readiness gate (R19).
+/// The caller builds this only for fit-governed launches (ctx delegated
+/// to `--fit` and a known trained window); the supervisor's probe task
+/// consumes it on the Loading → Ready transition.
+#[derive(Debug, Clone, Copy)]
+pub struct FitGate {
+  /// The `--fit-ctx` floor llamastash passed.
+  pub floor: u32,
+  /// The model's trained context window.
+  pub native: u32,
+  /// Refuse (withhold Ready) vs. soft-notice on a detected clamp.
+  pub strict: bool,
+}
+
+impl FitGate {
+  /// A clamp is degradation only when `--fit` settled at (or below) the
+  /// floor *and* the model could have gone higher — otherwise the floor
+  /// is simply the model's own ceiling, not memory pressure.
+  fn is_clamped(&self, resolved: u32) -> bool {
+    resolved <= self.floor && self.native > self.floor
+  }
 }
 
 /// One actively-managed launch. Cheap to clone via the `Arc` inside.
@@ -185,6 +213,12 @@ struct ManagedInner {
   /// per-launch sampler has emitted at least one reading. Updated by
   /// the `resource_sampler` task spawned from [`spawn`].
   latest_resource: RwLock<Option<super::resources::ResourceReading>>,
+  /// What `--fit` actually resolved, captured once by the readiness gate
+  /// on the Loading → Ready transition (for fit-governed launches). The
+  /// `last_params` recorder reads this to stamp the running snapshot so
+  /// `/props` is fetched at most once per launch. Empty until the gate
+  /// runs (or for launches the gate skips).
+  actuals: RwLock<super::actuals::Actuals>,
   /// Where the launch came from. Read by the idle-TTL sweeper so it
   /// only ever evicts `AutoStart` supervisors.
   origin: LaunchOrigin,
@@ -258,11 +292,47 @@ impl ManagedModel {
     *self.inner.ready_at.read().await
   }
 
+  /// Block until the model is `Ready`, or report why it won't be.
+  ///
+  /// [`spawn`] returns at `Loading` and flips to `Ready` only once the
+  /// background probe sees the child's endpoint answer — so a caller that
+  /// must talk to that endpoint has to wait for it, or it races the
+  /// child's bind and hits connection-refused on a cold start (the
+  /// Lemonade preload path). Polls the state until `Ready` (`Ok`), a
+  /// terminal non-ready state (`Err` with the cause), or `timeout`
+  /// elapses while still starting up (`Err`).
+  pub async fn wait_until_ready(&self, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+      match self.state().await {
+        ManagedState::Ready => return Ok(()),
+        ManagedState::Error { cause } => return Err(cause),
+        ManagedState::Stopping | ManagedState::Stopped => {
+          return Err("stopped before becoming ready".to_string());
+        }
+        ManagedState::Launching | ManagedState::Loading => {
+          if Instant::now() >= deadline {
+            return Err(format!("not ready within {timeout:?}"));
+          }
+          tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+      }
+    }
+  }
+
   /// Latest per-PID resource reading (CPU% + RSS). Mirrors the
   /// shape `resources::sample()` returns. `None` until the per-launch
   /// sampler has emitted its first non-priming reading.
   pub async fn latest_resource(&self) -> Option<super::resources::ResourceReading> {
     *self.inner.latest_resource.read().await
+  }
+
+  /// What `--fit` resolved, as captured by the readiness gate. Empty
+  /// (`is_empty()`) for launches the gate skipped (pinned ctx / no
+  /// trained-window metadata); the `last_params` recorder then fetches
+  /// `/props` itself.
+  pub async fn actuals(&self) -> super::actuals::Actuals {
+    *self.inner.actuals.read().await
   }
 
   /// Snapshot of the most recent N lines the child wrote (stdout
@@ -422,6 +492,7 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
     ring: Mutex::new(RingBuffer::with_capacity(4096)),
     child: Mutex::new(Some(child)),
     latest_resource: RwLock::new(None),
+    actuals: RwLock::new(super::actuals::Actuals::default()),
     origin: input.origin,
     inflight: std::sync::atomic::AtomicU64::new(0),
   });
@@ -494,6 +565,9 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
   let (ready_path, ready_status) = match &input.plan.readiness {
     Readiness::HttpPoll { path, ready_status } => (path.clone(), *ready_status),
   };
+  // Strict-fit ctx-clamp gate (R19): the caller populates this only for
+  // fit-governed launches; `None` leaves the readiness path unchanged.
+  let fit_gate = input.fit_gate;
   spawn_supervised("probe", async move {
     let outcome = probe::poll_until_ready(
       probe_model.inner.port,
@@ -504,6 +578,44 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
     .await;
     match outcome {
       ProbeOutcome::Ready => {
+        // For fit-governed launches, read what `--fit` resolved before
+        // declaring Ready: the gate needs it, and stashing it on the
+        // model lets the `last_params` recorder reuse it instead of
+        // hitting `/props` a second time. Best-effort — a failed fetch
+        // yields empty actuals and the gate simply can't fire.
+        let mut actuals = if fit_gate.is_some() {
+          super::actuals::fetch(probe_model.inner.port, Duration::from_secs(5)).await
+        } else {
+          super::actuals::Actuals::default()
+        };
+        if let (Some(gate), Some(resolved)) = (fit_gate, actuals.resolved_ctx) {
+          if gate.is_clamped(resolved) {
+            actuals.ctx_clamped = true;
+            if gate.strict {
+              // Withhold Ready: refuse the launch outright so a strict
+              // caller never routes traffic to a context-starved model.
+              let cause = format!(
+                "strict-fit: --fit clamped the context window to the floor ({} tokens) under \
+                 memory pressure; the model's trained window is {} tokens. Free up memory or \
+                 lower fit_ctx_floor to launch.",
+                gate.floor, gate.native
+              );
+              probe_model.transition(ManagedState::Error { cause }).await;
+              signal_child_with_guard(&probe_model, SignalFlavour::Kill).await;
+              return;
+            }
+            // Soft notice (non-strict): keep the model Ready but flag the
+            // clamp so the running surfaces can surface it.
+            log::warn!(
+              "supervisor: --fit clamped context to the floor ({} tokens, trained window {}) on \
+               port {} under memory pressure",
+              gate.floor,
+              gate.native,
+              probe_model.inner.port
+            );
+          }
+        }
+        *probe_model.inner.actuals.write().await = actuals;
         let secs = SystemTime::now()
           .duration_since(UNIX_EPOCH)
           .map(|d| d.as_secs())
@@ -981,10 +1093,42 @@ mod tests {
       ring: Mutex::new(RingBuffer::with_capacity(16)),
       child: Mutex::new(None),
       latest_resource: RwLock::new(None),
+      actuals: RwLock::new(crate::daemon::actuals::Actuals::default()),
       origin: LaunchOrigin::Manual,
       inflight: std::sync::atomic::AtomicU64::new(0),
     });
     ManagedModel { inner }
+  }
+
+  #[test]
+  fn fit_gate_clamp_detection() {
+    let gate = FitGate {
+      floor: 16_384,
+      native: 131_072,
+      strict: false,
+    };
+    // Pinned to the floor while the model could go higher → clamp.
+    assert!(gate.is_clamped(16_384));
+    // Defensive: a resolution somehow below the floor is still a clamp.
+    assert!(gate.is_clamped(8_192));
+    // Fit found headroom above the floor → not a clamp.
+    assert!(!gate.is_clamped(65_536));
+    // Floor at the trained ceiling → settling there is the model's own
+    // limit, not memory pressure.
+    let at_max = FitGate {
+      floor: 16_384,
+      native: 16_384,
+      strict: true,
+    };
+    assert!(!at_max.is_clamped(16_384));
+    // Trained window below the floor (fit clamps down to it) is the
+    // model's limit too, never flagged.
+    let small = FitGate {
+      floor: 16_384,
+      native: 8_192,
+      strict: true,
+    };
+    assert!(!small.is_clamped(8_192));
   }
 
   #[tokio::test]
@@ -1038,6 +1182,54 @@ mod tests {
     assert!(m.transition(ManagedState::Ready).await);
     assert!(m.transition(ManagedState::Stopping).await);
     assert!(m.transition(ManagedState::Stopped).await);
+  }
+
+  #[tokio::test]
+  async fn wait_until_ready_returns_immediately_when_ready() {
+    let m = test_model(ManagedState::Ready);
+    assert!(m.wait_until_ready(Duration::from_secs(1)).await.is_ok());
+  }
+
+  #[tokio::test]
+  async fn wait_until_ready_propagates_error_cause() {
+    let m = test_model(ManagedState::Error {
+      cause: "probe timeout".into(),
+    });
+    let err = m
+      .wait_until_ready(Duration::from_secs(1))
+      .await
+      .expect_err("error state must not report ready");
+    assert_eq!(err, "probe timeout");
+  }
+
+  #[tokio::test]
+  async fn wait_until_ready_errs_when_stopped_before_ready() {
+    let m = test_model(ManagedState::Stopped);
+    assert!(m.wait_until_ready(Duration::from_secs(1)).await.is_err());
+  }
+
+  #[tokio::test]
+  async fn wait_until_ready_observes_a_late_ready_transition() {
+    // The Lemonade preload's exact shape: handle is at Loading, a
+    // separate task flips it to Ready shortly after — the waiter must
+    // see it rather than racing ahead.
+    let m = test_model(ManagedState::Loading);
+    let probe = m.clone();
+    tokio::spawn(async move {
+      tokio::time::sleep(Duration::from_millis(60)).await;
+      probe.transition(ManagedState::Ready).await;
+    });
+    assert!(m.wait_until_ready(Duration::from_secs(2)).await.is_ok());
+  }
+
+  #[tokio::test]
+  async fn wait_until_ready_times_out_if_never_ready() {
+    let m = test_model(ManagedState::Loading);
+    let err = m
+      .wait_until_ready(Duration::from_millis(80))
+      .await
+      .expect_err("a stuck-Loading model must time out");
+    assert!(err.contains("not ready within"), "got {err}");
   }
 
   #[tokio::test]

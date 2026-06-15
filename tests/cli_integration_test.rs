@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use llamastash::cli::cli_args::{
-  Cli, Command, FavoritesAction, FavoritesArgs, LaunchMode as CliLaunchMode, ListArgs, LogsArgs,
-  PresetsAction, PresetsArgs, PullArgs, ReasoningFlag, StartArgs, StatusArgs, StopArgs,
+  Cli, Command, CtxArg, FavoritesAction, FavoritesArgs, LaunchMode as CliLaunchMode, ListArgs,
+  LogsArgs, PresetsAction, PresetsArgs, PullArgs, ReasoningFlag, StartArgs, StatusArgs, StopArgs,
 };
 use llamastash::cli::{dispatch, exit_codes};
 use llamastash::config::loader::{LoadedConfig, PortRange};
@@ -368,6 +368,7 @@ async fn agent_script_round_trip_list_start_status_logs_stop() {
       extra: vec![],
       backend: None,
       json: false,
+      wait: false,
     }),
   )
   .await;
@@ -469,6 +470,7 @@ async fn list_filter_and_unknown_ref_exit_codes() {
       extra: vec![],
       backend: None,
       json: false,
+      wait: false,
     }),
   )
   .await;
@@ -753,6 +755,7 @@ async fn start_preset_chain_seeds_supervisor_with_saved_params() {
       extra: vec![],
       backend: None,
       json: false,
+      wait: false,
     }),
   )
   .await;
@@ -767,15 +770,21 @@ async fn start_preset_chain_seeds_supervisor_with_saved_params() {
   loop {
     let lp = client.call("last_params_list", None).await.unwrap();
     let arr = lp["last_params"].as_array().cloned().unwrap_or_default();
+    // U4 recorder contract: the daemon persists *user-set knobs only*,
+    // and stops persisting the resolved top-level `ctx`/`reasoning`
+    // (those are now Null/false). The preset's ctx/reasoning/threads
+    // live in the `knobs` sub-object.
     if arr.iter().any(|row| {
-      row["params"]["ctx"] == serde_json::json!(16384)
-        && row["params"]["reasoning"] == serde_json::json!(true)
+      row["params"]["knobs"]["ctx"] == serde_json::json!(16384)
+        && row["params"]["knobs"]["reasoning"] == serde_json::json!(true)
         && row["params"]["knobs"]["threads"] == serde_json::json!(8)
     }) {
       break;
     }
     if Instant::now() > deadline {
-      panic!("supervisor should have recorded preset ctx + reasoning + knobs.threads: {arr:?}",);
+      panic!(
+        "supervisor should have recorded preset knobs.ctx + knobs.reasoning + knobs.threads: {arr:?}",
+      );
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
   }
@@ -797,7 +806,7 @@ async fn start_ctx_above_native_succeeds_and_duplicate_launch_uses_new_port() {
     Command::Start(StartArgs {
       model: Some("m.gguf".into()),
       preset: None,
-      ctx: Some(131_072),
+      ctx: Some(CtxArg::Value(131_072)),
       port: None,
       reasoning: None,
       mode: Some(CliLaunchMode::Chat),
@@ -805,6 +814,7 @@ async fn start_ctx_above_native_succeeds_and_duplicate_launch_uses_new_port() {
       extra: vec![],
       backend: None,
       json: false,
+      wait: false,
     }),
   )
   .await;
@@ -831,6 +841,7 @@ async fn start_ctx_above_native_succeeds_and_duplicate_launch_uses_new_port() {
       extra: vec![],
       backend: None,
       json: false,
+      wait: false,
     }),
   )
   .await;
@@ -879,6 +890,7 @@ async fn logs_follow_returns_daemon_unreachable_when_daemon_dies() {
       extra: vec![],
       backend: None,
       json: false,
+      wait: false,
     }),
   )
   .await;

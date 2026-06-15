@@ -42,7 +42,7 @@ use windows::Win32::Graphics::Dxgi::{
   CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
 };
 
-use super::GpuDevice;
+use super::{ClassSource, GpuDevice};
 
 const VENDOR_AMD: u32 = 0x1002;
 const VENDOR_NVIDIA: u32 = 0x10DE;
@@ -137,18 +137,23 @@ pub fn probe_devices() -> Option<Vec<GpuDevice>> {
     // RAM on *every* adapter, so it can't carry the signal (the old
     // `dedicated < shared` heuristic mis-flagged discrete cards and
     // made the host pane subtract bogus bytes from the RAM gauge).
-    let (total_memory_bytes, uma_shared_total) = if adapter_is_uma(&adapter) {
+    let (total_memory_bytes, uma_shared_total, class_source) = if adapter_is_uma(&adapter) {
       // The usable GPU pool is the small BIOS-carved dedicated heap
       // plus the shareable system-RAM pool that holds the actual model
       // weights. Fold them into one total (mirrors the Linux rocm-smi
       // VRAM+GTT path) and mark the shared portion so init / the host
-      // pane flag it as unified.
-      (dedicated.saturating_add(shared), Some(shared))
+      // pane flag it as unified. The D3D12 `UMA` flag is the explicit,
+      // authoritative classification signal (R18).
+      (
+        dedicated.saturating_add(shared),
+        Some(shared),
+        ClassSource::ExplicitDxgiUma,
+      )
     } else {
       // Discrete card: dedicated VRAM is the real number; the shared
       // pool is just the driver's GART aperture and must not inflate
       // VRAM or be mistaken for unified memory.
-      (dedicated, None)
+      (dedicated, None, ClassSource::Discrete)
     };
     // Tag the device with the backend based on vendor. Windows DXGI
     // can't distinguish GPU vendors reliably, so we use the VendorId
@@ -174,6 +179,7 @@ pub fn probe_devices() -> Option<Vec<GpuDevice>> {
         device_id: None,
         uma_shared_total_bytes: uma_shared_total,
         uma_shared_used_bytes: None,
+        classification_source: Some(class_source),
       },
     ));
   }

@@ -581,6 +581,7 @@ async fn pre_launch(
     log_path: log_dir.join("ollama-ps.log"),
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
+    fit_gate: None,
   })
   .await
   .expect("spawn");

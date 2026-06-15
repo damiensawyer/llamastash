@@ -114,6 +114,14 @@ pub struct InitSnapshot {
   /// Number of GPU devices reported at last probe.
   #[serde(default)]
   pub gpu_device_count: Option<u32>,
+  /// GPU memory pool ceiling in bytes at the last baseline stamp — the
+  /// raw aggregated total (for a UMA APU this is carve-out + GTT). The
+  /// doctor `MemoryDrift` finding (R13) compares the freshly-detected
+  /// ceiling against this; doctor re-stamps it after the finding fires
+  /// (one-shot) and stamps it silently the first time it is absent
+  /// (pre-upgrade snapshot). `None` on CPU-only hosts.
+  #[serde(default)]
+  pub gpu_pool_total_bytes: Option<u64>,
   /// `llama-server --version` output at install time (typically a
   /// commit short hash like `b9219`).
   #[serde(default)]
@@ -161,6 +169,7 @@ impl Default for InitSnapshot {
       gpu_vendor: None,
       vram_gb: None,
       gpu_device_count: None,
+      gpu_pool_total_bytes: None,
       llama_server_version: None,
       install_method: None,
       init_date: None,
@@ -329,6 +338,7 @@ mod tests {
       gpu_vendor: Some("nvidia".into()),
       vram_gb: Some(24.0),
       gpu_device_count: Some(1),
+      gpu_pool_total_bytes: Some(24 * 1024 * 1024 * 1024),
       llama_server_version: Some("b9219".into()),
       install_method: Some(InstallMethod::GhReleases),
       init_date: Some("2026-05-19T00:00:00Z".into()),

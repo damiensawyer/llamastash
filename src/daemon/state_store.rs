@@ -44,8 +44,8 @@ pub struct DaemonState {
   pub presets: Vec<PresetsEntry>,
   #[serde(default)]
   pub running: Vec<RunningSnapshot>,
-  /// Schema version. Bumped on breaking changes so a future daemon
-  /// can refuse to load (or migrate from) an older shape.
+  /// Schema version. A coarse marker for future use; we do not carry
+  /// migration code (breaking changes ship cleanly pre-1.0).
   #[serde(default = "current_schema_version")]
   pub schema_version: u32,
 }
@@ -132,6 +132,11 @@ pub struct RunningSnapshot {
   /// JSON stays human-readable.
   pub started_at: u64,
   pub params: LaunchParams,
+  /// What `--fit` actually chose, read from the child's `/props` once
+  /// on Ready (R6). Empty for adopted/external/Lemonade rows and until
+  /// the fetch lands. `#[serde(default)]` keeps older rows loading.
+  #[serde(default)]
+  pub actuals: crate::daemon::actuals::Actuals,
 }
 
 impl RunningSnapshot {
@@ -272,6 +277,7 @@ mod tests {
       port: 41100,
       started_at: 1_700_000_000,
       params: fake_params("/m/a.gguf"),
+      actuals: Default::default(),
     });
 
     save(&dir, &s).expect("save");
@@ -441,6 +447,7 @@ mod tests {
       port: 9100,
       started_at: 1_700_000_001,
       params: fake_params("/unused"),
+      actuals: Default::default(),
     });
 
     save(&dir, &s).expect("save");

@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use llamastash::config::KnobValue;
 use llamastash::discovery::{DiscoveredModel, ModelSource};
 use llamastash::gguf::metadata::{ModeHint, ModelMetadata, Quant};
 use llamastash::theme::ThemeName;
@@ -193,7 +194,6 @@ fn arrows_in_settings_tab_cycle_fields_and_values() {
   use llamastash::launch::flag_aliases::KnobField;
   use llamastash::tui::keybindings::Focus;
   use llamastash::tui::launch_picker::PickerField;
-  use llamastash::tui::launch_picker::CTX_PRESETS;
   use llamastash::tui::RightTab;
   let mut app = App::new(AppOptions::default());
   app.models = vec![fake_model("/m/qwen.gguf", "/m")];
@@ -207,13 +207,13 @@ fn arrows_in_settings_tab_cycle_fields_and_values() {
     picker.user_knobs.ctx, None,
     "ctx defaults to native (no user override)"
   );
-  // → advances the focused field's value.
+  // → advances the focused field's value; the first ring stop is Auto.
   pump_input(&mut app, key(KeyCode::Right, KeyModifiers::NONE));
   assert_eq!(
     app.launch_picker.as_ref().unwrap().user_knobs.ctx,
-    Some(CTX_PRESETS[0])
+    Some(KnobValue::Auto)
   );
-  // ← walks it back to native.
+  // ← walks it back to inherited.
   pump_input(&mut app, key(KeyCode::Left, KeyModifiers::NONE));
   assert_eq!(app.launch_picker.as_ref().unwrap().user_knobs.ctx, None);
   // ↓ moves the cursor to the next field.
@@ -222,11 +222,12 @@ fn arrows_in_settings_tab_cycle_fields_and_values() {
     app.launch_picker.as_ref().unwrap().field,
     PickerField::Knob(KnobField::Reasoning)
   );
-  // → walks the reasoning tri-state forward (None → Some(true)).
+  // reasoning is not fit-governed → no Auto stop; the ring is
+  // Inherited → on → off, so → lands on `on`.
   pump_input(&mut app, key(KeyCode::Right, KeyModifiers::NONE));
   assert_eq!(
     app.launch_picker.as_ref().unwrap().user_knobs.reasoning,
-    Some(true)
+    Some(KnobValue::Set(true))
   );
 }
 
@@ -364,6 +365,7 @@ fn ready_chat_model_exposes_chat_tab_via_cycle() {
     device: None,
     rss_bytes: None,
     cpu_pct: None,
+    ..Default::default()
   }];
   app.go_top();
   let tabs = app.available_right_tabs();
@@ -421,10 +423,10 @@ fn launch_picker_seeds_from_persisted_last_params() {
   app.go_top();
   app.open_launch_picker();
   let picker = app.launch_picker.as_ref().expect("picker open");
-  assert_eq!(picker.user_knobs.ctx, Some(8192));
+  assert_eq!(picker.user_knobs.ctx, Some(KnobValue::Set(8192)));
   assert_eq!(
     picker.user_knobs.reasoning,
-    Some(true),
+    Some(KnobValue::Set(true)),
     "reasoning toggle must seed from last_params via user_knobs"
   );
   let extras: Vec<String> = picker
@@ -458,6 +460,7 @@ fn picker_warns_when_focused_model_already_has_active_instance() {
     device: None,
     rss_bytes: None,
     cpu_pct: None,
+    ..Default::default()
   }];
   // Row layout: [TableHeader, Header(▶ Running), Model(L1)].
   app.list_cursor = 2;
@@ -508,6 +511,7 @@ fn typing_into_chat_input_extends_prompt_buffer() {
     device: None,
     rss_bytes: None,
     cpu_pct: None,
+    ..Default::default()
   }];
   app.go_top();
   // Shift+C is the canonical jump to the Chat tab (gated on a

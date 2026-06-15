@@ -143,7 +143,7 @@ impl Backend for LlamaCppBackend {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::config::TypedKnobs;
+  use crate::config::{KnobValue, TypedKnobs};
   use crate::launch::flag_aliases::knob_specs;
   use crate::launch::mode::LaunchMode;
   use std::ffi::OsString;
@@ -159,25 +159,25 @@ mod tests {
     // Mirror the canonical-order fixture in params.rs so the parity
     // assertion exercises every emitted flag.
     TypedKnobs {
-      ctx: Some(32768),
-      reasoning: Some(true),
-      n_gpu_layers: Some(99),
-      n_cpu_moe: Some(12),
-      threads: Some(8),
-      cache_type_k: Some("q8_0".into()),
-      cache_type_v: Some("q8_0".into()),
-      flash_attn: Some(true),
-      mlock: Some(true),
-      no_mmap: Some(true),
-      parallel: Some(4),
-      batch_size: Some(2048),
-      ubatch_size: Some(512),
-      rope_freq_scale: Some(1.0),
-      keep: Some(128),
+      ctx: Some(KnobValue::Set(32768)),
+      reasoning: Some(KnobValue::Set(true)),
+      n_gpu_layers: Some(KnobValue::Set(99)),
+      n_cpu_moe: Some(KnobValue::Set(12)),
+      threads: Some(KnobValue::Set(8)),
+      cache_type_k: Some(KnobValue::Set("q8_0".into())),
+      cache_type_v: Some(KnobValue::Set("q8_0".into())),
+      flash_attn: Some(KnobValue::Set(true)),
+      mlock: Some(KnobValue::Set(true)),
+      no_mmap: Some(KnobValue::Set(true)),
+      parallel: Some(KnobValue::Set(4)),
+      batch_size: Some(KnobValue::Set(2048)),
+      ubatch_size: Some(KnobValue::Set(512)),
+      rope_freq_scale: Some(KnobValue::Set(1.0)),
+      keep: Some(KnobValue::Set(128)),
       device: None,
-      tensor_split: Some("3,1".into()),
-      main_gpu: Some(0),
-      split_mode: Some("layer".into()),
+      tensor_split: Some(KnobValue::Set("3,1".into())),
+      main_gpu: Some(KnobValue::Set(0)),
+      split_mode: Some(KnobValue::Set("layer".into())),
     }
   }
 

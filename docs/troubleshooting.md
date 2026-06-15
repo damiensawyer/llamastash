@@ -15,9 +15,15 @@ Quick reference for the common ways LlamaStash can refuse to do what you want, w
 **Fixes per backend:**
 
 - **NVIDIA:** confirm `nvidia-smi` works. LlamaStash uses `nvml-wrapper`; if NVML isn't installed (driver-only install), the daemon falls back to CPU-only. Install the NVML library that ships with your CUDA toolkit.
-- **AMD:** LlamaStash shells out to `rocm-smi --showmeminfo vram --json`. Make sure `rocm-smi` is on `PATH` and that ROCm is initialised.
+- **AMD:** on Linux, LlamaStash reads `/sys/class/drm/card*/device/mem_info_*` (a stable kernel interface) and falls back to `rocm-smi --showmeminfo vram gtt --json`. Make sure the `amdgpu` driver is bound; if sysfs is unreadable, keep `rocm-smi` on `PATH`. `doctor` surfaces a probe failure rather than silently degrading to CPU-only.
 - **Apple Silicon:** LlamaStash parses `system_profiler SPDisplaysDataType -json`. If this is empty, the macOS install is unusual — try the command manually and file an issue with the output.
 - **Intel macOS:** there is no Metal support to detect; LlamaStash falls back to CPU-only and that's correct.
+
+## `doctor` reports `memory_drift` or `gtt_hint`
+
+**`memory_drift`:** the detected GPU memory pool changed size since the last baseline — growth is informational (e.g. you raised the GTT ceiling), shrinkage is a warning (a model that used to fit may not). `doctor` re-stamps the baseline after the finding fires, so it is one-shot; the previous size stays in the finding text. No action required.
+
+**`gtt_hint` (Linux AMD APUs):** the GPU's shared GTT pool is sized at the amdgpu default (~half of system RAM), so a large model may spill to CPU sooner than the hardware can actually hold. To let `llama-server` use more system RAM as GPU memory, raise the GTT ceiling via kernel parameters — e.g. `amdgpu.gttsize=<MiB> ttm.pages_limit=<pages>`. Do **not** set `amd_iommu=off`; it breaks Thunderbolt/USB4 docks and is not needed.
 
 ## Stale daemon handshake file
 

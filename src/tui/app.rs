@@ -75,7 +75,7 @@ const RECENT_LIST_CAP: usize = 5;
 /// In-memory snapshot of one launched model the daemon is
 /// supervising. Mirrors the IPC `status` shape — kept in App so
 /// the right-pane header can show port/state without re-querying.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ManagedRow {
   pub launch_id: String,
   pub path: PathBuf,
@@ -89,6 +89,21 @@ pub struct ManagedRow {
   /// Latest per-PID CPU usage percent (multi-core, may exceed 100%).
   /// `None` until the daemon's per-launch sampler primes.
   pub cpu_pct: Option<f32>,
+  /// Context window `--fit` actually resolved, read from the child's
+  /// `/props` after Ready (R6). `None` until that fetch lands (or when
+  /// the build omits it). The running-launch settings view shows this
+  /// real number instead of the dispatched `auto` sentinel.
+  pub resolved_ctx: Option<u32>,
+  /// True when `--fit` had to clamp the context window down to the floor
+  /// under memory pressure (R19). The running view tags the resolved ctx
+  /// with a "clamped" note so the user knows it was squeezed.
+  pub ctx_clamped: bool,
+  /// The knobs this launch was actually dispatched with (the live
+  /// `status` `params.knobs`), so the running-launch settings view shows
+  /// what the server is *running* with — `auto` for a fit-delegated
+  /// knob, a pinned number when set — rather than the user's saved
+  /// `last_params` delta (which can be empty even for an auto launch).
+  pub knobs: crate::config::TypedKnobs,
 }
 
 /// Persisted "last successful launch params" for one model, fetched
@@ -1839,6 +1854,9 @@ fn parse_external_row(row: &Value) -> Option<ManagedRow> {
     device: None,
     rss_bytes: None,
     cpu_pct: None,
+    resolved_ctx: None,
+    ctx_clamped: false,
+    knobs: crate::config::TypedKnobs::default(),
   })
 }
 
@@ -1893,6 +1911,24 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
     .and_then(|k| k.get("device"))
     .and_then(Value::as_str)
     .map(|s| s.to_string());
+  let resolved_ctx = row
+    .get("resolved_ctx")
+    .and_then(Value::as_u64)
+    .map(|n| n as u32);
+  let ctx_clamped = row
+    .get("ctx_clamped")
+    .and_then(Value::as_bool)
+    .unwrap_or(false);
+  // The knobs the launch was dispatched with — `auto` sentinels for
+  // fit-delegated rows, pinned numbers when set. Parsed from the live
+  // `status` row so the running view reflects the server, not the user's
+  // saved `last_params`. A shape mismatch falls back to empty (all rows
+  // then read `default`, the inherited sentinel).
+  let knobs = row
+    .get("params")
+    .and_then(|p| p.get("knobs"))
+    .and_then(|k| serde_json::from_value::<crate::config::TypedKnobs>(k.clone()).ok())
+    .unwrap_or_default();
   Some(ManagedRow {
     launch_id,
     path,
@@ -1901,12 +1937,16 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
     device,
     rss_bytes,
     cpu_pct,
+    resolved_ctx,
+    ctx_clamped,
+    knobs,
   })
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::config::KnobValue;
   use crate::discovery::ModelSource;
   use crate::gguf::metadata::{ModeHint, ModelMetadata, Quant};
   use crate::launch::list_devices::LaunchDevice;
@@ -2349,6 +2389,7 @@ mod tests {
       device: None,
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }];
     app.list_cursor = 2;
     assert!(app.focused_managed().is_some());
@@ -2390,6 +2431,7 @@ mod tests {
       device: device.map(String::from),
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }];
     app.daemon_info = DaemonInfo {
       server_path: Some(server_path.into()),
@@ -2498,8 +2540,8 @@ mod tests {
         ctx: Some(16384),
         reasoning: true,
         knobs: crate::config::TypedKnobs {
-          ctx: Some(16384),
-          reasoning: Some(true),
+          ctx: Some(KnobValue::Set(16384)),
+          reasoning: Some(KnobValue::Set(true)),
           ..Default::default()
         },
         extras: vec!["--rope-freq-base".into(), "10000".into()],
@@ -2510,12 +2552,12 @@ mod tests {
     let picker = app.launch_picker.as_ref().expect("picker state");
     assert_eq!(
       picker.user_knobs.ctx,
-      Some(16384),
+      Some(KnobValue::Set(16384)),
       "ctx must seed from last_params via user_knobs"
     );
     assert_eq!(
       picker.user_knobs.reasoning,
-      Some(true),
+      Some(KnobValue::Set(true)),
       "reasoning must seed from last_params via user_knobs"
     );
     assert_eq!(picker.prefer_port, Some(41105), "port must seed too");
@@ -2536,6 +2578,7 @@ mod tests {
       device: None,
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }
   }
 
@@ -2762,6 +2805,7 @@ mod tests {
       device: None,
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }];
     // Rows: [TableHeader, Header(▶ Running), umbrella, …] — cursor on it.
     app.list_cursor = 2;
@@ -2793,6 +2837,7 @@ mod tests {
         device: None,
         rss_bytes: None,
         cpu_pct: None,
+        ..Default::default()
       },
       ManagedRow {
         launch_id: "lemonade:Whisper-Tiny".into(),
@@ -2802,6 +2847,7 @@ mod tests {
         device: None,
         rss_bytes: None,
         cpu_pct: None,
+        ..Default::default()
       },
     ];
     // Rows: [TableHeader, Header(▶ Running), qwen, whisper, …].
