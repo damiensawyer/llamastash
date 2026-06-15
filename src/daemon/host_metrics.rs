@@ -17,7 +17,7 @@ use sysinfo::{Components, CpuRefreshKind, MemoryRefreshKind, RefreshKind, System
 use tokio::sync::RwLock;
 
 use super::shutdown::ShutdownToken;
-use crate::gpu::{self, GpuDevice, GpuInfo};
+use crate::gpu::{self, ClassSource, GpuDevice, GpuInfo};
 
 /// One detected GPU device — name + total VRAM + util + temp.
 /// Carried in the IPC status response so the TUI device picker can
@@ -106,6 +106,12 @@ pub struct HostMetricsSnapshot {
   /// of re-deriving it from the backend string + UMA fields.
   #[serde(default)]
   pub unified: bool,
+  /// How the unified-vs-discrete verdict was reached (R18) — surfaced
+  /// in the `doctor` hardware section so a misclassification is
+  /// inspectable. `None` on Apple Metal (unified by construction),
+  /// NVIDIA, Vulkan, and CPU-only.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub uma_class_source: Option<ClassSource>,
 }
 
 impl HostMetricsSnapshot {
@@ -327,6 +333,7 @@ fn build_snapshot(sys: &System, components: &Components, info: GpuInfo) -> HostM
     uma_shared_total_bytes: agg.uma_shared_total,
     uma_shared_used_bytes: agg.uma_shared_used,
     unified: info.is_unified(),
+    uma_class_source: info.uma_class_source(),
   }
 }
 

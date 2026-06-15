@@ -179,6 +179,7 @@ Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs
 ### [Drop-in OpenAI + Ollama proxy](FEATURES.md#drop-in-openai--ollama-proxy)
 
 - [OpenAI-compatible endpoint](FEATURES.md#openai-compatible-endpoint) at `http://127.0.0.1:11435/v1` by default (or the next free port up to `11440`) — drives every discovered model through one URL; OpenCode, Pi (pi.dev), Cline, llm-cli, the OpenAI SDKs all work as-is. Auto-starts the requested model; falls back to a Ready peer with audit headers (`x-llamastash-served-by`, `x-llamastash-fallback-reason`) when launch fails. The default port is `11435` (one above Ollama's well-known `11434`) so a llamastash daemon and an Ollama install can co-exist without a port collision.
+- [Browser web UI](FEATURES.md#browser-web-ui) at `http://127.0.0.1:11435/ui/` — opens the running model's stock llama.cpp web UI through the proxy on one port-stable origin, so you never chase the ephemeral backend port. A chooser (plus `/ui/switch`) handles several running models; reachable over LAN behind the same key via a browser Basic-auth prompt.
 - [Ollama discovery surface](FEATURES.md#ollama-discovery-surface) — `GET /api/tags` / `/api/version` / `/api/ps`, `POST /api/show` so tools that auto-detect Ollama via `OLLAMA_HOST` recognise llamastash and fall through to the OpenAI-compat endpoints for inference.
 - **Ollama drop-in mode is opt-in.** Enable with `--ollama-compat` (or `proxy.ollama_compat: true` / `LLAMASTASH_OLLAMA_COMPAT=1`) and the proxy claims port `11434`, answers `GET /` with the byte-exact `"Ollama is running"` handshake string, and works as a transparent replacement for the official `ollama` CLI and other Ollama-Go-based clients. Leaving compat off keeps the safe coexistence default (port `11435`, `"LlamaStash is running"` identity).
 - [Loopback by default, opt-in LAN with auth](FEATURES.md#auth-posture) — the proxy binds `127.0.0.1` and runs keyless for the same-machine threat model. Expose it on the LAN with `--proxy-host 0.0.0.0` (or `proxy.host`) and llamastash auto-generates a bearer key, requires it on every request, and refuses to bind a routable address with no key unless you pass `--insecure-no-auth`. TLS is on the roadmap; LAN mode is plaintext for now (trusted network or front with a reverse proxy). The control plane and `llama-server` children always stay loopback.
@@ -325,6 +326,15 @@ Every non-interactive subcommand returns a documented exit code so agent scripts
 ## Platforms
 
 Linux (x86_64, aarch64), macOS (Apple Silicon, Intel), and Windows 11 (x86_64). One binary, one TUI, one CLI — the daemon's control plane is bearer-token-authed HTTP loopback on every platform, and the supervisor uses the OS's native process-group semantics (POSIX `setsid` + signals, Windows Job Objects + CTRL+BREAK). Windows AMD GPU detection and `aarch64-pc-windows-msvc` are on the roadmap.
+
+### Supported llama-server version
+
+LlamaStash hands GPU/CPU placement and context sizing to llama.cpp's `--fit` (on by default), so it needs a `llama-server` that has it.
+
+- **Minimum: build `b7410`** (2025-12-15), the first release carrying `--fit` / `--fit-ctx` (llama.cpp [PR #16653](https://github.com/ggml-org/llama.cpp/pull/16653)). Older builds abort on the unknown argument the moment a model launches.
+- **Recommended: a recent build** (`b8500`+, 2026). The May 2026 AMD GPU-stack updates (kernel, amdgpu firmware, ROCm) materially improved `--fit` on unified memory; verified on `b9245`.
+
+llama.cpp has no semantic versioning, no stable branch, and no stability policy ([discussion #16111](https://github.com/ggml-org/llama.cpp/discussions/16111)) — it tags ~10-14 rolling builds a day. So the build number is a floor for _flag existence_, not a behaviour guarantee; LlamaStash's own pre-spawn admission control is what actually prevents out-of-memory launches regardless of build. `llamastash init` installs a known-good build for your hardware.
 
 ## Roadmap
 

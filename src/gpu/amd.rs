@@ -14,7 +14,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use super::{normalize_pci, run_with_timeout, GpuDevice};
+use super::{classify_amd_memory, normalize_pci, run_with_timeout, GpuDevice};
 
 /// rocm-smi argument variants to try, in order. Older ROCm releases
 /// (pre-5.4) may reject the combined four-flag form or emit non-JSON
@@ -26,8 +26,8 @@ const ROCM_SMI_ARG_VARIANTS: &[&[&str]] = &[
   // surface their real GPU memory budget — the BIOS-dedicated VRAM
   // heap is tiny by design (e.g. 4 GiB on Strix Halo), while GTT is
   // the system-RAM-backed pool that holds the actual model weights.
-  // Discrete cards have GTT smaller than VRAM, so they keep using the
-  // VRAM-only number (see `combine_uma_memory`).
+  // Discrete cards keep the VRAM-only number; the carve-out signature
+  // decides which (see `super::classify_amd_memory`).
   &[
     "--showmeminfo",
     "vram",
@@ -45,7 +45,35 @@ const ROCM_SMI_ARG_VARIANTS: &[&[&str]] = &[
   &["--showmeminfo", "vram", "--json"],
 ];
 
+/// Probe AMD GPUs. On Linux the `/sys/class/drm` reads are preferred
+/// (stable kernel interface, no JSON-key churn, cheap enough for the
+/// per-tick refresh); `rocm-smi` is the fallback. When sysfs finds no
+/// amdgpu card but rocm-smi does, the sysfs nodes are missing where the
+/// vendor tool succeeds — log loudly (feeds the doctor finding) rather
+/// than silently degrading to a worse data source.
 pub fn probe_devices() -> Option<Vec<GpuDevice>> {
+  #[cfg(target_os = "linux")]
+  {
+    if let Some(devices) = super::sysfs::probe_devices() {
+      return Some(devices);
+    }
+    let rocm = probe_devices_rocm_smi();
+    if rocm.is_some() {
+      log::warn!(
+        "amdgpu sysfs probe found no card but rocm-smi did; falling back to rocm-smi (sysfs mem_info nodes missing?)"
+      );
+    }
+    rocm
+  }
+  #[cfg(not(target_os = "linux"))]
+  {
+    probe_devices_rocm_smi()
+  }
+}
+
+/// `rocm-smi`-based probe — the fallback for the sysfs path above and
+/// the only path on non-Linux Unix.
+pub fn probe_devices_rocm_smi() -> Option<Vec<GpuDevice>> {
   for args in ROCM_SMI_ARG_VARIANTS {
     let mut cmd = Command::new("rocm-smi");
     cmd.args(*args);
@@ -202,19 +230,18 @@ pub(crate) fn parse(stdout: &str) -> Vec<GpuDevice> {
         ],
       );
       if let Some(vram_total_bytes) = vram_total {
-        let (total_memory_bytes, used_memory_bytes) = combine_uma_memory(
+        let (
+          total_memory_bytes,
+          used_memory_bytes,
+          uma_shared_total_bytes,
+          uma_shared_used_bytes,
+          source,
+        ) = classify_amd_memory(
           vram_total_bytes,
           vram_used.unwrap_or(0),
           gtt_total,
           gtt_used,
         );
-        // Mark the GTT portion as UMA-shared so the host pane can
-        // subtract it from the RAM gauge — those bytes already live
-        // in system RAM and would otherwise be double-counted.
-        let (uma_shared_total_bytes, uma_shared_used_bytes) = match gtt_total {
-          Some(gt) if gt > vram_total_bytes => (Some(gt), Some(gtt_used.unwrap_or(0))),
-          _ => (None, None),
-        };
         out.push(GpuDevice {
           name: gpu_key.clone(),
           backend: "amd".into(),
@@ -225,39 +252,12 @@ pub(crate) fn parse(stdout: &str) -> Vec<GpuDevice> {
           uma_shared_total_bytes,
           uma_shared_used_bytes,
           device_id: None,
+          classification_source: Some(source),
         });
       }
     }
   }
   out
-}
-
-/// Decide whether to report VRAM only or `VRAM + GTT` for a card.
-///
-/// Heuristic: UMA APUs (Strix Halo, Phoenix, …) have a tiny dedicated
-/// VRAM heap (often 4 GiB) with the real GPU memory budget living in
-/// GTT. Discrete cards have it the other way round — large VRAM, GTT
-/// limited to a DMA mapping window. We treat `gtt_total > vram_total`
-/// as the UMA marker and sum both heaps; otherwise stay on the VRAM
-/// number so discrete cards don't have their bar inflated by GTT.
-///
-/// Pre-7.0 kernels on Strix Halo reported the full BIOS UMA carve-out
-/// as static VRAM (e.g. 64 GiB VRAM, ~16 GiB GTT) — that path hits
-/// the discrete branch and keeps the old number, so this change is
-/// backward-compatible for those boots.
-fn combine_uma_memory(
-  vram_total: u64,
-  vram_used: u64,
-  gtt_total: Option<u64>,
-  gtt_used: Option<u64>,
-) -> (u64, u64) {
-  match (gtt_total, gtt_used) {
-    (Some(gt), gu) if gt > vram_total => (
-      vram_total.saturating_add(gt),
-      vram_used.saturating_add(gu.unwrap_or(0)),
-    ),
-    _ => (vram_total, vram_used),
-  }
 }
 
 fn pick_u64(card: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
@@ -398,50 +398,61 @@ mod tests {
   }
 
   #[test]
-  fn uma_sums_vram_and_gtt_when_gtt_is_larger() {
-    // Strix Halo with kernel 7.0+ amdgpu: 4 GiB BIOS-dedicated VRAM
-    // heap + 61 GiB GTT pool. Real GPU memory is the sum; the bar
-    // should land at 43/65G to match what `llama-server` actually
-    // allocates.
+  fn uma_sums_vram_and_gtt_on_carve_signature() {
+    // Strix Halo (current config): 512 MiB BIOS carve-out + ~124 GiB
+    // GTT pool. The tiny dedicated VRAM is the carve signature → sum
+    // both heaps, mark the GTT portion shared, source = carve.
     let stdout = r#"{
       "card0": {
-        "VRAM Total Memory (B)": 4294967296,
-        "VRAM Total Used Memory (B)": 268435456,
-        "GTT Total Memory (B)": 65227005952,
-        "GTT Total Used Memory (B)": 46300164096
+        "VRAM Total Memory (B)": 536870912,
+        "VRAM Total Used Memory (B)": 486838272,
+        "GTT Total Memory (B)": 133143986176,
+        "GTT Total Used Memory (B)": 2843930624
       }
     }"#;
     let devices = parse(stdout);
     assert_eq!(devices.len(), 1);
     assert_eq!(
       devices[0].total_memory_bytes,
-      4_294_967_296 + 65_227_005_952,
+      536_870_912 + 133_143_986_176,
       "UMA total should sum VRAM + GTT"
     );
     assert_eq!(
       devices[0].used_memory_bytes,
-      268_435_456 + 46_300_164_096,
+      486_838_272 + 2_843_930_624,
       "UMA used should sum VRAM + GTT"
+    );
+    assert_eq!(devices[0].uma_shared_total_bytes, Some(133_143_986_176));
+    assert_eq!(
+      devices[0].classification_source,
+      Some(crate::gpu::ClassSource::CarveSignature)
     );
   }
 
   #[test]
-  fn discrete_card_keeps_vram_only_when_gtt_smaller() {
-    // Pre-kernel-7 Strix Halo or any discrete card: VRAM is the big
-    // number, GTT is a smaller DMA-mapping window. We must not
-    // inflate the bar by adding GTT here.
+  fn discrete_card_with_large_gtt_stays_discrete() {
+    // R18 regression: a discrete 16 GiB card on a 128 GiB-RAM host
+    // gets a kernel-sized GTT aperture (~64 GiB) that exceeds VRAM.
+    // The old `gtt > vram` heuristic mis-summed this to 80 GiB and
+    // marked it unified; the carve signature (VRAM >= 1 GiB) keeps it
+    // discrete on VRAM only.
     let stdout = r#"{
       "card0": {
-        "VRAM Total Memory (B)": 25769803776,
+        "VRAM Total Memory (B)": 17179869184,
         "VRAM Total Used Memory (B)": 5368709120,
-        "GTT Total Memory (B)": 17179869184,
+        "GTT Total Memory (B)": 68719476736,
         "GTT Total Used Memory (B)": 536870912
       }
     }"#;
     let devices = parse(stdout);
     assert_eq!(devices.len(), 1);
-    assert_eq!(devices[0].total_memory_bytes, 25_769_803_776);
+    assert_eq!(devices[0].total_memory_bytes, 17_179_869_184);
     assert_eq!(devices[0].used_memory_bytes, 5_368_709_120);
+    assert_eq!(devices[0].uma_shared_total_bytes, None);
+    assert_eq!(
+      devices[0].classification_source,
+      Some(crate::gpu::ClassSource::Discrete)
+    );
   }
 
   #[test]
@@ -460,16 +471,43 @@ mod tests {
   }
 
   #[test]
-  fn combine_uma_memory_branches() {
-    // UMA: gtt > vram → sum.
-    assert_eq!(combine_uma_memory(4, 1, Some(60), Some(40)), (64, 41));
-    // Discrete: gtt <= vram → vram only.
-    assert_eq!(combine_uma_memory(24, 5, Some(16), Some(1)), (24, 5));
-    assert_eq!(combine_uma_memory(24, 5, Some(24), Some(0)), (24, 5));
-    // No GTT data → vram only.
-    assert_eq!(combine_uma_memory(8, 2, None, None), (8, 2));
-    // GTT total without used → still sums, used adds zero.
-    assert_eq!(combine_uma_memory(4, 1, Some(60), None), (64, 1));
+  fn classify_amd_memory_branches() {
+    use crate::gpu::{classify_amd_memory, ClassSource};
+    let carve = 512 * 1024 * 1024;
+    let big_gtt = 100 * 1024 * 1024 * 1024;
+    // Carve signature (vram < 1 GiB) → sum, GTT marked shared.
+    assert_eq!(
+      classify_amd_memory(carve, 1, Some(big_gtt), Some(40)),
+      (
+        carve + big_gtt,
+        41,
+        Some(big_gtt),
+        Some(40),
+        ClassSource::CarveSignature
+      )
+    );
+    // Discrete (vram >= 1 GiB) → vram only even when GTT is larger.
+    let vram16 = 16 * 1024 * 1024 * 1024;
+    assert_eq!(
+      classify_amd_memory(vram16, 5, Some(big_gtt), Some(1)),
+      (vram16, 5, None, None, ClassSource::Discrete)
+    );
+    // Carve signature with GTT total but no used → still sums, adds 0.
+    assert_eq!(
+      classify_amd_memory(carve, 1, Some(big_gtt), None),
+      (
+        carve + big_gtt,
+        1,
+        Some(big_gtt),
+        Some(0),
+        ClassSource::CarveSignature
+      )
+    );
+    // No GTT data on a carve card → sums with 0 GTT (degenerate).
+    assert_eq!(
+      classify_amd_memory(carve, 2, None, None),
+      (carve, 2, Some(0), Some(0), ClassSource::CarveSignature)
+    );
   }
 
   #[test]

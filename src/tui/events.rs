@@ -19,6 +19,7 @@ use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
+use crate::config::KnobValueOpt;
 use crate::ipc::Client;
 use crate::tui::app::{App, ConfirmAction};
 use crate::tui::keybindings::{Action, Focus};
@@ -1753,8 +1754,8 @@ fn apply_launch_submit(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) 
   let name = app.display_name_for(&path);
   let active_instances = app.managed.iter().filter(|m| m.path == path).count();
   let args = Box::new(crate::tui::app::StartModelArgs {
-    ctx: knobs.ctx,
-    reasoning: knobs.reasoning,
+    ctx: knobs.ctx.set_value().copied(),
+    reasoning: knobs.reasoning.set_value().copied(),
     model_path: path,
     knobs,
     extras,
@@ -3128,6 +3129,7 @@ fn tick_has_time_decay_ui(app: &App) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::config::KnobValue;
   use crossterm::event::{KeyEvent, KeyModifiers};
 
   fn key(code: KeyCode, mods: KeyModifiers) -> TermEvent {
@@ -3325,6 +3327,7 @@ mod tests {
       device: None,
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }];
     app.go_top();
     pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::CONTROL));
@@ -3354,6 +3357,7 @@ mod tests {
       device: None,
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }];
     app.go_top();
     pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::CONTROL));
@@ -4306,12 +4310,17 @@ mod tests {
     // arrive on the wire.
     app.open_launch_picker();
     let p = app.launch_picker.as_mut().unwrap();
+    // ctx is fit-governed, so its ring inserts an Auto stop first
+    // (Inherited → Auto → presets…); step twice to land on a preset.
     p.field = PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx);
-    p.cycle_focused_value_next();
-    let expected_ctx = p.user_knobs.ctx;
-    // Round-8: tri-state cycle — None → Some(true).
+    p.cycle_focused_value_next(); // → Auto
+    p.cycle_focused_value_next(); // → first ctx preset
+    let expected_ctx = p.user_knobs.ctx.set_value().copied();
+    assert!(expected_ctx.is_some(), "ctx should be a concrete preset");
+    // reasoning is not fit-governed → no Auto stop (Inherited → on → off);
+    // one step lands on `on`.
     p.field = PickerField::Knob(crate::launch::flag_aliases::KnobField::Reasoning);
-    p.cycle_focused_value_next();
+    p.cycle_focused_value_next(); // → on
 
     let (tx, mut rx) = mpsc::channel::<WriterCmd>(8);
     pump_input_with_writer(&mut app, key(KeyCode::Enter, KeyModifiers::NONE), Some(&tx));
@@ -4424,6 +4433,7 @@ mod tests {
       device: None,
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }
   }
 
@@ -4802,14 +4812,15 @@ mod tests {
     // Round-7: ←/→ change the focused field's value (was bound to
     // pane-cycle pre-round-7). Outside Settings the keys stay
     // unbound so they don't double as pane navigation.
-    use crate::tui::launch_picker::{PickerField, CTX_PRESETS};
+    use crate::tui::launch_picker::PickerField;
     let mut app = App::new(Default::default());
     app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
     app.go_top();
     app.focus = Focus::RightPane;
     app.right_tab = RightTab::Settings;
 
-    // Auto-stages the picker on first key; cursor lands on Ctx.
+    // Auto-stages the picker on first key; cursor lands on Ctx. The
+    // first → stop in the ring is Auto (Inherited → Auto → presets…).
     pump_input(&mut app, key(KeyCode::Right, KeyModifiers::NONE));
     let p = app.launch_picker.as_ref().expect("picker auto-staged");
     assert_eq!(
@@ -4818,15 +4829,15 @@ mod tests {
     );
     assert_eq!(
       p.user_knobs.ctx,
-      Some(CTX_PRESETS[0]),
-      "→ advances Ctx preset"
+      Some(KnobValue::Auto),
+      "→ advances Ctx to the Auto stop"
     );
 
     pump_input(&mut app, key(KeyCode::Left, KeyModifiers::NONE));
     assert_eq!(
       app.launch_picker.as_ref().unwrap().user_knobs.ctx,
       None,
-      "← walks Ctx back to native"
+      "← walks Auto back to inherited"
     );
     // Pane focus must not have moved.
     assert_eq!(app.focus, Focus::RightPane);
@@ -4936,7 +4947,7 @@ mod tests {
     let committed = app.launch_picker.as_ref().expect("picker still staged");
     assert_eq!(
       committed.user_knobs.ctx,
-      Some(65536),
+      Some(KnobValue::Set(65536)),
       "ctx commit must write the typed value to user_knobs, not silently drop it"
     );
     assert!(

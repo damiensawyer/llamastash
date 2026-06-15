@@ -13,7 +13,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use crate::config::TypedKnobs;
+use crate::config::{KnobValue, KnobValueOpt, TypedKnobs};
 use crate::launch::flag_aliases::{
   knob_display_groups, knob_row_visible, KnobField, KV_CACHE_TYPES, SPLIT_MODES,
 };
@@ -22,6 +22,12 @@ use crate::launch::params::{BackendChoice, LayerLabel};
 /// Pre-canned context-length presets surfaced as quick picks. Custom
 /// values flow through the same field when the user types digits.
 pub const CTX_PRESETS: &[u32] = &[2048, 4096, 8192, 16384, 32768, 65536, 131072];
+
+/// Value-column label for a knob the user hasn't set — it inherits from
+/// the resolver chain (last used / arch default / model default / server
+/// default), named by the row's source chip. One constant so every
+/// surface (picker form, running view, device row) agrees on the word.
+pub const INHERITED_LABEL: &str = "inherited";
 
 /// Which row the cursor is on. The editor renders top-to-bottom in
 /// [`PickerField::all`] order so it doubles as the vertical-navigation
@@ -286,56 +292,119 @@ impl LaunchPickerState {
     }
   }
 
+  /// True when the user explicitly cycled this knob to `Auto`.
+  fn user_is_auto(&self, field: KnobField) -> bool {
+    crate::launch::field_is_auto(&self.user_knobs, field)
+  }
+
+  /// Set the user override for `field` to `Auto` (delegate to `--fit`).
+  fn set_user_auto(&mut self, field: KnobField) {
+    crate::launch::set_field_auto(&mut self.user_knobs, field);
+  }
+
   fn cycle_u32(&mut self, field: KnobField, presets: &[u32], forward: bool) {
-    let current = self.user_value_u32(field);
-    let next = cycle_through(current, presets, forward);
-    self.set_user_u32(field, next);
+    let allow_auto = field.fit_governed();
+    let cur = if allow_auto && self.user_is_auto(field) {
+      CycleState::Auto
+    } else {
+      match self.user_value_u32(field) {
+        Some(v) => CycleState::Set(v),
+        None => CycleState::Inherited,
+      }
+    };
+    match ring_next(cur, presets, forward, allow_auto) {
+      CycleState::Inherited => self.set_user_u32(field, None),
+      CycleState::Auto => self.set_user_auto(field),
+      CycleState::Set(v) => self.set_user_u32(field, Some(v)),
+    }
   }
 
   fn cycle_f32(&mut self, field: KnobField, presets: &[f32], forward: bool) {
-    let current = self.user_value_f32(field);
-    let next = cycle_through(current, presets, forward);
-    self.set_user_f32(field, next);
+    let allow_auto = field.fit_governed();
+    let cur = if allow_auto && self.user_is_auto(field) {
+      CycleState::Auto
+    } else {
+      match self.user_value_f32(field) {
+        Some(v) => CycleState::Set(v),
+        None => CycleState::Inherited,
+      }
+    };
+    match ring_next(cur, presets, forward, allow_auto) {
+      CycleState::Inherited => self.set_user_f32(field, None),
+      CycleState::Auto => self.set_user_auto(field),
+      CycleState::Set(v) => self.set_user_f32(field, Some(v)),
+    }
   }
 
-  /// Cycle a constrained-string knob (`cache_type_*`, `split_mode`)
-  /// through its allowed `set`.
+  /// Cycle a constrained-string knob (`cache_type_*`, `split_mode`,
+  /// `tensor_split`). Fit-governed knobs carry the `Auto` stop; the rest
+  /// cycle `Inherited → set… → wrap`.
   fn cycle_str_set(&mut self, field: KnobField, set: &'static [&'static str], forward: bool) {
-    // Find the current user-set value inside the `&'static [&'static str]`
-    // catalog so cycle_through's `T = &'static str` lifetime detaches
-    // from `&self` — that lets us call `set_user_str(&mut self, ...)`
-    // immediately after without dragging a borrow. Avoids the prior
-    // `Vec<String>` + `Vec<&str>` allocation pair on every keypress.
-    let current: Option<&'static str> = self
-      .user_value_str(field)
-      .and_then(|s| set.iter().copied().find(|t| *t == s));
-    let next = cycle_through(current, set, forward);
-    self.set_user_str(field, next.map(|s| s.to_string()));
+    let allow_auto = field.fit_governed();
+    let cur = if allow_auto && self.user_is_auto(field) {
+      CycleState::Auto
+    } else {
+      // Detach the `&'static str` from `&self` so `set_user_str(&mut …)`
+      // can run right after without dragging a borrow.
+      match self
+        .user_value_str(field)
+        .and_then(|s| set.iter().copied().find(|t| *t == s))
+      {
+        Some(v) => CycleState::Set(v),
+        None => CycleState::Inherited,
+      }
+    };
+    match ring_next(cur, set, forward, allow_auto) {
+      CycleState::Inherited => self.set_user_str(field, None),
+      CycleState::Auto => self.set_user_auto(field),
+      CycleState::Set(v) => self.set_user_str(field, Some(v.to_string())),
+    }
   }
 
   fn cycle_bool(&mut self, field: KnobField, forward: bool) {
-    // Tri-state: default ↔ on ↔ off (wrap).
-    let current = self.user_value_bool(field);
-    let next = if forward {
-      match current {
-        None => Some(true),
-        Some(true) => Some(false),
-        Some(false) => None,
-      }
+    // Fit-governed bools get the quad ring `Inherited → Auto → on → off`;
+    // non-fit bools (every bool knob today — flash_attn, mlock, no_mmap,
+    // reasoning) drop the no-op Auto stop to a tri ring
+    // `Inherited → on → off`.
+    let allow_auto = field.fit_governed();
+    let cur = if allow_auto && self.user_is_auto(field) {
+      CycleState::Auto
     } else {
-      match current {
-        None => Some(false),
-        Some(false) => Some(true),
-        Some(true) => None,
+      match self.user_value_bool(field) {
+        Some(b) => CycleState::Set(b),
+        None => CycleState::Inherited,
       }
     };
-    self.set_user_bool(field, next);
+    let next = if forward {
+      match cur {
+        CycleState::Inherited if allow_auto => CycleState::Auto,
+        CycleState::Inherited => CycleState::Set(true),
+        CycleState::Auto => CycleState::Set(true),
+        CycleState::Set(true) => CycleState::Set(false),
+        CycleState::Set(false) => CycleState::Inherited,
+      }
+    } else {
+      match cur {
+        CycleState::Inherited => CycleState::Set(false),
+        CycleState::Set(false) => CycleState::Set(true),
+        CycleState::Set(true) if allow_auto => CycleState::Auto,
+        CycleState::Set(true) => CycleState::Inherited,
+        CycleState::Auto => CycleState::Inherited,
+      }
+    };
+    match next {
+      CycleState::Inherited => self.set_user_bool(field, None),
+      CycleState::Auto => self.set_user_auto(field),
+      CycleState::Set(b) => self.set_user_bool(field, Some(b)),
+    }
   }
 
   /// Cycle the Device row through the flat catalog. The cycle space is
-  /// `[default] + catalog selectors`: stepping off either end wraps
-  /// back to `None` (default → auto-select). `user_knobs.device` holds
-  /// the chosen selector verbatim (`"Vulkan1"`), or `None` for default.
+  /// `[default] + catalog selectors`: stepping off either end wraps back
+  /// to `None`. `default` already means "let llama-server pick the
+  /// device(s)", so the row carries no separate `Auto` stop (device is
+  /// not fit-governed). `user_knobs.device` holds the chosen selector
+  /// verbatim (`"Vulkan1"`), or `None` for default.
   fn cycle_device(&mut self, field: KnobField, forward: bool) {
     if self.device_catalog.is_empty() {
       // No catalog (CPU-only / no binary enumerated) — only the
@@ -348,10 +417,9 @@ impl LaunchPickerState {
       .iter()
       .map(|d| d.selector.as_str())
       .collect();
-    let current = self.user_value_str(field).filter(|s| !s.is_empty());
-    // Current position in the cycle: None = default (index "0"),
-    // Some(sel) = its catalog index + 1.
-    let cur_pos: usize = match current {
+    // Cycle positions: 0 = default (None), 1+i = selector[i]. A stale
+    // Auto coerces to default (position 0).
+    let cur_pos: usize = match self.user_value_str(field).filter(|s| !s.is_empty()) {
       None => 0,
       Some(sel) => selectors
         .iter()
@@ -359,18 +427,16 @@ impl LaunchPickerState {
         .map(|i| i + 1)
         .unwrap_or(0),
     };
-    let len = selectors.len() + 1; // +1 for the default slot
+    let len = selectors.len() + 1; // +default
     let next_pos = if forward {
       (cur_pos + 1) % len
     } else {
       (cur_pos + len - 1) % len
     };
-    let next = if next_pos == 0 {
-      None
-    } else {
-      Some(selectors[next_pos - 1].to_string())
-    };
-    self.set_user_str(field, next);
+    match next_pos {
+      0 => self.set_user_str(field, None),
+      i => self.set_user_str(field, Some(selectors[i - 1].to_string())),
+    }
   }
 
   /// Backspace on a focused row: clear the user override and re-
@@ -480,6 +546,17 @@ impl LaunchPickerState {
     }
   }
 
+  /// Whether the row's *effective* state is `Auto` — either the user
+  /// cycled it to Auto, or (untouched) it resolved to Auto via the
+  /// seeding rule / a remembered Auto. Drives the `Auto` value label.
+  pub fn effective_is_auto(&self, field: KnobField) -> bool {
+    if self.user_has(field) {
+      self.user_is_auto(field)
+    } else {
+      crate::launch::field_is_auto(&self.resolved, field)
+    }
+  }
+
   fn user_has(&self, field: KnobField) -> bool {
     match field {
       KnobField::Ctx => self.user_knobs.ctx.is_some(),
@@ -506,91 +583,95 @@ impl LaunchPickerState {
 
   fn user_value_u32(&self, field: KnobField) -> Option<u32> {
     match field {
-      KnobField::Ctx => self.user_knobs.ctx,
-      KnobField::NGpuLayers => self.user_knobs.n_gpu_layers,
-      KnobField::NCpuMoe => self.user_knobs.n_cpu_moe,
-      KnobField::Threads => self.user_knobs.threads,
-      KnobField::Parallel => self.user_knobs.parallel,
-      KnobField::BatchSize => self.user_knobs.batch_size,
-      KnobField::UbatchSize => self.user_knobs.ubatch_size,
-      KnobField::Keep => self.user_knobs.keep,
-      KnobField::MainGpu => self.user_knobs.main_gpu,
+      KnobField::Ctx => self.user_knobs.ctx.set_value().copied(),
+      KnobField::NGpuLayers => self.user_knobs.n_gpu_layers.set_value().copied(),
+      KnobField::NCpuMoe => self.user_knobs.n_cpu_moe.set_value().copied(),
+      KnobField::Threads => self.user_knobs.threads.set_value().copied(),
+      KnobField::Parallel => self.user_knobs.parallel.set_value().copied(),
+      KnobField::BatchSize => self.user_knobs.batch_size.set_value().copied(),
+      KnobField::UbatchSize => self.user_knobs.ubatch_size.set_value().copied(),
+      KnobField::Keep => self.user_knobs.keep.set_value().copied(),
+      KnobField::MainGpu => self.user_knobs.main_gpu.set_value().copied(),
       _ => None,
     }
   }
 
   fn user_value_f32(&self, field: KnobField) -> Option<f32> {
     match field {
-      KnobField::RopeFreqScale => self.user_knobs.rope_freq_scale,
+      KnobField::RopeFreqScale => self.user_knobs.rope_freq_scale.set_value().copied(),
       _ => None,
     }
   }
 
   fn user_value_str(&self, field: KnobField) -> Option<&str> {
     match field {
-      KnobField::CacheTypeK => self.user_knobs.cache_type_k.as_deref(),
-      KnobField::CacheTypeV => self.user_knobs.cache_type_v.as_deref(),
-      KnobField::Device => self.user_knobs.device.as_deref(),
-      KnobField::TensorSplit => self.user_knobs.tensor_split.as_deref(),
-      KnobField::SplitMode => self.user_knobs.split_mode.as_deref(),
+      KnobField::CacheTypeK => self.user_knobs.cache_type_k.set_value().map(String::as_str),
+      KnobField::CacheTypeV => self.user_knobs.cache_type_v.set_value().map(String::as_str),
+      KnobField::Device => self.user_knobs.device.set_value().map(String::as_str),
+      KnobField::TensorSplit => self.user_knobs.tensor_split.set_value().map(String::as_str),
+      KnobField::SplitMode => self.user_knobs.split_mode.set_value().map(String::as_str),
       _ => None,
     }
   }
 
   fn user_value_bool(&self, field: KnobField) -> Option<bool> {
     match field {
-      KnobField::Reasoning => self.user_knobs.reasoning,
-      KnobField::FlashAttn => self.user_knobs.flash_attn,
-      KnobField::Mlock => self.user_knobs.mlock,
-      KnobField::NoMmap => self.user_knobs.no_mmap,
+      KnobField::Reasoning => self.user_knobs.reasoning.set_value().copied(),
+      KnobField::FlashAttn => self.user_knobs.flash_attn.set_value().copied(),
+      KnobField::Mlock => self.user_knobs.mlock.set_value().copied(),
+      KnobField::NoMmap => self.user_knobs.no_mmap.set_value().copied(),
       _ => None,
     }
   }
 
   fn resolved_u32(&self, field: KnobField) -> Option<u32> {
     match field {
-      KnobField::Ctx => self.resolved.ctx,
-      KnobField::NGpuLayers => self.resolved.n_gpu_layers,
-      KnobField::NCpuMoe => self.resolved.n_cpu_moe,
-      KnobField::Threads => self.resolved.threads,
-      KnobField::Parallel => self.resolved.parallel,
-      KnobField::BatchSize => self.resolved.batch_size,
-      KnobField::UbatchSize => self.resolved.ubatch_size,
-      KnobField::Keep => self.resolved.keep,
-      KnobField::MainGpu => self.resolved.main_gpu,
+      KnobField::Ctx => self.resolved.ctx.set_value().copied(),
+      KnobField::NGpuLayers => self.resolved.n_gpu_layers.set_value().copied(),
+      KnobField::NCpuMoe => self.resolved.n_cpu_moe.set_value().copied(),
+      KnobField::Threads => self.resolved.threads.set_value().copied(),
+      KnobField::Parallel => self.resolved.parallel.set_value().copied(),
+      KnobField::BatchSize => self.resolved.batch_size.set_value().copied(),
+      KnobField::UbatchSize => self.resolved.ubatch_size.set_value().copied(),
+      KnobField::Keep => self.resolved.keep.set_value().copied(),
+      KnobField::MainGpu => self.resolved.main_gpu.set_value().copied(),
       _ => None,
     }
   }
 
   fn resolved_f32(&self, field: KnobField) -> Option<f32> {
     match field {
-      KnobField::RopeFreqScale => self.resolved.rope_freq_scale,
+      KnobField::RopeFreqScale => self.resolved.rope_freq_scale.set_value().copied(),
       _ => None,
     }
   }
 
   fn resolved_str(&self, field: KnobField) -> Option<&str> {
     match field {
-      KnobField::CacheTypeK => self.resolved.cache_type_k.as_deref(),
-      KnobField::CacheTypeV => self.resolved.cache_type_v.as_deref(),
-      KnobField::Device => self.resolved.device.as_deref(),
-      KnobField::TensorSplit => self.resolved.tensor_split.as_deref(),
-      KnobField::SplitMode => self.resolved.split_mode.as_deref(),
+      KnobField::CacheTypeK => self.resolved.cache_type_k.set_value().map(String::as_str),
+      KnobField::CacheTypeV => self.resolved.cache_type_v.set_value().map(String::as_str),
+      KnobField::Device => self.resolved.device.set_value().map(String::as_str),
+      KnobField::TensorSplit => self.resolved.tensor_split.set_value().map(String::as_str),
+      KnobField::SplitMode => self.resolved.split_mode.set_value().map(String::as_str),
       _ => None,
     }
   }
 
   fn resolved_bool(&self, field: KnobField) -> Option<bool> {
     match field {
-      KnobField::Reasoning => self.resolved.reasoning,
-      KnobField::FlashAttn => self.resolved.flash_attn,
-      KnobField::Mlock => self.resolved.mlock,
-      KnobField::NoMmap => self.resolved.no_mmap,
+      KnobField::Reasoning => self.resolved.reasoning.set_value().copied(),
+      KnobField::FlashAttn => self.resolved.flash_attn.set_value().copied(),
+      KnobField::Mlock => self.resolved.mlock.set_value().copied(),
+      KnobField::NoMmap => self.resolved.no_mmap.set_value().copied(),
       _ => None,
     }
   }
 
   pub fn set_user_u32(&mut self, field: KnobField, value: Option<u32>) {
+    // An explicit value sets `Set(v)`; clearing (`None`) drops the slot
+    // back to Inherited. The Auto state is set via the cycle helpers,
+    // not this typed-value setter.
+    let value = value.map(KnobValue::Set);
     match field {
       KnobField::Ctx => self.user_knobs.ctx = value,
       KnobField::NGpuLayers => self.user_knobs.n_gpu_layers = value,
@@ -607,11 +688,12 @@ impl LaunchPickerState {
 
   pub fn set_user_f32(&mut self, field: KnobField, value: Option<f32>) {
     if matches!(field, KnobField::RopeFreqScale) {
-      self.user_knobs.rope_freq_scale = value;
+      self.user_knobs.rope_freq_scale = value.map(KnobValue::Set);
     }
   }
 
   pub fn set_user_str(&mut self, field: KnobField, value: Option<String>) {
+    let value = value.map(KnobValue::Set);
     match field {
       KnobField::CacheTypeK => self.user_knobs.cache_type_k = value,
       KnobField::CacheTypeV => self.user_knobs.cache_type_v = value,
@@ -623,6 +705,7 @@ impl LaunchPickerState {
   }
 
   pub fn set_user_bool(&mut self, field: KnobField, value: Option<bool>) {
+    let value = value.map(KnobValue::Set);
     match field {
       KnobField::Reasoning => self.user_knobs.reasoning = value,
       KnobField::FlashAttn => self.user_knobs.flash_attn = value,
@@ -643,7 +726,8 @@ impl LaunchPickerState {
   /// the catalog to show `"<name> (<backend>)"` (e.g.
   /// `"NVIDIA GeForce RTX 3080 (Vulkan)"`). Falls back to the raw
   /// selector when it isn't in the catalog (stale persisted value).
-  /// Returns `"default"` when no device is selected.
+  /// Returns `"inherited"` when no device is selected (llama-server
+  /// picks) — matching the unset-value label every other knob row uses.
   pub fn device_value_display(&self) -> String {
     let sel = self
       .effective_str(KnobField::Device)
@@ -655,7 +739,7 @@ impl LaunchPickerState {
           None => s.to_string(),
         },
       )
-      .unwrap_or_else(|| "default".into())
+      .unwrap_or_else(|| INHERITED_LABEL.into())
   }
 }
 
@@ -677,6 +761,72 @@ impl LaunchPickerState {
 /// `presets` is assumed to be sorted in ascending order — every
 /// caller in [`LaunchPickerState::cycle_knob`] passes a hand-curated
 /// ascending list.
+/// A knob's position in the Auto-aware cycle ring:
+/// `Inherited → Auto → Set(preset)… → wrap`.
+enum CycleState<T> {
+  /// `None` knob — inherits from the resolver chain.
+  Inherited,
+  /// Delegated to `--fit`.
+  Auto,
+  /// Pinned to a concrete value.
+  Set(T),
+}
+
+/// Step a value knob one slot around the ring `Inherited → Auto →
+/// preset[0] → … → preset[last] → Inherited`. Custom (off-preset)
+/// values snap to the nearest preset in the travel direction via
+/// [`cycle_through`]; falling off the top end lands on `Inherited`,
+/// off the bottom on `Auto`.
+fn ring_next<T: PartialEq + PartialOrd + Copy>(
+  current: CycleState<T>,
+  presets: &[T],
+  forward: bool,
+  allow_auto: bool,
+) -> CycleState<T> {
+  // Non-fit-governed knobs have no Auto stop: a two-stop ring
+  // `Inherited → presets… → Inherited`. A stray Auto (e.g. a stale
+  // persisted value) coerces back to Inherited so cycling escapes it.
+  if !allow_auto {
+    return match current {
+      CycleState::Auto => CycleState::Inherited,
+      CycleState::Inherited => {
+        cycle_through(None, presets, forward).map_or(CycleState::Inherited, CycleState::Set)
+      }
+      CycleState::Set(v) => {
+        cycle_through(Some(v), presets, forward).map_or(CycleState::Inherited, CycleState::Set)
+      }
+    };
+  }
+  match current {
+    CycleState::Inherited => {
+      if forward {
+        CycleState::Auto
+      } else {
+        // Backward from Inherited wraps to the last preset.
+        cycle_through(None, presets, false).map_or(CycleState::Auto, CycleState::Set)
+      }
+    }
+    CycleState::Auto => {
+      if forward {
+        cycle_through(None, presets, true).map_or(CycleState::Inherited, CycleState::Set)
+      } else {
+        CycleState::Inherited
+      }
+    }
+    CycleState::Set(v) => match cycle_through(Some(v), presets, forward) {
+      Some(p) => CycleState::Set(p),
+      // Off the top → Inherited; off the bottom → Auto.
+      None => {
+        if forward {
+          CycleState::Inherited
+        } else {
+          CycleState::Auto
+        }
+      }
+    },
+  }
+}
+
 fn cycle_through<T: PartialEq + PartialOrd + Copy>(
   current: Option<T>,
   presets: &[T],
@@ -737,25 +887,41 @@ mod tests {
     let mut s = LaunchPickerState::for_model("qwen");
     s.field = PickerField::Knob(KnobField::Ctx);
     assert_eq!(s.user_knobs.ctx, None);
+    // Ring: Inherited → Auto → presets… → wrap to Inherited.
     s.cycle_focused_value_next();
-    assert_eq!(s.user_knobs.ctx, Some(CTX_PRESETS[0]));
+    assert_eq!(
+      s.user_knobs.ctx,
+      Some(KnobValue::Auto),
+      "first stop is Auto"
+    );
+    s.cycle_focused_value_next();
+    assert_eq!(s.user_knobs.ctx, Some(KnobValue::Set(CTX_PRESETS[0])));
     for preset in CTX_PRESETS.iter().skip(1) {
       s.cycle_focused_value_next();
-      assert_eq!(s.user_knobs.ctx, Some(*preset));
+      assert_eq!(s.user_knobs.ctx, Some(KnobValue::Set(*preset)));
     }
     s.cycle_focused_value_next();
-    assert_eq!(s.user_knobs.ctx, None, "wraps back to native");
+    assert_eq!(s.user_knobs.ctx, None, "wraps back to inherited");
   }
 
   #[test]
   fn reasoning_cycle_walks_tri_state_in_both_directions() {
+    // `reasoning` is not fit-governed, so it has no `Auto` stop: the
+    // ring is Inherited → on → off → Inherited.
     let mut s = LaunchPickerState::for_model("qwen");
     s.field = PickerField::Knob(KnobField::Reasoning);
     s.cycle_focused_value_next();
-    assert_eq!(s.user_knobs.reasoning, Some(true));
+    assert_eq!(s.user_knobs.reasoning, Some(KnobValue::Set(true)));
     s.cycle_focused_value_next();
-    assert_eq!(s.user_knobs.reasoning, Some(false));
+    assert_eq!(s.user_knobs.reasoning, Some(KnobValue::Set(false)));
     s.cycle_focused_value_next();
+    assert_eq!(s.user_knobs.reasoning, None);
+    // Backward from Inherited lands on off (the far end of the ring).
+    s.cycle_focused_value_prev();
+    assert_eq!(s.user_knobs.reasoning, Some(KnobValue::Set(false)));
+    s.cycle_focused_value_prev();
+    assert_eq!(s.user_knobs.reasoning, Some(KnobValue::Set(true)));
+    s.cycle_focused_value_prev();
     assert_eq!(s.user_knobs.reasoning, None);
   }
 
@@ -851,21 +1017,53 @@ mod tests {
     let mut s = LaunchPickerState::for_model("qwen");
     s.field = PickerField::Knob(KnobField::NGpuLayers);
     s.cycle_focused_value_next();
-    assert_eq!(s.user_knobs.n_gpu_layers, Some(0));
+    assert_eq!(
+      s.user_knobs.n_gpu_layers,
+      Some(KnobValue::Auto),
+      "Auto stop first"
+    );
     s.cycle_focused_value_next();
-    assert_eq!(s.user_knobs.n_gpu_layers, Some(16));
+    assert_eq!(s.user_knobs.n_gpu_layers, Some(KnobValue::Set(0)));
+    s.cycle_focused_value_next();
+    assert_eq!(s.user_knobs.n_gpu_layers, Some(KnobValue::Set(16)));
   }
 
   #[test]
   fn cycle_knob_flash_attn_walks_tristate() {
     let mut s = LaunchPickerState::for_model("qwen");
     s.field = PickerField::Knob(KnobField::FlashAttn);
+    // flash_attn is not fit-governed → no Auto stop. Ring:
+    // Inherited → on → off → Inherited.
     s.cycle_focused_value_next();
-    assert_eq!(s.user_knobs.flash_attn, Some(true));
+    assert_eq!(s.user_knobs.flash_attn, Some(KnobValue::Set(true)));
     s.cycle_focused_value_next();
-    assert_eq!(s.user_knobs.flash_attn, Some(false));
+    assert_eq!(s.user_knobs.flash_attn, Some(KnobValue::Set(false)));
     s.cycle_focused_value_next();
     assert_eq!(s.user_knobs.flash_attn, None);
+  }
+
+  #[test]
+  fn effective_is_auto_tracks_user_then_resolved_state() {
+    let mut s = LaunchPickerState::for_model("qwen");
+    assert!(
+      !s.effective_is_auto(KnobField::Ctx),
+      "fresh knob is not Auto"
+    );
+    // A user-cycled Auto reads as Auto.
+    s.set_user_auto(KnobField::Ctx);
+    assert!(s.effective_is_auto(KnobField::Ctx));
+    // An untouched knob reflects the resolved (seeded / remembered) Auto.
+    s.set_resolved(
+      TypedKnobs {
+        n_gpu_layers: Some(KnobValue::Auto),
+        ..TypedKnobs::default()
+      },
+      BTreeMap::new(),
+    );
+    assert!(
+      s.effective_is_auto(KnobField::NGpuLayers),
+      "resolved Auto shows when the user hasn't overridden the row"
+    );
   }
 
   #[test]
@@ -885,14 +1083,14 @@ mod tests {
     sources.insert(KnobField::NGpuLayers, LayerLabel::ArchDefault);
     s.set_resolved(
       TypedKnobs {
-        n_gpu_layers: Some(99),
+        n_gpu_layers: Some(KnobValue::Set(99)),
         ..TypedKnobs::default()
       },
       sources,
     );
     assert_eq!(s.source_for(KnobField::NGpuLayers), LayerLabel::ArchDefault);
     // User override flips the source to User.
-    s.user_knobs.n_gpu_layers = Some(32);
+    s.user_knobs.n_gpu_layers = Some(KnobValue::Set(32));
     assert_eq!(s.source_for(KnobField::NGpuLayers), LayerLabel::User);
   }
 
@@ -979,8 +1177,8 @@ mod tests {
   fn device_value_display_resolves_selector_to_name_and_backend() {
     let mut s = LaunchPickerState::for_model("test");
     s.device_catalog = catalog_two_vendors();
-    // No selection → default.
-    assert_eq!(s.device_value_display(), "default");
+    // No selection → inherited (llama-server picks the device).
+    assert_eq!(s.device_value_display(), "inherited");
     s.set_user_str(KnobField::Device, Some("Vulkan1".into()));
     assert_eq!(s.device_value_display(), "NVIDIA GeForce RTX 3080 (Vulkan)");
     s.set_user_str(KnobField::Device, Some("ROCm0".into()));
@@ -990,7 +1188,7 @@ mod tests {
   #[test]
   fn device_value_display_unknown_selector_falls_back_to_raw() {
     // A persisted selector no longer in the catalog still renders
-    // something useful rather than "default".
+    // something useful rather than "inherited".
     let mut s = LaunchPickerState::for_model("test");
     s.device_catalog = catalog_two_vendors();
     s.set_user_str(KnobField::Device, Some("CUDA9".into()));
@@ -1001,11 +1199,16 @@ mod tests {
   fn cycle_device_walks_default_then_each_selector_and_wraps() {
     let mut s = LaunchPickerState::for_model("test");
     s.device_catalog = catalog_two_vendors();
-    // Start at default (no override).
+    // Device is not fit-governed and `default` already means auto-select,
+    // so there is no Auto stop. Ring: default → Vulkan0 → Vulkan1 →
+    // ROCm0 → wrap.
     assert_eq!(s.user_value_str(KnobField::Device), None);
-    // Forward through every catalog selector in order.
     s.cycle_device(KnobField::Device, true);
     assert_eq!(s.user_value_str(KnobField::Device), Some("Vulkan0".into()));
+    assert!(
+      !s.user_is_auto(KnobField::Device),
+      "device has no Auto stop"
+    );
     s.cycle_device(KnobField::Device, true);
     assert_eq!(s.user_value_str(KnobField::Device), Some("Vulkan1".into()));
     s.cycle_device(KnobField::Device, true);
@@ -1013,6 +1216,7 @@ mod tests {
     // One more wraps back to default.
     s.cycle_device(KnobField::Device, true);
     assert_eq!(s.user_value_str(KnobField::Device), None);
+    assert!(!s.user_is_auto(KnobField::Device));
   }
 
   #[test]
@@ -1032,6 +1236,8 @@ mod tests {
     // made llama-server bail with `invalid device`.
     let mut s = LaunchPickerState::for_model("test");
     s.device_catalog = catalog_two_vendors();
+    // Two steps past Inherited → Auto → the first real selector.
+    s.cycle_device(KnobField::Device, true);
     s.cycle_device(KnobField::Device, true);
     let stored = s.user_value_str(KnobField::Device).unwrap().to_string();
     assert!(

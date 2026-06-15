@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use llamastash::backend::llama_cpp::LlamaCppBackend;
 use llamastash::daemon::probe::ProbeOptions;
-use llamastash::daemon::supervisor::{spawn, ManagedSpawn, ManagedState};
+use llamastash::daemon::supervisor::{spawn, FitGate, ManagedSpawn, ManagedState};
 use llamastash::gguf::identity::ModelId;
 use llamastash::launch::mode::LaunchMode;
 use llamastash::launch::params::LaunchParams;
@@ -78,6 +78,7 @@ async fn launching_to_loading_to_ready_within_a_second() {
     log_path: dir.join("launch.log"),
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
+    fit_gate: None,
   })
   .await
   .expect("spawn");
@@ -100,6 +101,138 @@ async fn launching_to_loading_to_ready_within_a_second() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
+// Strict-fit ctx-clamp gate (R19). The fake server echoes `--fit-ctx`
+// back as the resolved `/props` `n_ctx`, so launching with a floor and a
+// larger trained window reproduces a memory-driven clamp deterministically.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn strict_fit_withholds_ready_when_ctx_clamped_to_floor() {
+  let dir = unique_temp("strict-clamp");
+  let port = allocate_port();
+  let mut params = LaunchParams::new(PathBuf::from("/fixture/m.gguf"), LaunchMode::Chat);
+  // ctx delegated to --fit; the floor is emitted as --fit-ctx.
+  let floor = 16_384;
+  params.fit_ctx_floor = Some(floor);
+  let plan = LlamaCppBackend::new().process_spec(&params, port, fake_binary(), fast_probe());
+  let model = spawn(ManagedSpawn {
+    id: fake_id(40),
+    params,
+    port,
+    mode: LaunchMode::Chat,
+    log_path: dir.join("launch.log"),
+    plan,
+    origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
+    // Trained window 4x the floor → a floor-pinned resolution is
+    // degradation, which strict mode must refuse.
+    fit_gate: Some(FitGate {
+      floor,
+      native: floor * 4,
+      strict: true,
+    }),
+  })
+  .await
+  .expect("spawn");
+
+  let s = wait_for_state(
+    &model,
+    |s| matches!(s, ManagedState::Error { .. }),
+    Duration::from_secs(5),
+  )
+  .await;
+  match s {
+    ManagedState::Error { cause } => assert!(cause.contains("strict-fit"), "cause: {cause}"),
+    other => panic!("expected Error, got {other:?}"),
+  }
+  // Ready was never declared.
+  assert!(
+    model.ready_at().await.is_none(),
+    "strict refusal must not stamp ready_at"
+  );
+  std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_strict_flags_clamp_but_stays_ready() {
+  let dir = unique_temp("soft-clamp");
+  let port = allocate_port();
+  let mut params = LaunchParams::new(PathBuf::from("/fixture/m.gguf"), LaunchMode::Chat);
+  let floor = 16_384;
+  params.fit_ctx_floor = Some(floor);
+  let plan = LlamaCppBackend::new().process_spec(&params, port, fake_binary(), fast_probe());
+  let model = spawn(ManagedSpawn {
+    id: fake_id(41),
+    params,
+    port,
+    mode: LaunchMode::Chat,
+    log_path: dir.join("launch.log"),
+    plan,
+    origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
+    fit_gate: Some(FitGate {
+      floor,
+      native: floor * 4,
+      strict: false,
+    }),
+  })
+  .await
+  .expect("spawn");
+
+  wait_for_state(
+    &model,
+    |s| matches!(s, ManagedState::Ready),
+    Duration::from_secs(5),
+  )
+  .await;
+  let actuals = model.actuals().await;
+  assert_eq!(
+    actuals.resolved_ctx,
+    Some(floor),
+    "fake /props echoes the floor"
+  );
+  assert!(actuals.ctx_clamped, "soft clamp flag must be set");
+  let _ = model.stop(Duration::from_secs(5)).await;
+  std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ctx_at_model_max_is_not_flagged_as_clamped() {
+  let dir = unique_temp("max-ctx");
+  let port = allocate_port();
+  let mut params = LaunchParams::new(PathBuf::from("/fixture/m.gguf"), LaunchMode::Chat);
+  let floor = 16_384;
+  params.fit_ctx_floor = Some(floor);
+  let plan = LlamaCppBackend::new().process_spec(&params, port, fake_binary(), fast_probe());
+  // Trained window == floor: settling at the floor is the model's own
+  // ceiling, not memory pressure, so even strict mode must stay Ready.
+  let model = spawn(ManagedSpawn {
+    id: fake_id(42),
+    params,
+    port,
+    mode: LaunchMode::Chat,
+    log_path: dir.join("launch.log"),
+    plan,
+    origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
+    fit_gate: Some(FitGate {
+      floor,
+      native: floor,
+      strict: true,
+    }),
+  })
+  .await
+  .expect("spawn");
+
+  wait_for_state(
+    &model,
+    |s| matches!(s, ManagedState::Ready),
+    Duration::from_secs(5),
+  )
+  .await;
+  assert!(
+    !model.actuals().await.ctx_clamped,
+    "a floor that equals the trained window is not a clamp"
+  );
+  let _ = model.stop(Duration::from_secs(5)).await;
+  std::fs::remove_dir_all(&dir).ok();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embedding_mode_records_correctly() {
   let dir = unique_temp("embed");
@@ -115,6 +248,7 @@ async fn embedding_mode_records_correctly() {
     log_path: dir.join("launch.log"),
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
+    fit_gate: None,
   })
   .await
   .expect("spawn");
@@ -144,6 +278,7 @@ async fn log_file_and_ring_buffer_capture_child_output() {
     log_path: log_path.clone(),
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
+    fit_gate: None,
   })
   .await
   .expect("spawn");
@@ -207,6 +342,7 @@ async fn probe_timeout_triggers_error_state_and_releases_child() {
     log_path: dir.join("launch.log"),
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
+    fit_gate: None,
   })
   .await
   .expect("spawn");
@@ -245,6 +381,7 @@ async fn sigterm_trapping_child_gets_sigkilled_after_grace() {
     log_path: dir.join("launch.log"),
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
+    fit_gate: None,
   })
   .await
   .expect("spawn");

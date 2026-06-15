@@ -25,6 +25,7 @@ pub(crate) mod route;
 pub(crate) mod router;
 pub mod server;
 pub mod state;
+pub(crate) mod ui;
 
 pub use auth::{ProxyApiKey, ProxyAuth};
 pub use server::{serve, ProxyStatus, StatusCell};

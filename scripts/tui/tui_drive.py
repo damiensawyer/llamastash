@@ -8,12 +8,12 @@ feeds it a scripted key sequence, and prints the pyte-emulated screen after
 each step so the output is plain text (no ANSI parsing needed).
 
 Usage:
-    python3 scripts/tui_drive.py '<script-json>' [--bin PATH] [--size COLSxROWS]
+    python3 scripts/tui/tui_drive.py '<script-json>' [--bin PATH] [--size COLSxROWS]
 
 The script is a JSON array of [keys, wait_seconds, label] steps:
-    python3 scripts/tui_drive.py '[["", 4, "boot"],
-                                  ["/gemma|<enter>", 2, "staged"],
-                                  ["<enter>", 3, "launched"]]'
+    python3 scripts/tui/tui_drive.py '[["", 4, "boot"],
+                                      ["/gemma|<enter>", 2, "staged"],
+                                      ["<enter>", 3, "launched"]]'
 
 Keys are sent as literal characters; `|` separates tokens inside one step and
 these named tokens map to escape sequences: <down> <up> <left> <right>
@@ -53,7 +53,8 @@ KEYMAP = {
 
 
 def default_bin() -> str:
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # scripts/tui/tui_drive.py -> repo root is three levels up.
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     return os.path.join(repo, "target", "debug", "llamastash")
 
 

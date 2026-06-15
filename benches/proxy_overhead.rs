@@ -169,6 +169,7 @@ fn build_harness() -> Harness {
       log_path: workdir.join("fake.log"),
       plan,
       origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
+      fit_gate: None,
     })
     .await
     .expect("spawn fake_llama_server");

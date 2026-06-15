@@ -107,6 +107,33 @@ async fn build_view(args: &ShowArgs, cli: &Cli, config: &Config) -> Result<ShowV
     .unwrap_or("");
   let backend = GpuFlavor::from_label(backend_label);
 
+  // Live running info for this exact model path (R6/R19): when a
+  // supervisor is up, surface what `--fit` actually resolved (and any
+  // ctx clamp) so `show` reflects the running reality, not just the
+  // catalog metadata + arch defaults. `null` when nothing is running.
+  let running = status_body
+    .get("models")
+    .and_then(Value::as_array)
+    .and_then(|rows| {
+      rows
+        .iter()
+        .find(|m| crate::cli::output::row_path(m) == Some(row.path.as_str()))
+    })
+    .map(|m| {
+      let state = m.get("state").and_then(|s| {
+        s.get("state")
+          .and_then(Value::as_str)
+          .or_else(|| s.as_str())
+      });
+      json!({
+        "launch_id": m.get("launch_id"),
+        "state": state,
+        "port": m.get("port"),
+        "resolved_ctx": m.get("resolved_ctx"),
+        "ctx_clamped": m.get("ctx_clamped").and_then(Value::as_bool).unwrap_or(false),
+      })
+    });
+
   // Built-in arch defaults for this (arch, backend) pair — the same
   // values that ship under `LayerLabel::ArchDefault` in the launch
   // resolver. Yaml arch_defaults sit on the same layer and win
@@ -170,6 +197,7 @@ async fn build_view(args: &ShowArgs, cli: &Cli, config: &Config) -> Result<ShowV
       "builtin": builtin_arch_defaults,
     },
     "last_params": last_params,
+    "running": running,
   });
 
   Ok(ShowView {
@@ -277,6 +305,27 @@ fn render_human(row: &CatalogRow, shards: &[ShardSize], total_bytes: u64, env: &
     kv(&mut out, &label, &format!("{size}  {path}"));
   }
 
+  // Live running block (R6/R19) — only when a supervisor is up for this
+  // model. Shows the context window `--fit` actually resolved and flags
+  // a memory-driven clamp, so `show` reflects the running reality.
+  if let Some(running) = env.get("running").filter(|r| !r.is_null()) {
+    let _ = writeln!(out, "\n{}", bold("running"));
+    kv(&mut out, "state", &fmt_field(running.get("state")));
+    kv(&mut out, "port", &fmt_field(running.get("port")));
+    let clamped = running
+      .get("ctx_clamped")
+      .and_then(Value::as_bool)
+      .unwrap_or(false);
+    let resolved = match running.get("resolved_ctx") {
+      Some(Value::Number(n)) if clamped => {
+        format!("{n} {}", colors::dim("(clamped to fit-ctx floor)"))
+      }
+      Some(Value::Number(n)) => n.to_string(),
+      _ => "—".into(),
+    };
+    kv(&mut out, "resolved_ctx", &resolved);
+  }
+
   let backend = env
     .get("arch_defaults")
     .and_then(|a| a.get("gpu_backend"))
@@ -357,7 +406,9 @@ fn format_bytes(n: u64) -> String {
   const GIB: f64 = MIB * 1024.0;
   let nf = n as f64;
   if nf >= GIB {
-    format!("{:.2} GiB", nf / GIB)
+    // One decimal, matching the canonical `detection::fmt_gib` so every
+    // memory surface prints GiB to the same precision.
+    format!("{:.1} GiB", nf / GIB)
   } else if nf >= MIB {
     format!("{:.1} MiB", nf / MIB)
   } else if nf >= KIB {
@@ -488,12 +539,62 @@ mod tests {
   }
 
   #[test]
+  fn render_human_shows_running_block_with_clamp() {
+    let row = fake_row("/m/x.gguf");
+    let shards = shard_breakdown(&row);
+    let envelope = json!({
+      "size": { "on_disk_total_bytes": 0 },
+      "arch_defaults": { "gpu_backend": "CpuOnly", "yaml": null, "builtin": {} },
+      "last_params": null,
+      "running": {
+        "launch_id": "L1",
+        "state": "ready",
+        "port": 41100,
+        "resolved_ctx": 16384,
+        "ctx_clamped": true,
+      },
+    });
+    let rendered =
+      console::strip_ansi_codes(&render_human(&row, &shards, 0, &envelope)).into_owned();
+    assert!(
+      rendered.contains("running"),
+      "running header missing:\n{rendered}"
+    );
+    assert!(
+      rendered.contains("41100"),
+      "running port missing:\n{rendered}"
+    );
+    assert!(
+      rendered.contains("16384") && rendered.contains("clamped to fit-ctx floor"),
+      "resolved ctx + clamp note missing:\n{rendered}"
+    );
+  }
+
+  #[test]
+  fn render_human_omits_running_block_when_not_live() {
+    let row = fake_row("/m/x.gguf");
+    let shards = shard_breakdown(&row);
+    let envelope = json!({
+      "size": { "on_disk_total_bytes": 0 },
+      "arch_defaults": { "gpu_backend": "CpuOnly", "yaml": null, "builtin": {} },
+      "last_params": null,
+      "running": null,
+    });
+    let rendered =
+      console::strip_ansi_codes(&render_human(&row, &shards, 0, &envelope)).into_owned();
+    assert!(
+      !rendered.contains("\nrunning"),
+      "running block must be absent when nothing is live:\n{rendered}"
+    );
+  }
+
+  #[test]
   fn format_bytes_rolls_through_units() {
     assert_eq!(format_bytes(0), "0 B");
     assert_eq!(format_bytes(1023), "1023 B");
     assert_eq!(format_bytes(1024), "1 KiB");
     assert!(format_bytes(2 * 1024 * 1024).starts_with("2.0 MiB"));
-    assert!(format_bytes(3 * 1024 * 1024 * 1024).starts_with("3.00 GiB"));
+    assert!(format_bytes(3 * 1024 * 1024 * 1024).starts_with("3.0 GiB"));
   }
 
   #[test]

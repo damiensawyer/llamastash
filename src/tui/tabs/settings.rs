@@ -12,11 +12,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
+use crate::config::{KnobValue, KnobValueOpt};
 use crate::launch::flag_aliases::{knob_display_groups, KnobField};
 use crate::theme::Palette;
 use crate::tui::app::App;
 use crate::tui::keybindings::{Action, Focus};
-use crate::tui::launch_picker::{LaunchPickerState, PickerField};
+use crate::tui::launch_picker::{LaunchPickerState, PickerField, INHERITED_LABEL};
 
 /// Render the Settings tab body into `area`.
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
@@ -29,16 +30,15 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
       // port / state / rss / cpu already render in the header info
       // row above the divider — dropping them here removes the
       // duplication that bloated the running-launch view.
-      let last = app.last_params.get(&m.path);
-      let empty_knobs = crate::config::TypedKnobs::default();
-      let persisted_knobs = last.map(|p| &p.knobs).unwrap_or(&empty_knobs);
-      // `last.ctx` is the *resolved* ctx (top-level `LaunchParams.ctx`)
-      // — covers user-supplied values, last-params recall, *and* the
-      // daemon-side VRAM-aware auto-fit, none of which land in the
-      // user-knobs slot. Falling back to `persisted_knobs.ctx` would
-      // miss all three and render `default` for a running launch that
-      // is actually pinned to a real number.
-      let resolved_ctx = last.and_then(|p| p.ctx).or(persisted_knobs.ctx);
+      // A running launch shows what the server is *actually running*
+      // with: the live dispatched knobs (`m.knobs`) — `auto` for a
+      // fit-delegated row, a pinned number when set — not the user's
+      // saved `last_params` delta (which is empty even for an auto
+      // launch). `ctx` is overlaid with the real window `--fit` resolved
+      // (read from `/props`); it's the one placement value llama-server
+      // reports back, so every other row honestly stays `auto`.
+      let dispatched = &m.knobs;
+      let resolved_ctx = m.resolved_ctx.or(dispatched.ctx.set_value().copied());
       for group in knob_display_groups() {
         // Match the editable form: the whole Multi-GPU placement group
         // is hidden on single-GPU / CPU-only hosts.
@@ -49,14 +49,24 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
         for field in group.fields {
           let value = match field {
             KnobField::Ctx => resolved_ctx
-              .map(|v| v.to_string())
-              .unwrap_or_else(|| "default".into()),
-            _ => format_persisted_knob_value(persisted_knobs, *field),
+              .map(|v| {
+                // Flag a memory-driven clamp (R19) so the user knows the
+                // window was squeezed to the floor, not chosen freely.
+                if m.ctx_clamped {
+                  format!("{v} · clamped to floor")
+                } else {
+                  v.to_string()
+                }
+              })
+              .unwrap_or_else(|| format_persisted_knob_value(dispatched, KnobField::Ctx)),
+            _ => format_persisted_knob_value(dispatched, *field),
           };
           lines.push(kv(knob_label(*field), value, palette));
         }
       }
-      let extras: String = last
+      let extras: String = app
+        .last_params
+        .get(&m.path)
         .map(|p| p.extras.join(" "))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "(none)".into());
@@ -141,7 +151,12 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     );
   }
 
-  let show_source = area.width >= 50;
+  // Show the right-aligned source chip once the pane has room for a
+  // `label + value + (chip)` row. In wide mode the right pane is only
+  // 35% of the terminal, so a 50-col gate kept the chip hidden until
+  // ~150-col terminals; 40 surfaces it at realistic widths (a row fits
+  // `2 marker + 16 label + value + "  (server default)"` by ~38 cols).
+  let show_source = area.width >= 40;
   let row_for = |field: PickerField| picker_view.field == field;
   // Track the line index of the focused row so we can adjust the
   // scroll offset below — on tall viewports nothing scrolls; on
@@ -151,12 +166,12 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   // Every typed knob — including ctx and reasoning — flows through
   // the same `value (chip)` shape, grouped by function with a header
   // per cluster (display order is distinct from argv order). Empty
-  // rows render `default` as the value; the chip names the layer that
+  // rows render `inherited` as the value; the chip names the layer that
   // would supply it.
   for group in knob_display_groups() {
     // Skip the whole group — header included — when every row in it is
     // hidden (the Multi-GPU placement group on single-GPU / CPU-only
-    // hosts, where each control can only ever hold `default`).
+    // hosts, where each control can only ever hold `inherited`).
     if !group
       .fields
       .iter()
@@ -337,92 +352,68 @@ fn knob_label(field: KnobField) -> &'static str {
 }
 
 /// Read-only formatter for the running-launch view. Same vocabulary
-/// as `format_knob_value` (value or `default` / `on` / `off`) but
+/// as `format_knob_value` (value or `inherited` / `on` / `off`) but
 /// reads straight from a persisted `TypedKnobs` instead of a picker
-/// state. Untouched fields render `default` — the user can open the
+/// state. Untouched fields render `inherited` — the user can open the
 /// editor (`e`) to see the resolved chip.
-fn format_persisted_knob_value(knobs: &crate::config::TypedKnobs, field: KnobField) -> String {
-  match field {
-    KnobField::Ctx => knobs
-      .ctx
-      .map(|v| v.to_string())
-      .unwrap_or_else(|| "default".into()),
-    KnobField::NGpuLayers => knobs
-      .n_gpu_layers
-      .map(|v| v.to_string())
-      .unwrap_or_else(|| "default".into()),
-    KnobField::NCpuMoe => knobs
-      .n_cpu_moe
-      .map(|v| v.to_string())
-      .unwrap_or_else(|| "default".into()),
-    KnobField::Threads => knobs
-      .threads
-      .map(|v| v.to_string())
-      .unwrap_or_else(|| "default".into()),
-    KnobField::Parallel => knobs
-      .parallel
-      .map(|v| v.to_string())
-      .unwrap_or_else(|| "default".into()),
-    KnobField::BatchSize => knobs
-      .batch_size
-      .map(|v| v.to_string())
-      .unwrap_or_else(|| "default".into()),
-    KnobField::UbatchSize => knobs
-      .ubatch_size
-      .map(|v| v.to_string())
-      .unwrap_or_else(|| "default".into()),
-    KnobField::Keep => knobs
-      .keep
-      .map(|v| v.to_string())
-      .unwrap_or_else(|| "default".into()),
-    KnobField::RopeFreqScale => knobs
-      .rope_freq_scale
-      .map(|v| format!("{v}"))
-      .unwrap_or_else(|| "default".into()),
-    KnobField::CacheTypeK => knobs
-      .cache_type_k
-      .clone()
-      .unwrap_or_else(|| "default".into()),
-    KnobField::CacheTypeV => knobs
-      .cache_type_v
-      .clone()
-      .unwrap_or_else(|| "default".into()),
-    KnobField::Reasoning => bool_label(knobs.reasoning),
-    KnobField::FlashAttn => bool_label(knobs.flash_attn),
-    KnobField::Mlock => bool_label(knobs.mlock),
-    KnobField::NoMmap => bool_label(knobs.no_mmap),
-    KnobField::Device => knobs
-      .device
-      .as_deref()
-      .filter(|v| !v.is_empty())
-      .map(str::to_string)
-      .unwrap_or_else(|| "default".into()),
-    KnobField::MainGpu => knobs
-      .main_gpu
-      .map(|v| v.to_string())
-      .unwrap_or_else(|| "default".into()),
-    KnobField::TensorSplit => knobs
-      .tensor_split
-      .clone()
-      .filter(|v| !v.is_empty())
-      .unwrap_or_else(|| "default".into()),
-    KnobField::SplitMode => knobs
-      .split_mode
-      .clone()
-      .filter(|v| !v.is_empty())
-      .unwrap_or_else(|| "default".into()),
+/// Render a persisted knob slot: a pinned value verbatim, the literal
+/// `auto` for the Auto state, and `inherited` for an unset (Inherited)
+/// slot. Empty strings (cleared `device` / `tensor_split` / `split_mode`)
+/// read as `inherited` too.
+fn knob_value_label<T: std::fmt::Display>(slot: &Option<KnobValue<T>>) -> String {
+  match slot {
+    Some(KnobValue::Set(v)) => {
+      let s = v.to_string();
+      if s.is_empty() {
+        INHERITED_LABEL.into()
+      } else {
+        s
+      }
+    }
+    Some(KnobValue::Auto) => "auto".into(),
+    None => INHERITED_LABEL.into(),
   }
 }
 
-fn bool_label(v: Option<bool>) -> String {
-  match v {
+fn format_persisted_knob_value(knobs: &crate::config::TypedKnobs, field: KnobField) -> String {
+  match field {
+    KnobField::Ctx => knob_value_label(&knobs.ctx),
+    KnobField::NGpuLayers => knob_value_label(&knobs.n_gpu_layers),
+    KnobField::NCpuMoe => knob_value_label(&knobs.n_cpu_moe),
+    KnobField::Threads => knob_value_label(&knobs.threads),
+    KnobField::Parallel => knob_value_label(&knobs.parallel),
+    KnobField::BatchSize => knob_value_label(&knobs.batch_size),
+    KnobField::UbatchSize => knob_value_label(&knobs.ubatch_size),
+    KnobField::Keep => knob_value_label(&knobs.keep),
+    KnobField::RopeFreqScale => knob_value_label(&knobs.rope_freq_scale),
+    KnobField::CacheTypeK => knob_value_label(&knobs.cache_type_k),
+    KnobField::CacheTypeV => knob_value_label(&knobs.cache_type_v),
+    KnobField::Reasoning => bool_label(&knobs.reasoning),
+    KnobField::FlashAttn => bool_label(&knobs.flash_attn),
+    KnobField::Mlock => bool_label(&knobs.mlock),
+    KnobField::NoMmap => bool_label(&knobs.no_mmap),
+    KnobField::Device => knob_value_label(&knobs.device),
+    KnobField::MainGpu => knob_value_label(&knobs.main_gpu),
+    KnobField::TensorSplit => knob_value_label(&knobs.tensor_split),
+    KnobField::SplitMode => knob_value_label(&knobs.split_mode),
+  }
+}
+
+fn bool_label(v: &Option<KnobValue<bool>>) -> String {
+  match v.set_value().copied() {
     Some(true) => "on".into(),
     Some(false) => "off".into(),
-    None => "default".into(),
+    None if v.is_auto() => "auto".into(),
+    None => INHERITED_LABEL.into(),
   }
 }
 
 fn format_knob_value(state: &LaunchPickerState, field: KnobField) -> String {
+  // The Auto stop renders as `auto` regardless of value kind — fit
+  // governs the knob, so there is no concrete value to show.
+  if state.effective_is_auto(field) {
+    return "auto".into();
+  }
   match field {
     KnobField::Ctx
     | KnobField::NGpuLayers
@@ -435,23 +426,23 @@ fn format_knob_value(state: &LaunchPickerState, field: KnobField) -> String {
     | KnobField::MainGpu => state
       .effective_u32(field)
       .map(|v| v.to_string())
-      .unwrap_or_else(|| "default".into()),
+      .unwrap_or_else(|| INHERITED_LABEL.into()),
     KnobField::RopeFreqScale => state
       .effective_f32(field)
       .map(|v| format!("{v}"))
-      .unwrap_or_else(|| "default".into()),
+      .unwrap_or_else(|| INHERITED_LABEL.into()),
     KnobField::CacheTypeK
     | KnobField::CacheTypeV
     | KnobField::TensorSplit
     | KnobField::SplitMode => state
       .effective_str(field)
-      .unwrap_or_else(|| "default".into()),
+      .unwrap_or_else(|| INHERITED_LABEL.into()),
     KnobField::Device => state.device_value_display(),
     KnobField::Reasoning | KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => {
       match state.effective_bool(field) {
         Some(true) => "on".into(),
         Some(false) => "off".into(),
-        None => "default".into(),
+        None => INHERITED_LABEL.into(),
       }
     }
   }
@@ -478,15 +469,15 @@ fn group_header(title: &str, palette: &Palette) -> Line<'static> {
 
 const LABEL_W: usize = 16;
 
-/// Default-value sentinels rendered when no override exists. Tracked
-/// in one place so `kv` / `kv_focused` agree on which strings deserve
-/// the muted tone.
+/// Inherited / empty value sentinels rendered when no override exists.
+/// Tracked in one place so `kv` / `kv_focused` agree on which strings
+/// deserve the muted tone.
 fn is_default_value(value: &str) -> bool {
-  matches!(value, "default" | "(none)")
+  value == INHERITED_LABEL || value == "(none)"
 }
 
 /// Style to paint a settings value with — muted when the row falls
-/// through to its layered default (`default`, `(none)`), normal text
+/// through to its layered default (`inherited`, `(none)`), normal text
 /// when the value is overridden by the user or carries a real reading.
 fn value_style(value: &str, palette: &Palette) -> Style {
   if is_default_value(value) {
@@ -633,8 +624,8 @@ mod tests {
         // `user_knobs` straight from `knobs` so a returning user
         // sees their last-shipped values with `(user)` chips.
         knobs: crate::config::TypedKnobs {
-          ctx: Some(16384),
-          reasoning: Some(true),
+          ctx: Some(KnobValue::Set(16384)),
+          reasoning: Some(KnobValue::Set(true)),
           ..Default::default()
         },
         extras: vec!["--rope-freq-base".into(), "10000".into()],
@@ -658,6 +649,131 @@ mod tests {
     }
     assert!(joined.contains("16384"), "{joined}");
     assert!(joined.contains("on"), "{joined}");
+  }
+
+  #[test]
+  fn source_chip_shows_at_40_cols_hidden_at_39() {
+    use crate::tui::app::LastParamsRow;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+
+    // A user-set ctx earns a `(user)` source chip on its row, which is
+    // the marker we assert on. The right pane in wide mode is only ~35%
+    // of the terminal, so the chip gate must trip well below 50 cols.
+    let render_at = |w: u16| -> String {
+      let mut app = App::new(AppOptions::default());
+      let path = PathBuf::from("/m/qwen.gguf");
+      app.models = vec![fake_model("/m/qwen.gguf", "/m")];
+      app.last_params.insert(
+        path,
+        LastParamsRow {
+          ctx: Some(16384),
+          reasoning: false,
+          knobs: crate::config::TypedKnobs {
+            ctx: Some(KnobValue::Set(16384)),
+            ..Default::default()
+          },
+          extras: vec![],
+          port: Some(41100),
+        },
+      );
+      app.list_cursor = 2;
+      let palette = app.palette();
+      let mut term = Terminal::new(TestBackend::new(w, 32)).unwrap();
+      term
+        .draw(|f| render(f, Rect::new(0, 0, w, 32), &app, palette))
+        .unwrap();
+      let buf = term.backend().buffer().clone();
+      let mut joined = String::new();
+      for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+          joined.push_str(buf.cell((x, y)).unwrap().symbol());
+        }
+        joined.push('\n');
+      }
+      joined
+    };
+
+    let wide = render_at(40);
+    assert!(
+      wide.contains("(user)"),
+      "source chip must show at 40 cols: {wide}"
+    );
+    let narrow = render_at(39);
+    assert!(
+      !narrow.contains("(user)"),
+      "source chip must be hidden below 40 cols: {narrow}"
+    );
+  }
+
+  #[test]
+  fn running_view_shows_resolved_ctx_and_dispatched_auto_knobs() {
+    use crate::config::{KnobValue, TypedKnobs};
+    use crate::tui::app::ManagedRow;
+    use crate::tui::status_icons::SurfaceState;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+    let mut app = App::new(AppOptions::default());
+    let path = PathBuf::from("/m/gemma.gguf");
+    app.models = vec![fake_model("/m/gemma.gguf", "/m")];
+    // The managed row carries the *dispatched* knobs (what the server is
+    // running with) — all `auto` for an all-auto launch — plus the ctx
+    // `--fit` actually resolved, read from `/props`. `last_params` is
+    // deliberately left empty to prove the running view reads the live
+    // dispatch, not the saved delta.
+    app.managed = vec![ManagedRow {
+      launch_id: "L1".into(),
+      path: path.clone(),
+      port: 41101,
+      state: SurfaceState::Ready,
+      resolved_ctx: Some(262144),
+      knobs: TypedKnobs {
+        ctx: Some(KnobValue::Auto),
+        parallel: Some(KnobValue::Auto),
+        threads: Some(KnobValue::Auto),
+        ..Default::default()
+      },
+      ..Default::default()
+    }];
+    // Row 0 header, row 1 `▶ Running`, row 2 the running launch.
+    app.list_cursor = 2;
+    assert!(app.launch_picker.is_none());
+    assert!(
+      app.focused_managed().is_some(),
+      "cursor must land on the launch"
+    );
+    let palette = app.palette();
+    let mut term = Terminal::new(TestBackend::new(70, 40)).unwrap();
+    term
+      .draw(|f| render(f, Rect::new(0, 0, 70, 40), &app, palette))
+      .unwrap();
+    let buf = term.backend().buffer().clone();
+    let mut joined = String::new();
+    for y in 0..buf.area.height {
+      for x in 0..buf.area.width {
+        joined.push_str(buf.cell((x, y)).unwrap().symbol());
+      }
+      joined.push('\n');
+    }
+    // ctx shows the resolved number, NOT `default` and NOT `auto`.
+    assert!(joined.contains("262144"), "resolved ctx missing: {joined}");
+    // A fit-delegated knob reads `auto` (from the dispatched knobs),
+    // never `default` — even though `last_params` is empty.
+    let threads_line = joined.lines().find(|l| l.contains("threads")).unwrap_or("");
+    assert!(
+      threads_line.contains("auto"),
+      "dispatched auto knob should read auto, not default: {threads_line:?}"
+    );
+    let parallel_line = joined
+      .lines()
+      .find(|l| l.contains("parallel"))
+      .unwrap_or("");
+    assert!(
+      parallel_line.contains("auto"),
+      "parallel is fit-delegated and not read back, so it reads auto: {parallel_line:?}"
+    );
   }
 
   #[test]

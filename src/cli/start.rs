@@ -18,14 +18,14 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::cli::cli_args::{Cli, LaunchMode as CliLaunchMode, ReasoningFlag, StartArgs};
+use crate::cli::cli_args::{Cli, CtxArg, LaunchMode as CliLaunchMode, ReasoningFlag, StartArgs};
 use crate::cli::client::connect_or_spawn;
 use crate::cli::exit_codes::{
   CliExit, CliResult, BINARY_NOT_FOUND, LAUNCH_FAILED, MODEL_NOT_FOUND, USAGE,
 };
 use crate::cli::resolve::{fetch_catalog, resolve_model_with_candidates, CatalogRow, ResolveError};
 use crate::cli::tail_args::parse_tail_args;
-use crate::config::{Config, TypedKnobs};
+use crate::config::{Config, KnobValue, TypedKnobs};
 use crate::ipc::Client;
 
 pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
@@ -48,8 +48,13 @@ pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
     PartialParams::default()
   };
 
-  if let Some(ctx) = args.ctx {
-    params.ctx = Some(ctx);
+  match args.ctx {
+    // A pinned count rides the top-level `ctx` (emitted inline as `-c`).
+    Some(CtxArg::Value(n)) => params.ctx = Some(n),
+    // `auto` sets the knob's Auto state so `--fit` governs the window;
+    // it must not also set top-level ctx (that would pin `-c`).
+    Some(CtxArg::Auto) => params.knobs.ctx = Some(KnobValue::Auto),
+    None => {}
   }
   if let Some(port) = args.port {
     params.port = Some(port);
@@ -91,8 +96,146 @@ pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
     .call("start_model", Some(payload))
     .await
     .map_err(|e| map_start_error(e, &row))?;
+  if args.wait {
+    return wait_and_emit(
+      &mut client,
+      args.preset.as_deref(),
+      &row,
+      &resp,
+      args.json,
+      cli.quiet,
+    )
+    .await;
+  }
   emit_response(args.preset.as_deref(), &row, &resp, args.json, cli.quiet);
   Ok(())
+}
+
+/// `--wait`: poll `status` until the just-started launch reaches a
+/// terminal-ish state (Ready / Error / Stopped) or the budget runs out,
+/// then report the resolved context window. The daemon's own probe budget
+/// (size-scaled) guarantees a stuck load eventually flips to Error, so the
+/// 15-minute ceiling here is only a safety net for pathological cases.
+async fn wait_and_emit(
+  client: &mut Client,
+  preset: Option<&str>,
+  row: &CatalogRow,
+  resp: &Value,
+  json: bool,
+  quiet: bool,
+) -> CliResult {
+  use crate::cli::resolve::{fetch_status, running_index};
+
+  let launch_id = resp
+    .get("launch_id")
+    .and_then(Value::as_str)
+    .map(str::to_string);
+  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
+  // Final running row once terminal, or None if we time out / can't find it.
+  let mut settled: Option<crate::cli::resolve::RunningRow> = None;
+  // `resolved_ctx` is stamped by a separate recorder a beat *after* the
+  // Ready transition, so a row can read `ready` with no ctx yet. Once we
+  // first see Ready, give the recorder this grace window to land the
+  // actuals before settling — otherwise `--wait` prints `ctx=—`.
+  let mut ready_since: Option<std::time::Instant> = None;
+  let actuals_grace = std::time::Duration::from_secs(5);
+  while std::time::Instant::now() < deadline {
+    let snap = fetch_status(client).await?;
+    let index = running_index(&snap.models);
+    // Prefer the launch_id match; fall back to the model path (a daemon
+    // build without launch_id on the row still resolves by path).
+    let found = snap
+      .models
+      .iter()
+      .find(|m| Some(m.launch_id.as_str()) == launch_id.as_deref())
+      .cloned()
+      .or_else(|| index.get(&row.path).cloned());
+    if let Some(r) = found {
+      match r.state.as_str() {
+        // Error / Stopped are terminal immediately — no actuals to wait on.
+        "error" | "stopped" => {
+          settled = Some(r);
+          break;
+        }
+        // Ready settles once the resolved ctx is stamped, or after the
+        // grace window elapses (a build whose `/props` omits it, etc.).
+        "ready" => {
+          let since = *ready_since.get_or_insert_with(std::time::Instant::now);
+          if r.resolved_ctx.is_some() || since.elapsed() >= actuals_grace {
+            settled = Some(r);
+            break;
+          }
+        }
+        // launching / loading → keep polling.
+        _ => {}
+      }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+  }
+
+  let failed = matches!(settled.as_ref().map(|r| r.state.as_str()), Some("error"));
+  if json {
+    let mut body = json!({
+      "name": row.name(),
+      "launch_id": resp.get("launch_id"),
+      "port": resp.get("port"),
+      "pid": resp.get("pid"),
+      "preset": preset,
+      "path": row.path,
+      "state": settled.as_ref().map(|r| r.state.clone()),
+      "resolved_ctx": settled.as_ref().and_then(|r| r.resolved_ctx),
+      "ctx_clamped": settled.as_ref().map(|r| r.ctx_clamped).unwrap_or(false),
+    });
+    if let Some(cause) = settled.as_ref().and_then(|r| r.state_cause.clone()) {
+      body["cause"] = Value::String(cause);
+    }
+    println!("{}", crate::cli::output::pretty_json(&body));
+  } else if !quiet {
+    // Headline first (reuses the standard "started ..." prose), then the
+    // readiness follow-up.
+    emit_response(preset, row, resp, false, false);
+    print_wait_followup(settled.as_ref());
+  }
+  if failed {
+    // The launch was accepted but the model never came up; reflect that
+    // in the exit code so scripts can branch on it.
+    return Err(CliExit::code_only(LAUNCH_FAILED));
+  }
+  Ok(())
+}
+
+/// One-line readiness summary appended under the `start` headline when
+/// `--wait` settles. Covers Ready (with resolved ctx + clamp note),
+/// Error (with cause), and the timeout fallthrough.
+fn print_wait_followup(settled: Option<&crate::cli::resolve::RunningRow>) {
+  use crate::cli::colors;
+  let arrow = colors::dim("→");
+  match settled {
+    Some(r) if r.state == "ready" => {
+      let ctx = match r.resolved_ctx {
+        Some(c) if r.ctx_clamped => {
+          format!("{c} {}", colors::dim("(clamped to fit-ctx floor)"))
+        }
+        Some(c) => c.to_string(),
+        None => "—".into(),
+      };
+      println!("{} {arrow} ctx={ctx}", colors::success("ready"), ctx = ctx,);
+    }
+    Some(r) if r.state == "error" => {
+      let cause = r.state_cause.as_deref().unwrap_or("unknown");
+      println!("{} {arrow} {cause}", colors::error("failed"));
+    }
+    Some(r) => {
+      // Stopped before we observed Ready (raced with an external stop).
+      println!("{} {arrow} {}", colors::dim("settled"), r.state);
+    }
+    None => {
+      println!(
+        "{} {arrow} still loading; check `llamastash status`",
+        colors::dim("waiting timed out"),
+      );
+    }
+  }
 }
 
 fn select_start_row(rows: &[CatalogRow], args: &StartArgs) -> Result<CatalogRow, CliExit> {
@@ -403,6 +546,7 @@ fn emit_response(preset: Option<&str>, row: &CatalogRow, resp: &Value, json: boo
 mod tests {
   use super::*;
   use crate::cli::resolve::CatalogRow;
+  use crate::config::{KnobValue, KnobValueOpt};
 
   fn row(mode_hint: Option<&str>) -> CatalogRow {
     CatalogRow {
@@ -453,7 +597,7 @@ mod tests {
   #[test]
   fn build_payload_includes_only_set_fields() {
     let knobs = TypedKnobs {
-      threads: Some(8),
+      threads: Some(KnobValue::Set(8)),
       ..TypedKnobs::default()
     };
     let p = PartialParams {
@@ -514,8 +658,11 @@ mod tests {
       &osvec(&["--threads", "16", "--rope-freq-base", "10000"]),
     )
     .unwrap();
-    assert_eq!(knobs.threads, Some(16));
-    assert_eq!(knobs.device.as_deref(), Some("Vulkan0"));
+    assert_eq!(knobs.threads, Some(KnobValue::Set(16)));
+    assert_eq!(
+      knobs.device.set_value().map(String::as_str),
+      Some("Vulkan0")
+    );
     assert_eq!(
       extras,
       vec!["--rope-freq-base".to_string(), "10000".to_string()]
@@ -527,14 +674,18 @@ mod tests {
     // Preset baseline sets threads + mlock; the invocation only
     // overrides threads. mlock must survive.
     let mut preset = TypedKnobs {
-      threads: Some(8),
-      mlock: Some(true),
+      threads: Some(KnobValue::Set(8)),
+      mlock: Some(KnobValue::Set(true)),
       ..TypedKnobs::default()
     };
     let (cli_knobs, _) = parse_cli_knobs(&osvec(&["--threads", "2"]), &[]).unwrap();
     preset.overlay(cli_knobs);
-    assert_eq!(preset.threads, Some(2), "CLI override wins");
-    assert_eq!(preset.mlock, Some(true), "untouched preset knob survives");
+    assert_eq!(preset.threads, Some(KnobValue::Set(2)), "CLI override wins");
+    assert_eq!(
+      preset.mlock,
+      Some(KnobValue::Set(true)),
+      "untouched preset knob survives"
+    );
   }
 
   #[test]
@@ -561,6 +712,7 @@ mod tests {
       extra: vec![],
       backend: None,
       json: false,
+      wait: false,
     };
     let err = direct_path_candidate(&model, &args).unwrap_err();
     assert_eq!(err.code, USAGE);
@@ -584,6 +736,7 @@ mod tests {
       extra: vec![],
       backend: None,
       json: false,
+      wait: false,
     };
     let resolved = direct_path_candidate(&model, &args).unwrap();
     assert_eq!(resolved, Some(path));
@@ -613,6 +766,7 @@ mod tests {
       extra: vec![],
       backend: None,
       json: false,
+      wait: false,
     };
     let row = select_start_row(&[], &args).unwrap();
     assert_eq!(row.path, path.display().to_string());
@@ -654,6 +808,7 @@ mod tests {
       extra: vec![],
       backend: None,
       json: false,
+      wait: false,
     };
     let selected = select_start_row(std::slice::from_ref(&row), &args).unwrap();
     assert_eq!(selected.display_label.as_deref(), Some("known-model"));

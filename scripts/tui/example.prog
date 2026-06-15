@@ -1,0 +1,6 @@
+comment: boot the dashboard, confirm the Host + Daemon panels render, snapshot, then quit
+wait: 4
+snap: boot
+expect: Host
+expect: Daemon
+iexpect: llamastash

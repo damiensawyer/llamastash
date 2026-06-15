@@ -79,6 +79,7 @@ async fn status_lists_active_supervised_model() {
     log_path: logs.join("launch.log"),
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
+    fit_gate: None,
   })
   .await
   .expect("spawn supervisor");

@@ -85,6 +85,7 @@ The v1 contract — these are deliberate omissions, not gaps:
 
 - **Loopback-only, same-UID.** The daemon binds two loopback TCP listeners on `127.0.0.1`: a JSON-RPC control plane on `:11436` (bearer-token authed; the token + URL land in `$XDG_STATE_HOME/llamastash/runtime.json`, mode `0600`) and the OpenAI-compat proxy (see next bullet). Neither listener accepts LAN traffic in v0.0.2. `--host` / `--listen` / `--bind` / `--api-key` / `--ssl-*` are refused if passed via `advanced[]` to `start_model`, and `LLAMA_ARG_*` env vars are stripped before spawn.
 - **OpenAI-compat proxy carved out of the v1 R34 deferral.** A loopback HTTP/1.1 listener is enabled by default. In normal mode it prefers `127.0.0.1:11435` so a local Ollama daemon on `11434` can coexist; in Ollama-compat mode it prefers `127.0.0.1:11434`. It speaks `/health`, `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank` so OpenAI-compatible agents (OpenCode, Pi, OpenAI SDKs) attach via one stable URL. Same-machine threat model — no auth, no TLS, no LAN binding, no peercred (the listener is plain loopback HTTP, not the IPC socket). The rest of R34 — Anthropic `/v1/messages`, MCP, network exposure, auth/TLS, idle eviction, fallback tuning — stays deferred. See `docs/plans/2026-05-21-001-feat-proxy-router-plan.md`.
+- **Web-UI surface (`/ui`) on the same proxy listener.** `GET /ui/` serves the running model's stock llama.cpp web UI through the proxy on one port-stable origin (`http://127.0.0.1:11435/ui/`), so users stop hunting the ephemeral backend port. Backend selection: cookie pin (`ls_ui_target=<launch_id>`) → the single running model → a llamastash chooser page (`>1` running) → a "no model running" page (zero). `GET /ui` 302s to `/ui/`; every `/ui/...` request strips the prefix and reverse-proxies to the chosen backend. Switching once pinned: `/ui/switch` always re-shows the chooser (marking the active model), or `/ui/?target=<launch_id>` re-pins directly. `/ui*` rides the same auth gate as the data plane, and `ProxyAuth` additionally accepts **HTTP Basic** (`base64(user:<key>)`, key as the password) so a browser authenticates over LAN — a `/ui` 401 carries `WWW-Authenticate: Basic`; `Bearer` stays the API path. Running-only (no auto-start from the chooser), single shared history, no iframe/custom UI — see `docs/plans/2026-06-15-001-feat-proxy-ui-surface-plan.md`.
 - **`llamastash pull`** graduated in v2 from the v1 `unimplemented!` shim. MVP shape: `llamastash pull <owner/repo[:filename.gguf]>` — downloads via the [`hf-hub`](https://crates.io/crates/hf-hub) crate (0.5 line, resolves the same `reqwest 0.12` we pin elsewhere) into the canonical HF cache layout that discovery already scans. The TUI's `d` HuggingFace pull dialog is the interactive face of this primitive; the CLI `llamastash pull <slug>` stays the only non-TUI browse surface (the dialog is TUI-only, no HTTP / MCP equivalent in v2). The `cli/output.rs::list_json` / `favorites_json` / `CatalogRow::name` JSON shapes stay byte-stable.
 - **`llamastash init` / `llamastash doctor`** are v2 surfaces. Init is the first-run wizard + maintenance tool; doctor is the read-only diagnostic. Both honor `--json` per the v2 plan §"init/doctor mode/flag decision matrix". `init` is **interactive by default**; agents that need non-interactive runs pass `--recommended` (`--yes` remains a hidden alias with identical behavior, and both flags can be combined) and may pre-answer individual prompts with `--install`, `--model`, and `--config-step`.
 - **CLI color policy.** Every human-readable output uses ANSI colors when stdout is a TTY, `NO_COLOR` is unset, and `--no-colors` was not passed. Any one of those three conditions silences color. `--json` output is byte-stable regardless of the color policy. Padded report tables (`list`, `status`, `presets list`, `favorites list`, `last-params`, `daemon status`) are TTY-gated by the same three off-conditions: when piped or color-disabled, every command emits the same `\t`-separated rows as before so `awk -F\t` / `column -t` pipelines keep working. Agents pin against `--json`, not the TTY rendering.
@@ -157,16 +158,29 @@ target/debug/llamastash                                 # TUI: pan through every
 
 For TUI changes specifically, **launch the TUI and look at the panel you touched** — golden snapshots catch byte-exact regressions but not "the field is empty in real life because the running daemon doesn't surface it yet." A fresh daemon restart is part of the validation.
 
-Agents (no interactive terminal) can drive the TUI through
-`scripts/tui_drive.py`: it spawns the working-tree binary in a pty, feeds a
-scripted key sequence, and prints a plain-text screen capture after each step
-(needs `pip install pyte`; the child inherits `LLAMASTASH_*` env vars, so
-pair it with an isolated state dir). Example — stage the launch picker on a
-filtered row and read the staged form:
+Agents (no interactive terminal) can drive the TUI in a pty. Two drivers live
+under `scripts/tui/` (both render the live screen as plain text via `pyte`;
+both inherit `LLAMASTASH_*` env vars, so pair them with an isolated state dir).
+See `scripts/tui/README.md` for the full contract — when to use which:
 
-```bash
-python3 scripts/tui_drive.py '[["", 4, "boot"], ["/gemma|<enter>", 2, "staged"]]'
-```
+- **`scripts/tui/tui_drive.py`** — quick, throwaway inspection. JSON-on-argv,
+  zero deps beyond `pyte`, prints each screen to stdout. No assertions, no exit
+  code. Use it to *look* at a flow. Example — stage the launch picker on a
+  filtered row and read the staged form:
+
+  ```bash
+  python3 scripts/tui/tui_drive.py '[["", 4, "boot"], ["/gemma|<enter>", 2, "staged"]]'
+  ```
+
+- **`scripts/tui/harness.py`** — repeatable UAT / regression checks. A
+  line-based program file with `expect:`/`refute:` assertions, PASS/FAIL
+  accounting, a non-zero exit code for CI, and persisted `snap:` screenshots.
+  Use it to *gate* on a flow. Needs `pexpect` on top of `pyte`; it also answers
+  crossterm's `ESC[6n` so the TUI can't abort mid-init:
+
+  ```bash
+  python3 scripts/tui/harness.py scripts/tui/example.prog /tmp/ls-tui-out
+  ```
 
 One-frame renders without key input are cheaper via the built-in
 `llamastash --render --render-size 160x45` (`make render` renders all sizes).
@@ -207,7 +221,7 @@ OpenCode / Pi / SDK ──HTTP──► Proxy listener (127.0.0.1:11434, loopbac
 
 ## CLI agent surface (Units 8 + 10/13)
 
-Every read-and-mutation command supports `--json` and emits a wrapped object: `{"models":[…]}`, `{"favorites":[…]}`, `{"presets":[…]}`, `{"last_params":[…]}`, `{"stopped":[…],"count":N}`, `{"steps_ran":[…],"install":{…},"model":{…},"config":{…},"smoke":{…},"hardware":{…}}` for `init`, `{"schema_version":1,"findings":[{"id":…,"severity":…,"message":…,"fix_hint":…,"safe_to_log":true}],"baseline":{…}}` for `doctor`. Stable shapes for agent consumption. Exit codes follow `<sysexits.h>` numerically but with project-specific meanings — pin against the table in `src/cli/exit_codes.rs`, not the libc constants. `stop --all` in a non-TTY context refuses without `--yes`. The IPC `capabilities` method enumerates supported methods so clients can feature-detect.
+Every read-and-mutation command supports `--json` and emits a wrapped object: `{"models":[…]}`, `{"favorites":[…]}`, `{"presets":[…]}`, `{"last_params":[…]}`, `{"stopped":[…],"count":N}`, `{"steps_ran":[…],"install":{…},"model":{…},"config":{…},"smoke":{…},"hardware":{…}}` for `init`, `{"schema_version":2,"findings":[{"id":…,"severity":…,"message":…,"fix_hint":…,"safe_to_log":true}],"baseline":{…},"hardware":{…}}` for `doctor` (schema `2` added the `hardware` section and the `memory_drift` / `gtt_hint` finding ids). Stable shapes for agent consumption. Exit codes follow `<sysexits.h>` numerically but with project-specific meanings — pin against the table in `src/cli/exit_codes.rs`, not the libc constants. `stop --all` in a non-TTY context refuses without `--yes`. The IPC `capabilities` method enumerates supported methods so clients can feature-detect.
 
 ### Exit-code table
 
@@ -236,7 +250,7 @@ set of synthetic codes inside its JSON report's
 
 The `status` method response carries the following top-level objects beyond the legacy `models` / `external` / `gpu` shapes:
 
-- `host` — always an object (no `null`). Populated by the daemon's host-metrics sampler at 1 Hz. Fields: `cpu_pct` (f32, 0..=100 mean across cores), `ram_used_bytes` / `ram_total_bytes` (u64), `gpu_util_pct` / `gpu_mem_used_bytes` / `gpu_mem_total_bytes` / `gpu_temp_c` (each `Option`, omitted on backends that don't surface them), `gpu_backend` (string), `gpu_device_count` (u32), `gpu_devices` (`Option<[…]>`, present only on multi-GPU/multi-backend hosts).
+- `host` — always an object (no `null`). Populated by the daemon's host-metrics sampler at 1 Hz. Fields: `cpu_pct` (f32, 0..=100 mean across cores), `ram_used_bytes` / `ram_total_bytes` (u64), `gpu_util_pct` / `gpu_mem_used_bytes` / `gpu_mem_total_bytes` / `gpu_temp_c` (each `Option`, omitted on backends that don't surface them), `gpu_backend` (string), `gpu_device_count` (u32), `gpu_devices` (`Option<[…]>`, present only on multi-GPU/multi-backend hosts), `unified` (bool — GPU shares one physical pool with the CPU: Apple Silicon, or an AMD/Intel UMA APU), `uma_shared_total_bytes` / `uma_shared_used_bytes` (`Option`, the system-RAM-backed portion of a UMA pool — AMD GTT), and `uma_class_source` (`Option`, how the unified-vs-discrete verdict was reached: `"explicit_dxgi_uma"`, `"carve_signature"`, or `"discrete"`; `null` on Apple Metal and non-classifying backends).
   - `gpu_backend` values: `"cpu_only"`, `"nvidia"`, `"amd"`, `"apple_metal"`, `"unknown"` (Vulkan-only fallback), `"multi"` (two or more backends each found a device), or the sentinel `"unsampled"` returned in the brief window between daemon start and the sampler's first tick. Clients gating UI on backend kind should treat `"unsampled"` as "not yet known", not as a real reading.
   - `gpu_devices` — when two or more GPUs are visible, one row per device: `{selector, backend, name, total_memory_bytes, used_memory_bytes?, utilization_pct?, temperature_c?}` (`?` = omitted when the vendor tool doesn't surface it). `selector` is a backend-prefixed *display* label (`Nvidia0`, `Amd0`), not a `--device` value — launch selection draws from a separate `llama-server --list-devices` catalog. Lets a dashboard render per-card stats instead of one aggregate row; omitted on single-GPU hosts.
 - `daemon.build` — semver string from `CARGO_PKG_VERSION`; matches `--version`.
@@ -275,9 +289,11 @@ The static `(architecture, gpu_backend) → TypedKnobs` defaults table
 lives in `src/launch/defaults_table.rs`. When `data/benchmark-snapshot.json`
 adds a new recommender pick, audit the table coverage:
 
-- Architectures listed in the snapshot but missing from `COVERED_ARCHS`
-  fall through to the conservative `*` row (which only seeds
-  `n_gpu_layers: 99` on GPU backends).
+- The table no longer pins `n_gpu_layers` on any (arch, backend):
+  offload placement is delegated to llama-server's `--fit` (a layer-less
+  `n_gpu_layers` is seeded `Auto` by the resolver and emits no `-ngl`).
+  Architectures missing from `COVERED_ARCHS` fall through to the empty
+  `*` row.
 - `FLASH_ATTN_ELIGIBLE` is opt-in only — extend it once measurement
   confirms a new architecture supports flash-attn cleanly on NVIDIA
   / Apple Metal. AMD/HIP flash-attn coverage stays uneven; leave to

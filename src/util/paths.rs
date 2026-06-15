@@ -346,6 +346,17 @@ mod tests {
     // regression where the `directories` crate dependency or our
     // `APPLICATION` constant changes and silently re-roots the
     // daemon's files outside of its namespace.
+    //
+    // This checks the platform-default resolution, so hold the env mutex
+    // and clear the dir overrides first: a concurrent override-setting
+    // test could otherwise flip `LLAMASTASH_*_DIR` to a path like
+    // `/tmp/uat-state-override` (no `llamastash` segment) between our
+    // reads and fail the assertion spuriously.
+    let _guard = env_mutex().lock().unwrap_or_else(|e| e.into_inner());
+    let _state = EnvVarGuard::unset("LLAMASTASH_STATE_DIR");
+    let _config = EnvVarGuard::unset("LLAMASTASH_CONFIG_DIR");
+    let _cache = EnvVarGuard::unset("LLAMASTASH_CACHE_DIR");
+
     let llamastash = std::ffi::OsStr::new("llamastash");
     for path in [
       state_dir().unwrap(),

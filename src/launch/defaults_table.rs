@@ -11,7 +11,7 @@
 //! the table coverage. Anything not explicitly listed falls through
 //! to the `*` row.
 
-use crate::config::TypedKnobs;
+use crate::config::{KnobValue, TypedKnobs};
 use crate::daemon::host_metrics::GpuFlavor;
 
 /// Look up the built-in defaults row for `(arch, backend)`. The
@@ -33,18 +33,12 @@ pub fn lookup(arch: &str, backend: GpuFlavor) -> TypedKnobs {
   merge(explicit, fallback)
 }
 
-fn lookup_wildcard(backend: GpuFlavor) -> TypedKnobs {
-  match backend {
-    // Conservative `*` row: GPU backends seed n_gpu_layers=99 only;
-    // flash_attn opt-in is per-arch (some architectures don't
-    // support flash-attn at all). CPU / unknown / unsampled get
-    // nothing.
-    GpuFlavor::Nvidia | GpuFlavor::Amd | GpuFlavor::AppleMetal | GpuFlavor::Multi => TypedKnobs {
-      n_gpu_layers: Some(99),
-      ..TypedKnobs::default()
-    },
-    GpuFlavor::CpuOnly | GpuFlavor::Unknown | GpuFlavor::Unsampled => TypedKnobs::default(),
-  }
+fn lookup_wildcard(_backend: GpuFlavor) -> TypedKnobs {
+  // The `*` row no longer pins `n_gpu_layers` — offload placement is
+  // delegated to `--fit` (Auto). A layer-less `n_gpu_layers` is seeded
+  // `Auto` by the resolver, which emits no `-ngl` and lets fit decide.
+  // flash_attn opt-in stays per-arch (see `lookup_explicit`).
+  TypedKnobs::default()
 }
 
 /// Architecture-specific row. `None` means "no explicit row — caller
@@ -56,21 +50,15 @@ fn lookup_explicit(arch: &str, backend: GpuFlavor) -> Option<TypedKnobs> {
     return None;
   }
   let mut k = TypedKnobs::default();
-  // GPU layers: every covered arch on every GPU backend gets 99.
-  if matches!(
-    backend,
-    GpuFlavor::Nvidia | GpuFlavor::Amd | GpuFlavor::AppleMetal
-  ) {
-    k.n_gpu_layers = Some(99);
-  }
   // flash-attn: only the flash-attn-eligible architectures on
   // nvidia / apple_metal. AMD/HIP coverage is uneven — leave to user
   // override. Vulkan/unknown can't enumerate VRAM safely; CPU
-  // obviously doesn't apply.
+  // obviously doesn't apply. `n_gpu_layers` is *not* pinned anymore —
+  // fit owns offload placement (Auto).
   if FLASH_ATTN_ELIGIBLE.contains(&arch)
     && matches!(backend, GpuFlavor::Nvidia | GpuFlavor::AppleMetal)
   {
-    k.flash_attn = Some(true);
+    k.flash_attn = Some(KnobValue::Set(true));
   }
   Some(k)
 }
@@ -150,10 +138,35 @@ mod tests {
   use super::*;
 
   #[test]
-  fn qwen2_on_nvidia_sets_ngl_and_flash_attn() {
+  fn ngl_is_never_pinned_on_any_backend() {
+    // Offload placement is delegated to `--fit` (Auto); the table no
+    // longer pins n_gpu_layers on any (arch, backend).
+    for backend in [
+      GpuFlavor::Nvidia,
+      GpuFlavor::Amd,
+      GpuFlavor::AppleMetal,
+      GpuFlavor::Multi,
+      GpuFlavor::CpuOnly,
+      GpuFlavor::Unknown,
+      GpuFlavor::Unsampled,
+    ] {
+      assert_eq!(
+        lookup("qwen2", backend).n_gpu_layers,
+        None,
+        "{backend:?} must not pin ngl"
+      );
+      assert_eq!(
+        lookup("entirely-unknown-arch", backend).n_gpu_layers,
+        None,
+        "wildcard {backend:?} must not pin ngl"
+      );
+    }
+  }
+
+  #[test]
+  fn qwen2_on_nvidia_opts_into_flash_attn() {
     let k = lookup("qwen2", GpuFlavor::Nvidia);
-    assert_eq!(k.n_gpu_layers, Some(99));
-    assert_eq!(k.flash_attn, Some(true));
+    assert_eq!(k.flash_attn, Some(KnobValue::Set(true)));
   }
 
   #[test]
@@ -164,32 +177,14 @@ mod tests {
   }
 
   #[test]
-  fn unknown_arch_on_nvidia_falls_back_to_wildcard() {
+  fn unknown_arch_on_nvidia_opts_into_nothing() {
     let k = lookup("entirely-unknown-arch", GpuFlavor::Nvidia);
-    assert_eq!(k.n_gpu_layers, Some(99), "wildcard row covers ngl");
     assert_eq!(k.flash_attn, None, "wildcard does not opt into flash_attn");
   }
 
   #[test]
-  fn qwen2_on_unknown_backend_returns_all_none() {
-    let k = lookup("qwen2", GpuFlavor::Unknown);
-    assert_eq!(k.n_gpu_layers, None);
-    assert_eq!(k.flash_attn, None);
-  }
-
-  #[test]
-  fn qwen2_on_unsampled_treated_as_unknown() {
-    // Brief window after daemon start before first sampler tick.
-    // Conservative path: no GPU defaults.
-    let k = lookup("qwen2", GpuFlavor::Unsampled);
-    assert_eq!(k.n_gpu_layers, None);
-    assert_eq!(k.flash_attn, None);
-  }
-
-  #[test]
-  fn qwen2_on_amd_has_ngl_but_no_flash_attn() {
+  fn qwen2_on_amd_no_flash_attn() {
     let k = lookup("qwen2", GpuFlavor::Amd);
-    assert_eq!(k.n_gpu_layers, Some(99));
     assert_eq!(
       k.flash_attn, None,
       "HIP flash-attn coverage is uneven — leave it to user override"
@@ -197,9 +192,8 @@ mod tests {
   }
 
   #[test]
-  fn gemma_on_nvidia_has_ngl_but_no_flash_attn() {
+  fn gemma_on_nvidia_no_flash_attn() {
     let k = lookup("gemma", GpuFlavor::Nvidia);
-    assert_eq!(k.n_gpu_layers, Some(99));
     assert_eq!(
       k.flash_attn, None,
       "gemma not on the flash-attn opt-in list at v1"
@@ -209,14 +203,12 @@ mod tests {
   #[test]
   fn arch_lookup_is_case_insensitive() {
     let k = lookup("QWEN2", GpuFlavor::Nvidia);
-    assert_eq!(k.n_gpu_layers, Some(99));
-    assert_eq!(k.flash_attn, Some(true));
+    assert_eq!(k.flash_attn, Some(KnobValue::Set(true)));
   }
 
   #[test]
   fn apple_metal_qwen3_gets_flash_attn() {
     let k = lookup("qwen3", GpuFlavor::AppleMetal);
-    assert_eq!(k.flash_attn, Some(true));
-    assert_eq!(k.n_gpu_layers, Some(99));
+    assert_eq!(k.flash_attn, Some(KnobValue::Set(true)));
   }
 }

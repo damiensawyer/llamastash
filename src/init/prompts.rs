@@ -289,6 +289,18 @@ fn hardware_line(hw: &HardwareSnapshot) -> String {
   lines.join("\n")
 }
 
+/// Classification verdict suffix for the init banner — `(unified,
+/// inferred)` / `(unified)` / `(discrete)` — sourced from the same
+/// [`GpuInfo::uma_class_source`] that drives the `status` and `doctor`
+/// GPU lines, so all three name the verdict identically. Empty (no
+/// suffix) when the vendor-unknown Vulkan path can't classify.
+fn verdict_suffix(gpu: &GpuInfo) -> String {
+  gpu
+    .uma_class_source()
+    .map(|s| format!(" ({})", s.label()))
+    .unwrap_or_default()
+}
+
 fn format_gpu_segment(hw: &HardwareSnapshot) -> String {
   match &hw.gpu {
     GpuInfo::CpuOnly => "(none — CPU only)".to_string(),
@@ -300,18 +312,23 @@ fn format_gpu_segment(hw: &HardwareSnapshot) -> String {
       };
       let name_segment = format_device_name(devices, vendor);
       let mem = format_gib(hw.vram_bytes.unwrap_or(0));
-      format!("{name_segment} · {mem} VRAM")
+      // Verdict vocabulary matches `status` / `doctor`: a unified APU
+      // reads `(unified, inferred)`, a discrete card `(discrete)` — never
+      // the bare `VRAM` word that re-introduced the 2x-memory confusion.
+      format!("{name_segment} · {mem}{}", verdict_suffix(&hw.gpu))
     }
     GpuInfo::AppleMetal {
       total_memory_bytes: _,
     } => {
       let mem = format_gib(hw.vram_bytes.unwrap_or(0));
-      format!("Apple Silicon · {mem} unified")
+      format!("Apple Silicon · {mem}{}", verdict_suffix(&hw.gpu))
     }
     GpuInfo::Unknown { devices } => {
+      // Vendor unknown (Vulkan fallback): no discrete-vs-unified verdict,
+      // so show the raw pool size without claiming either.
       let name_segment = format_device_name(devices, "GPU (vendor unknown)");
       let mem = match hw.vram_bytes {
-        Some(b) => format!(" · {} VRAM", format_gib(b)),
+        Some(b) => format!(" · {}", format_gib(b)),
         None => String::new(),
       };
       format!("{name_segment}{mem}")
@@ -365,7 +382,7 @@ fn format_gpu_segment(hw: &HardwareSnapshot) -> String {
       .collect();
       let mem = hw
         .vram_bytes
-        .map(|b| format!(" · {} VRAM", format_gib(b)))
+        .map(|b| format!(" · {}{}", format_gib(b), verdict_suffix(&hw.gpu)))
         .unwrap_or_default();
       if parts.is_empty() {
         "(none)".to_string()
@@ -408,7 +425,10 @@ fn format_cpu_segment(hw: &HardwareSnapshot) -> String {
 }
 
 fn format_system_segment(hw: &HardwareSnapshot) -> String {
-  let ram = format!("{} RAM", format_gib(hw.ram_total_bytes));
+  // `MEM*` on unified hosts (the GPU draws from this pool); `MEM` on
+  // discrete. Matches the TUI host pane and doctor hardware section.
+  let mem_label = if hw.gpu.is_unified() { "MEM*" } else { "MEM" };
+  let ram = format!("{} {mem_label}", format_gib(hw.ram_total_bytes));
   let mut parts: Vec<String> = vec![ram];
   if hw.disk_free_bytes > 0 {
     parts.push(format!("{} disk free", format_gib(hw.disk_free_bytes)));
@@ -418,15 +438,12 @@ fn format_system_segment(hw: &HardwareSnapshot) -> String {
 }
 
 fn format_gib(bytes: u64) -> String {
-  let gib = bytes as f64 / 1_073_741_824.0;
-  if gib >= 10.0 {
-    format!("{gib:.0} GB")
-  } else {
-    format!("{gib:.1} GB")
-  }
+  // Delegate to the one canonical formatter so the init banner, doctor,
+  // the recommender, status, and the TUI all print the same unit.
+  crate::init::detection::fmt_gib(bytes)
 }
 
-fn os_short(os: OsFamily) -> &'static str {
+pub fn os_short(os: OsFamily) -> &'static str {
   match os {
     OsFamily::Linux => "linux",
     OsFamily::MacOs => "macos",
@@ -435,7 +452,7 @@ fn os_short(os: OsFamily) -> &'static str {
   }
 }
 
-fn arch_short(arch: CpuArch) -> &'static str {
+pub fn arch_short(arch: CpuArch) -> &'static str {
   match arch {
     CpuArch::X86_64 => "x86_64",
     CpuArch::Arm64 => "arm64",
@@ -929,7 +946,12 @@ mod tests {
       line.contains("NVIDIA GeForce RTX 4090"),
       "expected NVIDIA + device name, got {line:?}"
     );
-    assert!(line.contains("24 GB VRAM"));
+    // Verdict vocabulary now matches `status` / `doctor`: a discrete
+    // card reads `(discrete)`, not the bare `VRAM` word.
+    assert!(
+      line.contains("24.0 GiB (discrete)"),
+      "expected discrete verdict, got {line:?}"
+    );
   }
 
   #[test]
@@ -986,7 +1008,7 @@ mod tests {
     assert!(!without_disk.contains("disk free"));
     hw.disk_free_bytes = 100 * 1024 * 1024 * 1024;
     let with_disk = hardware_line(&hw);
-    assert!(with_disk.contains("100 GB disk free"));
+    assert!(with_disk.contains("100.0 GiB disk free"));
   }
 
   #[test]

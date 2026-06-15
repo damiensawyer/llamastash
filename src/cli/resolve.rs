@@ -111,6 +111,15 @@ pub struct RunningRow {
   /// Latest CPU usage % (multi-core sum, so >100% is normal for
   /// inference workloads). `None` before the per-PID sampler primes.
   pub latest_cpu_pct: Option<f32>,
+  /// Context window `--fit` actually chose, read from the child's
+  /// `/props` on Ready (R6). `None` until the fetch lands, or when the
+  /// build doesn't expose it. Carried so `status --json` surfaces the
+  /// resolved window without re-querying the child.
+  pub resolved_ctx: Option<u32>,
+  /// True when `--fit` had to clamp the context window down to the floor
+  /// under memory pressure (R19). Surfaced as a note on `status` and in
+  /// the `show` running section.
+  pub ctx_clamped: bool,
 }
 
 impl RunningRow {
@@ -517,6 +526,14 @@ fn parse_running_row(v: &Value) -> Option<RunningRow> {
     .get("latest_cpu_pct")
     .and_then(Value::as_f64)
     .map(|n| n as f32);
+  let resolved_ctx = v
+    .get("resolved_ctx")
+    .and_then(Value::as_u64)
+    .map(|n| n as u32);
+  let ctx_clamped = v
+    .get("ctx_clamped")
+    .and_then(Value::as_bool)
+    .unwrap_or(false);
   Some(RunningRow {
     launch_id,
     model_path,
@@ -530,6 +547,8 @@ fn parse_running_row(v: &Value) -> Option<RunningRow> {
     params,
     latest_rss_bytes,
     latest_cpu_pct,
+    resolved_ctx,
+    ctx_clamped,
   })
 }
 
@@ -810,6 +829,8 @@ mod tests {
         params: None,
         latest_rss_bytes: None,
         latest_cpu_pct: None,
+        resolved_ctx: None,
+        ctx_clamped: false,
       },
       RunningRow {
         launch_id: "L2".into(),
@@ -824,6 +845,8 @@ mod tests {
         params: None,
         latest_rss_bytes: None,
         latest_cpu_pct: None,
+        resolved_ctx: None,
+        ctx_clamped: false,
       },
     ];
     assert_eq!(resolve_running(&rows, "41100").unwrap().launch_id, "L1");
@@ -845,6 +868,8 @@ mod tests {
       params: None,
       latest_rss_bytes: None,
       latest_cpu_pct: None,
+      resolved_ctx: None,
+      ctx_clamped: false,
     }];
     let err = resolve_running(&rows, "9999").unwrap_err();
     assert_eq!(err.code, MODEL_NOT_FOUND);
@@ -865,6 +890,8 @@ mod tests {
       params: None,
       latest_rss_bytes: None,
       latest_cpu_pct: None,
+      resolved_ctx: None,
+      ctx_clamped: false,
     };
     let rows = vec![
       row("L1", "/cache/gemma-4-E2B-it-Q4_K_M.gguf", 41100),

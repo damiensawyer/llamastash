@@ -11,7 +11,7 @@
 //! advanced KV quantisation modes where the byte-per-element factor
 //! changes. Consumers should display these as "estimate" not "exact".
 
-use crate::gguf::header::GgufHeader;
+use crate::gguf::header::{GgufHeader, GgufValue};
 use crate::gguf::metadata::Quant;
 
 /// What KV cache dtype `llama-server` is launched with. Default f16.
@@ -57,6 +57,14 @@ impl CacheType {
       _ => return None,
     })
   }
+}
+
+/// Parse a `--cache-type-{k,v}` tag (`q8_0`, `f16`, …) into a
+/// [`CacheType`], defaulting to `f16` when absent or unrecognised.
+/// Shared by the admission KV projection so it uses the same dtype
+/// mapping the launch argv will.
+pub fn parse_cache_type(raw: Option<&str>) -> CacheType {
+  raw.and_then(CacheType::parse).unwrap_or_default()
 }
 
 /// Inputs to the estimator other than the parsed header itself.
@@ -154,17 +162,49 @@ pub fn weights_bytes(header: &GgufHeader) -> u64 {
 /// but with separate K and V terms because llama-server lets the two be set
 /// independently via `--cache-type-k` / `--cache-type-v`.
 pub fn kv_bytes(header: &GgufHeader, arch: Option<&str>, opts: EstimateOptions) -> u64 {
-  let (n_layers, n_kv_heads, head_dim) = match attention_geometry(header, arch) {
-    Some(v) => v,
-    None => return 0,
+  let Some(a) = arch else { return 0 };
+  // MLA (deepseek2, kimi-k2): caches one compressed latent per token per
+  // layer, not per-head K/V — the standard formula over-estimates ~10x.
+  if let Some(mla) = mla_kv_elements(header, a) {
+    let elements = mla.saturating_mul(opts.ctx_len as u128);
+    // MLA stores a single latent (not separate K and V); size it with
+    // the K cache dtype.
+    return scale_bytes(elements, opts.cache_type_k.bytes_per_elem());
+  }
+  let Some(geom) = attention_geometry(header, a) else {
+    return 0;
   };
-  let elements_per_dtype = (n_layers as u128)
-    .saturating_mul(n_kv_heads as u128)
-    .saturating_mul(head_dim as u128)
-    .saturating_mul(opts.ctx_len as u128);
-  let k_bytes = (elements_per_dtype as f64) * opts.cache_type_k.bytes_per_elem();
-  let v_bytes = (elements_per_dtype as f64) * opts.cache_type_v.bytes_per_elem();
-  let total = k_bytes + v_bytes;
+  // Sum KV elements per layer. Each layer can differ in KV-head count
+  // (per-layer `head_count_kv` array), head dim (sliding layers use the
+  // `*_swa` length), and effective context (sliding layers cap at the
+  // window). This is what makes the estimate match reality on gemma /
+  // gpt-oss instead of over-counting every layer as full attention.
+  let mut elements: u128 = 0;
+  for layer in 0..geom.n_layers {
+    let is_swa = geom.swa_window.is_some() && geom.swa_layer(layer);
+    let kv_heads = geom.kv_heads(layer);
+    let head_dim = if is_swa {
+      geom.head_dim_swa
+    } else {
+      geom.head_dim
+    };
+    let ctx = if is_swa {
+      opts.ctx_len.min(geom.swa_window.unwrap())
+    } else {
+      opts.ctx_len
+    };
+    elements = elements.saturating_add(
+      (kv_heads as u128)
+        .saturating_mul(head_dim as u128)
+        .saturating_mul(ctx as u128),
+    );
+  }
+  let bpe = opts.cache_type_k.bytes_per_elem() + opts.cache_type_v.bytes_per_elem();
+  scale_bytes(elements, bpe)
+}
+
+fn scale_bytes(elements: u128, bytes_per_elem: f64) -> u64 {
+  let total = (elements as f64) * bytes_per_elem;
   if total.is_finite() && total >= 0.0 {
     total as u64
   } else {
@@ -172,27 +212,116 @@ pub fn kv_bytes(header: &GgufHeader, arch: Option<&str>, opts: EstimateOptions) 
   }
 }
 
-/// (n_layers, n_kv_heads, head_dim) derived from the GGUF metadata, or
-/// `None` if any required field is missing.
-fn attention_geometry(header: &GgufHeader, arch: Option<&str>) -> Option<(u64, u64, u64)> {
-  let a = arch?;
+/// MLA KV elements per token across all layers, or `None` when the model
+/// is not MLA. DeepSeek-V2/V3 (`deepseek2`) and Kimi K2 cache a single
+/// compressed latent of `kv_lora_rank` plus the rope key of
+/// `rope.dimension_count` per token per layer, so the cache is
+/// `n_layers * (kv_lora_rank + rope_dim)` elements — an order of
+/// magnitude under the per-head MHA/GQA figure.
+fn mla_kv_elements(header: &GgufHeader, arch: &str) -> Option<u128> {
+  let kv_lora_rank = header.u64(&[format!("{arch}.attention.kv_lora_rank")])?;
+  let n_layers = header.u64(&[format!("{arch}.block_count")])?;
+  let rope_dim = header
+    .u64(&[format!("{arch}.rope.dimension_count")])
+    .unwrap_or(0);
+  Some((n_layers as u128).saturating_mul((kv_lora_rank + rope_dim) as u128))
+}
+
+/// Per-layer attention geometry for the KV estimate.
+struct AttnGeometry {
+  n_layers: u64,
+  /// Full-attention head dim (`key_length`, else `embedding_length /
+  /// head_count`).
+  head_dim: u64,
+  /// Sliding-window head dim (`key_length_swa`); equals `head_dim` when
+  /// the model doesn't distinguish.
+  head_dim_swa: u64,
+  /// Sliding-window size in tokens, when the arch has one.
+  swa_window: Option<u64>,
+  /// Per-layer KV-head counts, length `n_layers`.
+  kv_heads: Vec<u64>,
+  /// Per-layer sliding flag (`1` = sliding-window, `0` = full); empty
+  /// when the arch has no per-layer pattern.
+  swa_pattern: Vec<u64>,
+}
+
+impl AttnGeometry {
+  fn kv_heads(&self, layer: u64) -> u64 {
+    self.kv_heads.get(layer as usize).copied().unwrap_or(0)
+  }
+  /// Whether `layer` is a sliding-window layer. With no per-layer pattern
+  /// but a window present, treat every layer as sliding.
+  fn swa_layer(&self, layer: u64) -> bool {
+    match self.swa_pattern.get(layer as usize) {
+      Some(flag) => *flag == 1,
+      None => self.swa_pattern.is_empty(),
+    }
+  }
+}
+
+/// Read the per-layer attention geometry. `head_count_kv` is read
+/// per-layer: gemma3 / gemma4 store it as an **array** (full vs
+/// sliding-window layers carry different KV-head counts); a scalar
+/// broadcasts to every layer; absent falls back to MHA (`head_count`).
+/// Sliding-window archs additionally expose `sliding_window` +
+/// `sliding_window_pattern` (1 = sliding) and a smaller `*_swa` head dim,
+/// which cap those layers' KV at the window.
+fn attention_geometry(header: &GgufHeader, arch: &str) -> Option<AttnGeometry> {
+  let a = arch;
   let n_layers = header.u64(&[format!("{a}.block_count")])?;
   let n_heads = header.u64(&[format!("{a}.attention.head_count")])?;
-  let n_kv_heads = header
-    .u64(&[format!("{a}.attention.head_count_kv")])
-    .unwrap_or(n_heads);
-  // head_dim: explicit `attention.key_length` if present, else
-  // `embedding_length / head_count`.
-  let head_dim = if let Some(k) = header.u64(&[format!("{a}.attention.key_length")]) {
-    k
-  } else {
-    let embed = header.u64(&[format!("{a}.embedding_length")])?;
-    if n_heads == 0 {
-      return None;
+  let head_dim = match header.u64(&[format!("{a}.attention.key_length")]) {
+    Some(k) => k,
+    None => {
+      let embed = header.u64(&[format!("{a}.embedding_length")])?;
+      if n_heads == 0 {
+        return None;
+      }
+      embed / n_heads
     }
-    embed / n_heads
   };
-  Some((n_layers, n_kv_heads, head_dim))
+  let head_dim_swa = header
+    .u64(&[format!("{a}.attention.key_length_swa")])
+    .unwrap_or(head_dim);
+  let swa_window = header.u64(&[format!("{a}.attention.sliding_window")]);
+  let kv_heads = per_layer_u64(
+    header,
+    &format!("{a}.attention.head_count_kv"),
+    n_layers,
+    n_heads,
+  );
+  let swa_pattern =
+    per_layer_u64_no_default(header, &format!("{a}.attention.sliding_window_pattern"));
+  Some(AttnGeometry {
+    n_layers,
+    head_dim,
+    head_dim_swa,
+    swa_window,
+    kv_heads,
+    swa_pattern,
+  })
+}
+
+/// A metadata value that may be a per-layer array or a single scalar,
+/// broadcast to `n_layers` entries (`default` fills gaps / absence).
+fn per_layer_u64(header: &GgufHeader, key: &str, n_layers: u64, default: u64) -> Vec<u64> {
+  match header.get(key) {
+    Some(GgufValue::Array(items)) => (0..n_layers as usize)
+      .map(|i| items.get(i).and_then(GgufValue::as_u64).unwrap_or(default))
+      .collect(),
+    Some(v) => vec![v.as_u64().unwrap_or(default); n_layers as usize],
+    None => vec![default; n_layers as usize],
+  }
+}
+
+/// Like [`per_layer_u64`] but returns an empty vec when the key is
+/// absent (so callers can distinguish "no pattern" from "all zero").
+fn per_layer_u64_no_default(header: &GgufHeader, key: &str) -> Vec<u64> {
+  match header.get(key) {
+    Some(GgufValue::Array(items)) => items.iter().filter_map(GgufValue::as_u64).collect(),
+    Some(v) => v.as_u64().map(|n| vec![n]).unwrap_or_default(),
+    None => Vec::new(),
+  }
 }
 
 #[cfg(test)]
@@ -227,6 +356,126 @@ mod tests {
     };
     let kv = kv_bytes(&h, Some("llama"), opts);
     let expected: u64 = 2 * 32 * 8 * 128 * 8192 * 2;
+    assert_eq!(kv, expected);
+  }
+
+  #[test]
+  fn kv_bytes_sums_per_layer_kv_head_array() {
+    // gemma3 / gemma4 store `head_count_kv` as a per-layer array (full
+    // vs sliding-window layers differ). KV must sum the array, not fall
+    // back to full MHA (head_count) for every layer.
+    let kv_per_layer = [16i32, 16, 16, 16, 16, 4]; // sum = 84
+    let bytes = FixtureBuilder::new()
+      .with_arch("gemma4")
+      .with_block_count(6)
+      .with_head_count(32)
+      .with_kv(
+        "gemma4.attention.head_count_kv",
+        GgufValue::Array(kv_per_layer.iter().map(|n| GgufValue::I32(*n)).collect()),
+      )
+      .with_embedding_length(32 * 128) // → head_dim = 128
+      .build();
+    let h = parse(bytes);
+    let opts = EstimateOptions {
+      ctx_len: 1000,
+      ..EstimateOptions::default()
+    };
+    let kv = kv_bytes(&h, Some("gemma4"), opts);
+    // total_kv_heads = sum(array) = 84, NOT n_layers*n_heads = 6*32 = 192.
+    let expected: u64 = 2 * 84 * 128 * 1000 * 2;
+    assert_eq!(kv, expected);
+    let naive_mha: u64 = 2 * (6 * 32) * 128 * 1000 * 2;
+    assert!(kv < naive_mha, "array sum must undercut the MHA fallback");
+  }
+
+  #[test]
+  fn kv_bytes_caps_sliding_window_layers() {
+    // gemma-style: sliding layers (pattern=1) use the smaller `*_swa`
+    // head dim and cap their context at the window; full layers
+    // (pattern=0) use the full head dim and full context.
+    let bytes = FixtureBuilder::new()
+      .with_arch("gemma4")
+      .with_block_count(3)
+      .with_head_count(32)
+      .with_kv(
+        "gemma4.attention.head_count_kv",
+        GgufValue::Array(vec![
+          GgufValue::I32(16),
+          GgufValue::I32(16),
+          GgufValue::I32(4),
+        ]),
+      )
+      .with_kv("gemma4.attention.key_length", GgufValue::U32(512))
+      .with_kv("gemma4.attention.key_length_swa", GgufValue::U32(256))
+      .with_kv("gemma4.attention.sliding_window", GgufValue::U32(1024))
+      .with_kv(
+        "gemma4.attention.sliding_window_pattern",
+        GgufValue::Array(vec![
+          GgufValue::I32(1),
+          GgufValue::I32(1),
+          GgufValue::I32(0),
+        ]),
+      )
+      .build();
+    let h = parse(bytes);
+    let opts = EstimateOptions {
+      ctx_len: 8192,
+      ..EstimateOptions::default()
+    };
+    let kv = kv_bytes(&h, Some("gemma4"), opts);
+    // swa layers: 16*256*min(8192,1024)=1024 each; full layer: 4*512*8192.
+    let elems: u64 = 16 * 256 * 1024 + 16 * 256 * 1024 + 4 * 512 * 8192;
+    assert_eq!(kv, elems * 4); // f16 K + f16 V = 4 bytes/elem
+                               // Far under the no-sliding estimate (every layer full ctx + 512 dim).
+    let naive: u64 = (16 + 16 + 4) * 512 * 8192 * 4;
+    assert!(
+      kv < naive / 4,
+      "sliding cap must slash KV: kv={kv} naive={naive}"
+    );
+  }
+
+  #[test]
+  fn kv_bytes_uses_mla_latent_for_deepseek() {
+    // deepseek2 / kimi: KV is one compressed latent per token per layer
+    // (`kv_lora_rank + rope_dim`), not per-head K/V.
+    let bytes = FixtureBuilder::new()
+      .with_arch("deepseek2")
+      .with_block_count(4)
+      .with_head_count(128)
+      .with_kv("deepseek2.attention.kv_lora_rank", GgufValue::U32(512))
+      .with_kv("deepseek2.rope.dimension_count", GgufValue::U32(64))
+      .with_kv("deepseek2.attention.key_length", GgufValue::U32(192))
+      .build();
+    let h = parse(bytes);
+    let opts = EstimateOptions {
+      ctx_len: 8192,
+      ..EstimateOptions::default()
+    };
+    let kv = kv_bytes(&h, Some("deepseek2"), opts);
+    // 4 layers * (512 + 64) * 8192 * 2 bytes (single latent, f16).
+    let expected: u64 = 4 * (512 + 64) * 8192 * 2;
+    assert_eq!(kv, expected);
+    // Far under what a per-head GQA reading would give for 128 heads.
+    let as_gqa: u64 = 4 * 128 * 192 * 8192 * 4;
+    assert!(kv * 10 < as_gqa, "MLA must be ~10x under per-head: kv={kv}");
+  }
+
+  #[test]
+  fn kv_bytes_falls_back_to_mha_when_kv_heads_absent() {
+    // No head_count_kv at all → assume full MHA (head_count per layer).
+    let bytes = FixtureBuilder::new()
+      .with_arch("llama")
+      .with_block_count(4)
+      .with_head_count(16)
+      .with_embedding_length(16 * 128)
+      .build();
+    let h = parse(bytes);
+    let opts = EstimateOptions {
+      ctx_len: 512,
+      ..EstimateOptions::default()
+    };
+    let kv = kv_bytes(&h, Some("llama"), opts);
+    let expected: u64 = 2 * (4 * 16) * 128 * 512 * 2;
     assert_eq!(kv, expected);
   }
 

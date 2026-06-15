@@ -602,12 +602,8 @@ fn render_on_disk_one_line(disk: &OnDiskModel, peak_bytes: u64, hw: &HardwareSna
 }
 
 fn format_gib(bytes: u64) -> String {
-  let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-  if gib >= 10.0 {
-    format!("{gib:.0} GB")
-  } else {
-    format!("{gib:.1} GB")
-  }
+  // One canonical formatter shared across every hardware surface.
+  crate::init::detection::fmt_gib(bytes)
 }
 
 fn format_params(params: u64) -> &'static str {
@@ -752,7 +748,9 @@ mod tests {
       gpu: GpuInfo::AppleMetal {
         total_memory_bytes: bytes,
       },
-      vram_bytes: Some((bytes as f64 * 0.75) as u64),
+      // Raw unified total — matches `aggregate_vram_bytes` after the
+      // 0.75 OS/app headroom moved to `launch::headroom` (R16).
+      vram_bytes: Some(bytes),
       gpu_device_count: 1,
       ram_total_bytes: bytes,
       disk_free_bytes: 0,
