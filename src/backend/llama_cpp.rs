@@ -252,8 +252,11 @@ mod tests {
   fn minimal_params_emit_no_default_knobs_at_the_backend_layer() {
     // Parity contract (LLAMASTASH_BENCH_DISABLE_DEFAULTS): defaults are a
     // resolver concern; the backend must not inject any of its own. Empty
-    // knobs in => only the host/port/-m skeleton out.
-    let p = LaunchParams::new(PathBuf::from("/m/model.gguf"), LaunchMode::Chat);
+    // knobs in => only the host/port/-m skeleton out. `jinja` is one such
+    // default (factory-on, suppressed under bench parity), so the resolved
+    // params reaching the backend in parity mode carry `jinja = false`.
+    let mut p = LaunchParams::new(PathBuf::from("/m/model.gguf"), LaunchMode::Chat);
+    p.jinja = false;
     let spec = spec_of(LlamaCppBackend::new().prepare_launch(
       &p,
       41100,

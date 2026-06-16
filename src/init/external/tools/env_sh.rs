@@ -1,16 +1,21 @@
 //! Shell env writer — `~/.config/llamastash/env.sh`.
 //!
-//! Drops a sourceable POSIX-sh script with `OPENAI_BASE_URL` /
-//! `OPENAI_API_BASE` / `OPENAI_API_KEY` / `LLAMASTASH_API_KEY`. The
-//! one-liner the user adds to their rc (`source ~/.config/llamastash/env.sh`)
-//! is shell-agnostic at the call site — bash/zsh/dash/sh all
-//! source it cleanly.
+//! Drops a sourceable POSIX-sh script with the OpenAI-shape vars
+//! (`OPENAI_BASE_URL` / `OPENAI_API_BASE` / `OPENAI_API_KEY` /
+//! `LLAMASTASH_API_KEY`). The one-liner the user adds to their rc
+//! (`source ~/.config/llamastash/env.sh`) is shell-agnostic at the
+//! call site — bash/zsh/dash/sh all source it cleanly.
 //!
 //! Both `OPENAI_BASE_URL` (current OpenAI SDK name) and
 //! `OPENAI_API_BASE` (legacy / Aider) are set so a tool that reads
 //! either picks llamastash up. `LLAMASTASH_API_KEY` services the
 //! Zed (`<DISPLAY>_API_KEY` convention) and pi.dev
 //! (`$LLAMASTASH_API_KEY` config reference) integrations.
+//!
+//! Anthropic-shape clients (Claude Code) get their own sourceable
+//! snippet from the sibling [`super::claude_code`] writer — kept
+//! separate so a user can opt into one without the other, and so the
+//! Claude Code env never lands in that tool's global settings.
 //!
 //! Mode is `0o644` (not `0o600`) — no secrets are stored; the
 //! "api key" is the literal stub `llamastash`. Group/world-read
@@ -27,7 +32,7 @@ impl ToolPatcher for EnvSh {
     "env-sh"
   }
   fn display_name(&self) -> &'static str {
-    "Shell env"
+    "Shell env (OpenAI)"
   }
   fn default_path(&self) -> Option<PathBuf> {
     crate::util::paths::config_dir().map(|d| d.join("env.sh"))
@@ -88,6 +93,8 @@ mod tests {
     assert!(body.contains("export OPENAI_API_BASE=\"http://127.0.0.1:11435/v1\""));
     assert!(body.contains("export OPENAI_API_KEY=\"llamastash\""));
     assert!(body.contains("export LLAMASTASH_API_KEY=\"llamastash\""));
+    // OpenAI snippet stays OpenAI-only — no Anthropic vars leak in.
+    assert!(!body.contains("ANTHROPIC"));
     std::fs::remove_dir_all(&dir).ok();
   }
 

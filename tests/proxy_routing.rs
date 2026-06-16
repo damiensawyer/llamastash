@@ -393,6 +393,50 @@ async fn rerank_endpoint_forwards() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn anthropic_messages_endpoint_forwards() {
+  // The Anthropic `/v1/messages` surface rides the same byte-pure
+  // forward path as `/v1/chat/completions`: `body.model` resolves to a
+  // running supervisor and the response streams back untouched.
+  let dir = unique_temp("messages");
+  let catalog_path = "/fixture/qwen-chat.gguf";
+  let registry = SupervisorRegistry::new();
+  let (model, _port, _id) = spawn_fake_supervisor(catalog_path, &dir, LaunchMode::Chat).await;
+  let launch_id = registry.next_id();
+  registry.insert(launch_id, model.clone()).await;
+
+  let state = proxy_state_with(
+    vec![discovered(catalog_path, Some("qwen-chat"), "qwen3")],
+    registry,
+  )
+  .await;
+  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
+
+  let body = serde_json::json!({
+    "model": "qwen-chat",
+    "max_tokens": 16,
+    "messages": [{"role": "user", "content": "hi"}],
+  })
+  .to_string();
+
+  let (status, _headers, response_body) = http_post(addr, "/v1/messages", &body, &[]).await;
+  assert_eq!(status, 200);
+  let parsed: Value = serde_json::from_slice(&response_body).expect("json body");
+  assert_eq!(parsed["type"], "message");
+  // Pass-through contract: the upstream echoes the resolved model back.
+  assert_eq!(parsed["model"], "qwen-chat");
+
+  // `/v1/messages/count_tokens` rides the same path.
+  let (ct_status, _h, ct_body) = http_post(addr, "/v1/messages/count_tokens", &body, &[]).await;
+  assert_eq!(ct_status, 200);
+  let ct: Value = serde_json::from_slice(&ct_body).expect("json body");
+  assert!(ct["input_tokens"].is_number());
+
+  let _ = model.stop(Duration::from_secs(3)).await;
+  shutdown_listener(shutdown, listener_handle).await;
+  std::fs::remove_dir_all(&dir).ok();
+}
+
 // --- error paths --------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

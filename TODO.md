@@ -151,8 +151,7 @@ places.
 
 - [x] Error toasts should be in fail/error color (red). Audit for all error toasts today and any error toasts masquerading as success.
 - [x] split init into subcommands and compose
-- [ ] **Need brainstorm/plan**: **Anthropic `/v1/messages` compatibility shim** on top of the OpenAI-compat proxy. Most agents do OpenAI; Claude Code prefers Anthropic shape.
-- [ ] **Need brainstorm/plan**: Better strategy for finding the best models for a hardware (Topic A). Now builds on this work's partial-offload signal — with `--fit` the recommender's binary fits / doesn't-fit becomes a **tiered** ranking (fits fully on GPU > fits with partial CPU offload > CPU-only fallback) instead of a hard cutoff. Consumes the [auto-fit plan](docs/plans/2026-06-13-001-feat-auto-fit-launch-mode-and-hardware-truth-plan.md) outcome.
+- [x] ~~**Anthropic `/v1/messages` compatibility shim** on top of the OpenAI-compat proxy.~~ Shipped without a translation layer: llama-server speaks the Anthropic Messages API natively (b6961+), so the proxy byte-forwards `/v1/messages` + `/v1/messages/count_tokens` on the same path as the OpenAI routes. Adds `x-api-key` auth (`ANTHROPIC_BASE_URL` for Claude Code) and the `jinja` config key (default on) so tool calling works out of the box.
 - [x] ~~**Automatic gpu/cpu offload split**~~ — done via [docs/plans/2026-06-13-001-feat-auto-fit-launch-mode-and-hardware-truth-plan.md](docs/plans/2026-06-13-001-feat-auto-fit-launch-mode-and-hardware-truth-plan.md), but by **delegation**, not a llamastash-side solver: the launcher stops pinning `n_gpu_layers=99`, hands GPU/CPU placement + ctx sizing to llama-server's `--fit` (Auto, default-on), and keeps memory-budget authority via pre-spawn admission control (`src/launch/admission.rs`) so oversized / concurrent launches refuse instead of OOMing. The hardware-info-on-doctor/init and MEM/MEM\* UI cleanup landed in the same plan (U1–U3). Follow-ups below.
   - [x] **Auto-fit follow-ups** (deferred from the 2026-06-13 auto-fit plan, all explicitly out of its breaking-change scope):
     - [x] **Strict-fit enforcement** — `strict_fit` no longer a no-op for ctx; layer-offload still pending.
@@ -182,6 +181,7 @@ places.
 - [ ] Adopt external running loads (user forced via keybinding/cli)
 - [ ] MLX as a native peer backend (the generic `ModelIdentity` seam already supports it; would drop in alongside llama.cpp/Lemonade).
 - [ ] **TLS** for the LAN-exposed proxy (phase 2 — self-signed gen + cert paths); plaintext for now.
+- [ ] **Need brainstorm/plan**: Better strategy for finding the best models for a hardware (Topic A). Now builds on this work's partial-offload signal — with `--fit` the recommender's binary fits / doesn't-fit becomes a **tiered** ranking (fits fully on GPU > fits with partial CPU offload > CPU-only fallback) instead of a hard cutoff. Consumes the [auto-fit plan](docs/plans/2026-06-13-001-feat-auto-fit-launch-mode-and-hardware-truth-plan.md) outcome.
 - [ ] **Auto-fit follow-ups** (deferred from the 2026-06-13 auto-fit plan, all explicitly out of its breaking-change scope):
   - [ ] **Strict-fit enforcement** — `strict_fit` no longer a no-op for ctx; layer-offload still pending.
     - [ ] **layer-offload degradation** — "many layers on CPU" needs the `llama-fit-params` preview; `/props` exposes no layer/placement data. Blocked on the fit-preview follow-up below.

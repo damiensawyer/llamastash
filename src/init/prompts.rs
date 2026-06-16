@@ -256,12 +256,21 @@ pub fn outro(summary: &InitSummary) {
           tool.path.display()
         ));
       }
-      // env.sh writer dropped a sourceable script — surface the
-      // one-liner the user adds to their shell rc.
+      // The two sourceable-env writers each dropped a snippet — surface
+      // the command for whichever was applied. The OpenAI `env.sh` goes
+      // in the shell rc; the Claude Code snippet is sourced per-shell
+      // (kept out of Claude Code's global settings so bare `claude`
+      // stays on Anthropic).
       if let Some(env) = int.applied.iter().find(|t| t.id == "env-sh") {
         body.push_str(&format!(
           "\n  ▸ run: source {}  (add this line to your shell rc)",
           env.path.display()
+        ));
+      }
+      if let Some(cc) = int.applied.iter().find(|t| t.id == "claude-code") {
+        body.push_str(&format!(
+          "\n  ▸ Claude Code (local proxy, this shell only): source {} && claude",
+          cc.path.display()
         ));
       }
     }

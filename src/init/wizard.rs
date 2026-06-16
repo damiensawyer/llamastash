@@ -1222,17 +1222,20 @@ async fn run_integrations_step(
       return Ok(Some(IntegrationsSummary::default()));
     }
     // Validate ids up-front so a typo fails loudly rather than
-    // silently picking a subset.
-    let known: std::collections::HashSet<String> = crate::init::external::all_patchers()
+    // silently picking a subset. The known set is derived from the
+    // registered patchers (plus the `none` sentinel) so this never
+    // drifts as tools are added.
+    let known_ids: Vec<String> = crate::init::external::all_patchers()
       .iter()
       .map(|p| p.id().to_string())
       .collect();
     for id in &normalised {
-      if !known.contains(id) {
+      if !known_ids.iter().any(|k| k == id) {
         return Err(CliExit::new(
           INIT_ABORTED,
           format!(
-            "init: --integrations: unknown tool id `{id}` (known: opencode,aider,continue,zed,pi,env-sh,none)"
+            "init: --integrations: unknown tool id `{id}` (known: {}, none)",
+            known_ids.join(", ")
           ),
         ));
       }

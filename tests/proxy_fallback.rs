@@ -180,6 +180,7 @@ async fn build_state_with_fallback(
     default_launch_mode: Default::default(),
     fit_ctx_floor: 16384,
     strict_fit: false,
+    jinja_default: true,
   };
   let ctx = MethodContext::with_catalog(token, catalog)
     .with_supervisors(registry)

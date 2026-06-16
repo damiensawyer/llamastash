@@ -138,6 +138,10 @@ pub struct DaemonOptions {
   /// Strict-fit mode (R19) from `Config.strict_fit`
   /// (+ `LLAMASTASH_STRICT_FIT`).
   pub strict_fit: bool,
+  /// Pass `--jinja` to `llama-server` by default from `Config.jinja`
+  /// (factory `true`). Threaded into `LaunchEnv.jinja_default`; the
+  /// reasoning toggle still forces it on per-launch regardless.
+  pub jinja: bool,
 }
 
 impl DaemonOptions {
@@ -159,6 +163,7 @@ impl DaemonOptions {
       default_launch_mode: crate::config::DefaultLaunchMode::default(),
       fit_ctx_floor: crate::config::DEFAULT_FIT_CTX_FLOOR,
       strict_fit: false,
+      jinja: true,
       propagated_cli_args: Vec::new(),
       // Tests using `rooted_at` rarely care about the proxy; bind
       // attempts are best-effort so even a port-collision is silent
@@ -198,6 +203,7 @@ impl DaemonOptions {
       default_launch_mode: crate::config::DefaultLaunchMode::default(),
       fit_ctx_floor: crate::config::DEFAULT_FIT_CTX_FLOOR,
       strict_fit: false,
+      jinja: true,
       propagated_cli_args: Vec::new(),
       proxy: ProxyConfig::default(),
       lemonade: LemonadeConfig::default(),
@@ -421,6 +427,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
       default_launch_mode: opts.default_launch_mode,
       fit_ctx_floor: opts.fit_ctx_floor,
       strict_fit: opts.strict_fit,
+      jinja_default: opts.jinja,
     });
   } else {
     log::info!(

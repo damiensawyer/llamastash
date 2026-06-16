@@ -140,6 +140,21 @@ port_range:
 #           Env: LLAMASTASH_LLAMA_SERVER=PATH.
 # llama_server_path: /usr/local/bin/llama-server
 
+# Additional `llama-server` binaries to probe for launch devices.
+# Each is queried with `--list-devices` at daemon start; the union of
+# their devices (deduped by selector, first-listed wins) becomes the
+# launch device catalog — so one install can offer CUDA / ROCm /
+# Vulkan launches by pointing at the matching single-backend builds.
+# When `llama_server_path` is also set it's the default binary (auto /
+# no-device launches) and is prepended to this probe set. Binaries are
+# not labelled by backend here; the backend is inferred from each
+# binary's own device names (`CUDA0`, `ROCm0`, `Vulkan0`).
+#
+# Sources — CLI: (none) · Env: (none). Config-only.
+# llama_server_paths:
+#   - /opt/builds/cuda/llama-server
+#   - /opt/builds/rocm/llama-server
+
 # Per-launch health-probe timeout in seconds. 120s suits a typical
 # 7B–13B model on local NVMe; raise to ~600 for 70B+ on slow disks
 # if you hit `health probe timeout (last status 503)` on legitimate
@@ -177,6 +192,17 @@ fit_ctx_floor: 16384
 # Sources — CLI: (none) · Env: LLAMASTASH_STRICT_FIT=1.
 strict_fit: false
 
+# Pass `--jinja` to llama-server on every launch (default: true). The
+# Jinja chat-template engine is what makes tool calling / function
+# calling work on both the OpenAI `/v1/chat/completions` and the
+# Anthropic `/v1/messages` surfaces. Set false to fall back to
+# llama-server's built-in chat template (no per-launch `--jinja`).
+# The reasoning toggle still forces `--jinja` on for launches it
+# applies to, regardless of this setting.
+#
+# Sources — CLI: (none) · Env: (none, config-only).
+jinja: true
+
 # ─── Mouse focus ──────────────────────────────────────────────────
 #
 # Opt into terminal mouse capture. When enabled:
@@ -208,10 +234,14 @@ mouse_focus: false
 # `x-llamastash-fallback-reason`), and the manual smoke runbook live
 # in `docs/usage.md §Proxy (OpenAI-compatible listener)`.
 #
-# Auth posture: none. The listener binds 127.0.0.1 only and ignores
-# every authentication header — same-machine single-user threat
-# model. There is intentionally no `host`, `api_key`, `tls_*`, or
-# auth knob in v1; LAN exposure, auth, and TLS are deferred (R34).
+# Auth posture: loopback + keyless by default. With the factory
+# `host` (unset → 127.0.0.1) the listener binds loopback only and
+# ignores every authentication header — same-machine single-user
+# threat model. Setting `host` to a routable address opts the proxy
+# *data plane* into LAN exposure; that bind then requires `api_key`
+# (auto-generated and printed once if unset) unless `insecure_no_auth`
+# waives it. The control plane and `llama-server` children always stay
+# loopback. TLS is still deferred — LAN mode is plaintext.
 #
 # Unknown keys inside this block are rejected loudly (no
 # silently-tolerated typos).
@@ -291,6 +321,79 @@ proxy:
   #
   # Sources — CLI: (none) · Env: (none).
   idle_ttl_secs: 1800
+
+  # Address the proxy data plane binds. Comment out (the default) to
+  # keep the listener on 127.0.0.1 — loopback-only, the historical
+  # posture. Set a routable address (`0.0.0.0`, a specific NIC IP, or
+  # an IPv6 address like `::`) to expose the proxy on the LAN. A
+  # non-loopback bind requires `api_key` (auto-generated if unset)
+  # unless `insecure_no_auth: true`; otherwise the daemon refuses to
+  # bind the proxy (the daemon itself still runs). Only the proxy
+  # moves — the control plane and `llama-server` children stay
+  # loopback regardless.
+  #
+  # Sources — CLI: daemon start --proxy-host IP (beats env + config) ·
+  #           Env: LLAMASTASH_PROXY_HOST. Precedence: CLI > env > config.
+  # host: 0.0.0.0
+
+  # Bearer token required on the proxy's data routes (`/v1/*`,
+  # `/api/*`) when set. Comment out (the default) for no auth — the
+  # loopback-only, same-UID posture. Auto-provisioned, printed once,
+  # and persisted back here the first time a LAN bind is enabled
+  # without an existing key. Enforced whenever set, regardless of bind
+  # host (a key is honored even on loopback). Browsers may also send it
+  # as HTTP Basic (key as the password) for the `/ui` surface.
+  #
+  # Sources — CLI: (none) · Env: LLAMASTASH_PROXY_API_KEY (takes
+  #           precedence and is never written back to disk — for
+  #           containers / secret managers). Secret: never logged;
+  #           status reports only whether auth is enforced.
+  # api_key: sk-llamastash-...
+
+  # Allow a non-loopback `host` with no `api_key` (unauthenticated LAN
+  # proxy). Default false — the daemon refuses such a bind. Set true
+  # only when you deliberately want an open LAN proxy on a trusted,
+  # firewalled network. A loud warning prints either way when the proxy
+  # binds a non-loopback address.
+  #
+  # Sources — CLI: daemon start --insecure-no-auth ·
+  #           Env: LLAMASTASH_PROXY_INSECURE_NO_AUTH=1.
+  # (Config field, CLI flag, and env are OR-ed — any one waives auth.)
+  insecure_no_auth: false
+
+# ─── Lemonade (NPU / multi-engine backend) ────────────────────────
+#
+# Opt-in second backend for engines llama.cpp can't reach — NPU
+# inference on AMD Ryzen AI / XDNA, plus ROCm / ONNX / others — via
+# the Lemonade (`lemond`) managed umbrella. Experimental: behaviour
+# and these keys may change.
+#
+# Off by default: a standard install never runs Lemonade discovery or
+# routes to the umbrella. llamastash never installs `lemond` — you set
+# Lemonade up yourself and point us at it (see docs/lemonade-setup.md).
+#
+# Unknown keys inside this block are rejected loudly (no
+# silently-tolerated typos).
+lemonade:
+  # Turn the backend on. When true the daemon runs Lemonade discovery,
+  # supervises the `lemond` umbrella, and routes matching models to it.
+  #
+  # Sources — CLI: daemon start --lemonade ·
+  #           Env: LLAMASTASH_LEMONADE (1/true/yes/on).
+  # (Config field, CLI flag, and env are OR-ed — any one enables it.)
+  enabled: false
+
+  # Explicit path to the user's `lemond` binary. Comment out to fall
+  # back to a `lemond` (or `lemonade`) found on `$PATH`.
+  #
+  # Sources — CLI: (none) · Env: (none). Config-only.
+  # binary: /opt/lemonade/lemond
+
+  # Loopback port the `lemond` umbrella binds and that discovery probes
+  # for the model list. Defaults to Lemonade's own default (13305).
+  #
+  # Sources — CLI: (none) · Env: (none). Config-only.
+  port: 13305
 
 # ─── Keybindings ──────────────────────────────────────────────────
 #

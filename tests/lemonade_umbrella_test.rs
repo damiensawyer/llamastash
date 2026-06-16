@@ -187,6 +187,7 @@ async fn start_model_replies_promptly_and_records_preload_outcome() {
     default_launch_mode: Default::default(),
     fit_ctx_floor: 16384,
     strict_fit: false,
+    jinja_default: true,
   };
   let ctx = MethodContext::new(ShutdownToken::new())
     .with_supervisors(registry.clone())

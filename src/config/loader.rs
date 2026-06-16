@@ -129,10 +129,23 @@ pub struct Config {
   /// Env override: `LLAMASTASH_STRICT_FIT=1`.
   #[serde(default)]
   pub strict_fit: bool,
+  /// Pass `--jinja` to `llama-server` on every launch. Factory `true`:
+  /// the Jinja chat-template engine is what makes tool calling /
+  /// function calling work on both the OpenAI `/v1/chat/completions`
+  /// and the Anthropic `/v1/messages` surfaces. Set `false` to fall
+  /// back to llama-server's built-in chat template (no per-launch
+  /// `--jinja`). The reasoning toggle still forces `--jinja` on for the
+  /// launches it applies to, regardless of this setting.
+  #[serde(default = "default_true")]
+  pub jinja: bool,
 }
 
 fn default_fit_ctx_floor() -> u32 {
   DEFAULT_FIT_CTX_FLOOR
+}
+
+fn default_true() -> bool {
+  true
 }
 
 /// OpenAI-compat proxy router configuration.
@@ -605,6 +618,7 @@ impl Default for Config {
       default_launch_mode: DefaultLaunchMode::default(),
       fit_ctx_floor: DEFAULT_FIT_CTX_FLOOR,
       strict_fit: false,
+      jinja: true,
     }
   }
 }
@@ -1436,6 +1450,30 @@ proxy:
       "warning should name the unknown key, got: {warning}"
     );
     fs::remove_dir_all(dir).expect("temp test dir should be removed");
+  }
+
+  #[test]
+  fn shipped_example_config_parses_without_warning() {
+    // The shipped `config.example.yaml` is the user-facing source of
+    // truth for the config surface. Its active (uncommented) keys must
+    // deserialize into `Config` with no warning — this guards against
+    // the example drifting from the struct (a stale key under a
+    // `deny_unknown_fields` block like `proxy` / `lemonade`, a renamed
+    // field, or a malformed edit). Commented-out keys are inert here;
+    // they're covered by the per-section round-trip tests above.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.yaml");
+    let loaded = load_config_from_path(&path);
+    assert!(
+      loaded.warning.is_none(),
+      "config.example.yaml must parse cleanly, got: {:?}",
+      loaded.warning
+    );
+    // Spot-check that the active keys actually took effect (not just
+    // that an empty doc parsed): defaults the example pins explicitly.
+    assert!(loaded.config.proxy.enabled);
+    assert!(!loaded.config.proxy.insecure_no_auth);
+    assert!(!loaded.config.lemonade.enabled);
+    assert_eq!(loaded.config.lemonade.port, 13305);
   }
 
   #[test]

@@ -6,6 +6,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Added
 
+- Anthropic Messages API through the proxy — `/v1/messages` + `/v1/messages/count_tokens` forward to llama-server's native endpoints, so Claude Code and other Anthropic-shape clients attach via `ANTHROPIC_BASE_URL` (key sent as `x-api-key`). New `jinja` config key (default `true`) emits `--jinja` on every launch for tool calling; the reasoning toggle still forces it on.
 - Browser web UI through the proxy at `/ui` — opens the running model's stock llama.cpp UI on one port-stable origin, with a chooser when several run (and `/ui/switch` to re-pick) plus HTTP Basic auth (the proxy key as the password) for LAN access.
 - KV cache type validation now accepts llama-server's full standard set (`f32`, `f16`, `bf16`, `q8_0`, `q4_0`, `q4_1`, `iq4_nl`, `q5_0`, `q5_1`) and passes through custom identifiers from modified builds (e.g. `fp4`, `turbo_quant`) instead of rejecting them, so `--cache-type-k` / `--cache-type-v` and the TUI cache-type row no longer block non-standard quant types. (#29)
 

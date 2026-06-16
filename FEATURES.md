@@ -179,6 +179,10 @@ If the named model isn't running yet, the proxy auto-starts it. If the launch fa
 
 The full endpoint table, error envelopes, response headers, and config keys live in [`docs/usage.md` § Proxy (OpenAI-compatible listener)](docs/usage.md#proxy-openai-compatible-listener); the manual OpenCode + Pi smoke runbook is at [`tests/proxy_real_client_smoke.md`](https://github.com/llamastash/llamastash/blob/main/tests/proxy_real_client_smoke.md).
 
+### Anthropic Messages API (Claude Code)
+
+The same proxy forwards the Anthropic Messages API — `/v1/messages` and `/v1/messages/count_tokens` — straight to llama-server's native endpoints (llama-server converts to its OpenAI pipeline internally, so there's no body translation in llamastash). Point Claude Code, the Anthropic SDK, or any Anthropic-shape client at the proxy with `ANTHROPIC_BASE_URL=http://127.0.0.1:11435` (note: no `/v1` suffix — the SDK appends it). Anthropic clients send their key as `x-api-key`, which the proxy accepts alongside `Authorization: Bearer` and the browser `Basic` path. Tool calling needs the backend launched with `--jinja`, which is on by default (`jinja: true` in `config.yaml`; the reasoning toggle also forces it). `llamastash init` offers a **Claude Code** integration that drops a sourceable `claude-code.sh` with the `ANTHROPIC_*` exports, so `source …/claude-code.sh && claude` opts Claude Code into the local proxy per-shell — it never writes Claude Code's global `~/.claude/settings.json`, so bare `claude` stays on Anthropic. Compatibility is best-effort — it's llama-server's translation, not a full Anthropic spec — so verify your client end-to-end.
+
 ### Browser web UI
 
 `http://127.0.0.1:11435/ui/` serves the running model's stock llama.cpp web UI through the proxy on one port-stable origin, so you never have to look up the ephemeral backend port. Chat history persists across model switches because it's keyed to the browser origin, which never changes.

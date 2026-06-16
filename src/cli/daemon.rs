@@ -583,6 +583,10 @@ pub(crate) fn build_options(
   // Strict-fit is an opt-in: config OR `LLAMASTASH_STRICT_FIT=1` (the
   // strict-`"1"` env contract shared with the other boolean envs).
   opts.strict_fit = config.strict_fit || env_flag_truthy("LLAMASTASH_STRICT_FIT");
+  // `--jinja` default: config-only (factory `true`). No env override —
+  // unlike the opt-in booleans above this defaults *on*, and the
+  // `"1"`-truthy env contract can't express "force off".
+  opts.jinja = config.jinja;
   // Proxy: config layer first, then CLI / env overrides. Without this
   // thread-through the daemon silently ignored `proxy:` from the config
   // file and ran with `ProxyConfig::default()` regardless.
@@ -1129,6 +1133,7 @@ mod tests {
       default_launch_mode: DefaultLaunchMode::Inherited,
       fit_ctx_floor: 8192,
       strict_fit: true,
+      jinja: false,
       ..Config::default()
     };
     let opts = build_options(None, None, false, false, None, false, false, &cli, &config)
@@ -1136,6 +1141,8 @@ mod tests {
     assert_eq!(opts.default_launch_mode, DefaultLaunchMode::Inherited);
     assert_eq!(opts.fit_ctx_floor, 8192);
     assert!(opts.strict_fit);
+    // `jinja: false` from config threads through (factory default is true).
+    assert!(!opts.jinja);
   }
 
   #[test]

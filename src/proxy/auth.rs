@@ -99,16 +99,21 @@ impl ProxyAuth {
   }
 
   /// Whether the request is authorized: `true` when auth is disabled
-  /// or the `Authorization` header presents the configured key. Two
-  /// schemes are accepted, both compared in constant time:
+  /// or a recognised header presents the configured key. Three forms are
+  /// accepted, all compared in constant time:
   ///
-  /// - `Bearer <key>` — the API path (OpenAI SDKs, agent harnesses).
-  /// - `Basic base64(user:<key>)` — the browser path. A browser can't
-  ///   send a `Bearer` header by navigating, but it speaks Basic
-  ///   natively: on a `WWW-Authenticate: Basic` challenge it prompts,
-  ///   the user pastes the proxy key as the **password**, and the
-  ///   browser resends it per-origin. The username is ignored. This is
-  ///   what makes the `/ui` surface reachable over LAN with the same
+  /// - `x-api-key: <key>` — the Anthropic path. Claude Code and the
+  ///   Anthropic SDK send the key in this header (not `Authorization`)
+  ///   when pointed at the proxy via `ANTHROPIC_BASE_URL`. The whole
+  ///   header value is the key.
+  /// - `Authorization: Bearer <key>` — the API path (OpenAI SDKs, agent
+  ///   harnesses).
+  /// - `Authorization: Basic base64(user:<key>)` — the browser path. A
+  ///   browser can't send a `Bearer` header by navigating, but it speaks
+  ///   Basic natively: on a `WWW-Authenticate: Basic` challenge it
+  ///   prompts, the user pastes the proxy key as the **password**, and
+  ///   the browser resends it per-origin. The username is ignored. This
+  ///   is what makes the `/ui` surface reachable over LAN with the same
   ///   auto-provisioned key (plan §"LAN /ui + browser auth").
   ///
   /// `false` on a missing / malformed / wrong credential.
@@ -116,6 +121,14 @@ impl ProxyAuth {
     let Some(key) = &self.key else {
       return true;
     };
+    // Anthropic clients authenticate with `x-api-key`; the header value
+    // is the bare key. Check it first, then fall through to the
+    // `Authorization` schemes so a request carrying both still works.
+    if let Some(api_key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+      if key.verify(api_key.trim()) {
+        return true;
+      }
+    }
     let Some(value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
       return false;
     };
@@ -207,6 +220,36 @@ mod tests {
     assert!(!auth.check(&HeaderMap::new()));
     // A non-base64 `Basic` value is malformed → reject (no panic).
     assert!(!auth.check(&headers_with("Basic sk-llamastash-k3y")));
+  }
+
+  #[test]
+  fn enabled_auth_accepts_anthropic_x_api_key() {
+    // Anthropic path: Claude Code / the Anthropic SDK send the bare key
+    // in `x-api-key`, not `Authorization`.
+    let auth = ProxyAuth::new(Some("sk-llamastash-k3y".into()));
+    let mut ok = HeaderMap::new();
+    ok.insert("x-api-key", HeaderValue::from_static("sk-llamastash-k3y"));
+    assert!(auth.check(&ok));
+    // Surrounding whitespace is tolerated.
+    let mut padded = HeaderMap::new();
+    padded.insert(
+      "x-api-key",
+      HeaderValue::from_static("  sk-llamastash-k3y  "),
+    );
+    assert!(auth.check(&padded));
+    // Wrong key rejects.
+    let mut bad = HeaderMap::new();
+    bad.insert("x-api-key", HeaderValue::from_static("nope"));
+    assert!(!auth.check(&bad));
+    // A wrong `x-api-key` still lets a correct `Authorization` pass
+    // (both-headers request).
+    let mut both = HeaderMap::new();
+    both.insert("x-api-key", HeaderValue::from_static("nope"));
+    both.insert(
+      AUTHORIZATION,
+      HeaderValue::from_static("Bearer sk-llamastash-k3y"),
+    );
+    assert!(auth.check(&both));
   }
 
   #[test]

@@ -363,13 +363,13 @@ These are deliberate scope boundaries documented elsewhere; the manual
 plan calls them out so a user-reported "doesn't work" can be triaged
 fast.
 
+**Claude Code CLI and Anthropic SDK clients now work** — point them at the proxy with `ANTHROPIC_BASE_URL` (key as `x-api-key`). The proxy forwards `/v1/messages` + `/v1/messages/count_tokens` to llama-server's native Anthropic endpoints; tool calling needs `--jinja` (on by default via `jinja: true`). See [`docs/usage.md §Anthropic-shape clients`](../docs/usage.md).
+
 | Client | Status | Why | Tracked |
 |---|---|---|---|
-| **Claude Code CLI** | Won't work OOB | Speaks Anthropic `/v1/messages`; llamastash speaks OpenAI `/v1/chat/completions`. No body translation. | [`TODO.md`](../TODO.md) §R2 — "Anthropic API compatibility" |
 | **GitHub Copilot** (VSCode / IDEs) | Cannot be redirected | Closed-source binary speaks only to `api.githubcopilot.com`; no base-URL override exists. | Not tracked — out of scope |
 | **GitHub Copilot CLI (`gh copilot`)** | Cannot be redirected | Same reason. | Not tracked |
 | **Ollama-shape *inference* clients** (Continue with Ollama provider, `ollama-python` `.chat()`, anything that hits `/api/chat`, `/api/generate`, `/api/embed`) | Returns 404 | Tier 2 inference deferred; only Tier 1 discovery ships. | [`TODO.md`](../TODO.md) §R2 — "Ollama-compat Tier 2" |
-| **Anthropic SDK clients** | Won't work OOB | Same shape mismatch as Claude Code. | [`TODO.md`](../TODO.md) §R2 |
 
 If a user wants Claude Code → llamastash today, the realistic option is
 a community sidecar (like `claude-code-router`) that translates

@@ -210,6 +210,10 @@ pub struct LaunchEnv {
   /// Strict-fit mode (R19). Consumed by the admission/strict path in
   /// U8; carried here so it rides the same launch env.
   pub strict_fit: bool,
+  /// Default for `LaunchParams.jinja` (from `Config.jinja`, factory
+  /// `true`). Projected onto every launch's `jinja` field below; the
+  /// reasoning toggle still forces `--jinja` on regardless.
+  pub jinja_default: bool,
 }
 
 impl MethodContext {
@@ -1632,6 +1636,13 @@ pub(crate) async fn start_model_inner(
     .set_value()
     .copied()
     .unwrap_or(false);
+  // `--jinja` default comes from config; `compose` ORs in reasoning so
+  // the reasoning toggle still forces it even when this is `false`.
+  // `--jinja` is a llamastash default, so the bench parity escape hatch
+  // (`LLAMASTASH_BENCH_DISABLE_DEFAULTS`) suppresses it too — keeps
+  // `start` byte-identical to raw `llama-server` for Suite-A overhead.
+  launch_params.jinja =
+    env.jinja_default && !crate::launch::params::bench_disable_defaults_from_env();
   launch_params.knobs = resolved.knobs;
   // Close the `knobs.ctx` bypass of `MAX_CTX_TOKENS` (the early check
   // only saw the top-level `parsed.ctx`): validate the *resolved* ctx,
@@ -1928,6 +1939,12 @@ pub(crate) async fn start_model_inner(
   persist_params.knobs = user_knobs;
   persist_params.ctx = None;
   persist_params.reasoning = false;
+  // `jinja` is config-derived (set from `Config.jinja` after resolution)
+  // and re-read from config on every launch — `resolve_layered` never
+  // consults the persisted value. So the clone's resolved value is kept
+  // as-is: it makes the `last-params` view report what this launch
+  // actually used (honest for `jinja: false`) without ever freezing a
+  // value, since the next launch overwrites it from the live config.
   spawn_last_params_recorder(
     ctx.state.clone(),
     model.clone(),
@@ -2543,6 +2560,7 @@ fn launch_params_row(p: &LaunchParams) -> Value {
     "ctx": p.ctx,
     "port": p.port,
     "reasoning": p.reasoning,
+    "jinja": p.jinja,
     "knobs": &p.knobs,
     "extras": p.extras.iter().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>(),
   })
@@ -3183,6 +3201,7 @@ mod tests {
       default_launch_mode: Default::default(),
       fit_ctx_floor: 16384,
       strict_fit: false,
+      jinja_default: true,
     };
 
     // Lemonade enabled but pointed at a binary that does not exist. The

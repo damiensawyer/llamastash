@@ -3,12 +3,16 @@
 //! `(method, path)` for the routes the proxy answers, mirroring the
 //! style of [`crate::ipc::methods::dispatch_request`].
 //!
-//! The route table covers two surfaces:
+//! The route table covers three surfaces:
 //!
 //! - **OpenAI compat** (`/v1/...`): `/v1/models`, `/v1/chat/completions`,
 //!   `/v1/completions`, `/v1/embeddings`, `/v1/rerank`. This is the
 //!   primary surface — any agent that speaks the OpenAI REST shape
 //!   drives every discovered model through one stable URL here.
+//! - **Anthropic compat** (`/v1/messages`, `/v1/messages/count_tokens`):
+//!   byte-piped to llama-server's native Anthropic Messages endpoints
+//!   (it translates to its OpenAI pipeline internally), so Claude Code
+//!   and other Anthropic-shape clients attach via `ANTHROPIC_BASE_URL`.
 //! - **Ollama-discovery compat** (`/api/...`, Tier 1): `/api/tags`,
 //!   `/api/version`, `/api/ps`, `/api/show`. Read-only projections
 //!   of the catalog + supervisor registry into the Ollama wire shape,
@@ -99,6 +103,15 @@ pub async fn route(state: Arc<ProxyState>, req: Request<Incoming>) -> ProxyRespo
     (&Method::POST, "/v1/completions") => forward_request(state, req).await,
     (&Method::POST, "/v1/embeddings") => forward_request(state, req).await,
     (&Method::POST, "/v1/rerank") => forward_request(state, req).await,
+    // Anthropic Messages API. llama-server (b6961+) speaks `/v1/messages`
+    // + `/v1/messages/count_tokens` natively, translating to its OpenAI
+    // pipeline internally, so the proxy just byte-pipes them like any
+    // other `/v1` route — same body-`model` resolution, same streaming.
+    // Tool calling on this surface needs the backend launched with
+    // `--jinja` (config `jinja: true` by default). Lets Claude Code and
+    // other Anthropic-shape clients attach via `ANTHROPIC_BASE_URL`.
+    (&Method::POST, "/v1/messages") => forward_request(state, req).await,
+    (&Method::POST, "/v1/messages/count_tokens") => forward_request(state, req).await,
     // Ollama-compat Tier 1: discovery-only endpoints.
     (&Method::GET, "/api/tags") => ollama_tags(state).await,
     (&Method::GET, "/api/version") => ollama_version(),

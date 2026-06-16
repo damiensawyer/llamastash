@@ -1,9 +1,11 @@
 //! Minimal stand-in for `llama-server` used by Unit 5's integration
 //! tests. Hand-rolls just enough HTTP/1.1 over `tokio::TcpListener`
 //! to answer `GET /health`, `GET /v1/models`, `POST
-//! /v1/chat/completions` (streamed SSE), `POST /v1/embeddings`, and
-//! `POST /v1/rerank`. CI doesn't have a real `llama-server`, so
-//! every supervisor-lifecycle test runs against this binary.
+//! /v1/chat/completions` (streamed SSE), `POST /v1/embeddings`,
+//! `POST /v1/rerank`, and the Anthropic `POST /v1/messages` +
+//! `POST /v1/messages/count_tokens`. CI doesn't have a real
+//! `llama-server`, so every supervisor-lifecycle test runs against
+//! this binary.
 //!
 //! Flags accepted (matching real `llama-server` enough for the
 //! supervisor's argv to be portable):
@@ -376,6 +378,40 @@ async fn handle(
       let body = serde_json::json!({
         "results": [{"index": 0, "relevance_score": 0.42}],
       });
+      write_response(
+        &mut wr,
+        200,
+        "application/json",
+        serde_json::to_vec(&body)?.as_slice(),
+      )
+      .await?;
+    }
+    ("POST", "/v1/messages") => {
+      // Anthropic Messages API. Real llama-server (b6961+) answers this
+      // natively. Echo `body.model` into the response so a proxy forward
+      // test can assert model resolution + byte-pure pass-through, same
+      // contract as the chat-completions arm above.
+      let body_text = std::str::from_utf8(&body).unwrap_or("");
+      let echoed_model = extract_body_model(body_text).unwrap_or_else(|| args.model_path.clone());
+      let body = serde_json::json!({
+        "id": "msg_fake",
+        "type": "message",
+        "role": "assistant",
+        "model": echoed_model,
+        "content": [{"type": "text", "text": "hi"}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+      });
+      write_response(
+        &mut wr,
+        200,
+        "application/json",
+        serde_json::to_vec(&body)?.as_slice(),
+      )
+      .await?;
+    }
+    ("POST", "/v1/messages/count_tokens") => {
+      let body = serde_json::json!({ "input_tokens": 2 });
       write_response(
         &mut wr,
         200,

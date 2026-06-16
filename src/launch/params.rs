@@ -2,8 +2,9 @@
 //!
 //! Order matters: `--host 127.0.0.1` and `--port` come first so the
 //! command line reads well in logs; then `-m <path>`, then mode flags
-//! (`--embeddings` / `--reranking`), then reasoning bundle
-//! (`--jinja --reasoning-format deepseek`), then `-c <ctx>`, then
+//! (`--embeddings` / `--reranking`), then `--jinja` (config default or
+//! forced by reasoning) and the reasoning `--reasoning-format deepseek`
+//! pair, then `-c <ctx>`, then
 //! the typed knobs in canonical order, then any user-supplied
 //! `extras` argv tail. `extras` land *last* so they always trump
 //! everything else — that's the contract documented on the TUI's
@@ -197,6 +198,15 @@ pub struct LaunchParams {
   /// May differ from `knobs.reasoning`, which keeps the tri-state
   /// `Option<bool>` the user actually supplied.
   pub reasoning: bool,
+  /// Emit `--jinja` on this launch. Resolved from `Config.jinja`
+  /// (factory `true`) by `start_model`; `compose` emits `--jinja`
+  /// whenever this is `true` **or** `reasoning` is on (reasoning forces
+  /// the Jinja engine even if the config default is `false`). `--jinja`
+  /// is what enables tool calling on both the OpenAI and Anthropic
+  /// surfaces. `#[serde(default)]`-true keeps older `state.json` rows
+  /// loading as jinja-on, matching the factory default.
+  #[serde(default = "default_jinja")]
+  pub jinja: bool,
   /// Resolved typed knobs — argvified before `extras` in canonical
   /// flag order. `None`-fields are skipped (no flag emitted).
   #[serde(default)]
@@ -224,6 +234,14 @@ pub struct LaunchParams {
   pub backend: BackendChoice,
 }
 
+/// Serde default for [`LaunchParams::jinja`] — factory `true`, mirroring
+/// `Config.jinja`, so a `state.json` row written before the field existed
+/// loads as jinja-on rather than silently flipping a returning user's
+/// launches to the built-in chat template.
+fn default_jinja() -> bool {
+  true
+}
+
 impl LaunchParams {
   pub fn new(model_path: PathBuf, mode: LaunchMode) -> Self {
     Self {
@@ -233,6 +251,7 @@ impl LaunchParams {
       port: None,
       fit_ctx_floor: None,
       reasoning: false,
+      jinja: true,
       knobs: TypedKnobs::default(),
       extras: Vec::new(),
       mmproj_path: None,
@@ -249,8 +268,9 @@ impl LaunchParams {
 /// `Ctx` and `Reasoning` are deliberately skipped here — they live
 /// in `TypedKnobs` for the resolver chain and the editor's source
 /// chips, but `compose` emits them inline (ctx → `-c <N>`, reasoning
-/// → `--jinja --reasoning-format deepseek`) so their argv order and
-/// bundle shape stay distinct from the other knobs.
+/// → `--reasoning-format deepseek`, plus the `--jinja` it shares with
+/// the config default) so their argv order stays distinct from the
+/// other knobs.
 ///
 /// `Device` is also skipped here: `knobs.device` holds a real
 /// `llama-server` device selector (`Vulkan0`, `CUDA0`, `ROCm0`) and
@@ -607,7 +627,7 @@ pub fn set_field_auto(knobs: &mut TypedKnobs, field: KnobField) {
 /// existing `LLAMASTASH_ASSUME_NON_TTY` pattern in
 /// `src/init/prompts.rs` so users have a consistent contract across
 /// the bench-internal env vars.
-fn bench_disable_defaults_from_env() -> bool {
+pub(crate) fn bench_disable_defaults_from_env() -> bool {
   std::env::var_os("LLAMASTASH_BENCH_DISABLE_DEFAULTS").is_some_and(|v| v == "1")
 }
 
@@ -690,8 +710,14 @@ pub fn compose(params: &LaunchParams, allocated_port: u16) -> Vec<OsString> {
     LaunchMode::Embedding => argv.push("--embeddings".into()),
     LaunchMode::Rerank => argv.push("--reranking".into()),
   }
-  if params.reasoning {
+  // `--jinja` rides on the config default (`params.jinja`) *or* the
+  // reasoning toggle — reasoning needs the Jinja chat template, so it
+  // forces the flag on even when the config default is `false`. Emitted
+  // once; reasoning then adds its `--reasoning-format deepseek` pair.
+  if params.jinja || params.reasoning {
     argv.push("--jinja".into());
+  }
+  if params.reasoning {
     argv.push("--reasoning-format".into());
     argv.push("deepseek".into());
   }
@@ -884,6 +910,38 @@ mod tests {
     p.reasoning = true;
     let argv = strs(&compose(&p, 41100));
     assert!(argv.iter().any(|a| a == "--jinja"));
+    let i = argv.iter().position(|a| a == "--reasoning-format").unwrap();
+    assert_eq!(argv[i + 1], "deepseek");
+  }
+
+  #[test]
+  fn jinja_on_by_default_emits_jinja_without_reasoning() {
+    // Factory default: `--jinja` ships even with reasoning off, and no
+    // `--reasoning-format` rides along.
+    let p = base_params();
+    assert!(p.jinja, "LaunchParams::new defaults jinja on");
+    let argv = strs(&compose(&p, 41100));
+    assert_eq!(argv.iter().filter(|a| *a == "--jinja").count(), 1);
+    assert!(!argv.iter().any(|a| a == "--reasoning-format"));
+  }
+
+  #[test]
+  fn jinja_disabled_omits_the_flag() {
+    let mut p = base_params();
+    p.jinja = false;
+    let argv = strs(&compose(&p, 41100));
+    assert!(!argv.iter().any(|a| a == "--jinja"));
+  }
+
+  #[test]
+  fn reasoning_forces_jinja_even_when_config_disables_it() {
+    // The reasoning toggle needs the Jinja engine, so it wins over a
+    // `jinja: false` config — and `--jinja` is still emitted exactly once.
+    let mut p = base_params();
+    p.jinja = false;
+    p.reasoning = true;
+    let argv = strs(&compose(&p, 41100));
+    assert_eq!(argv.iter().filter(|a| *a == "--jinja").count(), 1);
     let i = argv.iter().position(|a| a == "--reasoning-format").unwrap();
     assert_eq!(argv[i + 1], "deepseek");
   }
