@@ -1939,10 +1939,12 @@ pub(crate) async fn start_model_inner(
   persist_params.knobs = user_knobs;
   persist_params.ctx = None;
   persist_params.reasoning = false;
-  // `jinja` is config-derived resolver output, not per-model user
-  // intent — reset to the factory default so next launch re-reads the
-  // live `Config.jinja` rather than freezing this run's value.
-  persist_params.jinja = true;
+  // `jinja` is config-derived (set from `Config.jinja` after resolution)
+  // and re-read from config on every launch — `resolve_layered` never
+  // consults the persisted value. So the clone's resolved value is kept
+  // as-is: it makes the `last-params` view report what this launch
+  // actually used (honest for `jinja: false`) without ever freezing a
+  // value, since the next launch overwrites it from the live config.
   spawn_last_params_recorder(
     ctx.state.clone(),
     model.clone(),
