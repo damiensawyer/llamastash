@@ -4,6 +4,43 @@ set -e
 
 echo "Running pre-push hook:"
 
+# Every task below is Rust toolchain work. Inspect the commits actually being
+# pushed (git feeds "<local_ref> <local_sha> <remote_ref> <remote_sha>" lines
+# on stdin) and skip the checks unless they touch Rust-relevant files: *.rs
+# plus the build/lint/format config that affects fmt/clippy/doc/test. A
+# docs-only push shouldn't pay for a full test run.
+RUST_RE='\.rs$|(^|/)Cargo\.(toml|lock)$|(^|/)(rustfmt|clippy)\.toml$|(^|/)\.cargo/'
+
+is_zero() { case "$1" in *[!0]*) return 1 ;; *) return 0 ;; esac; }
+
+changed=""
+saw_ref=0
+force_run=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  saw_ref=1
+  if is_zero "$local_sha"; then
+    continue                                   # deleting a remote ref
+  fi
+  if is_zero "$remote_sha"; then
+    commits=$(git rev-list "$local_sha" --not --remotes) || force_run=1
+  else
+    commits=$(git rev-list "$remote_sha..$local_sha") || force_run=1
+  fi
+  for c in $commits; do
+    files=$(git diff-tree --no-commit-id --name-only -r "$c")
+    changed=$(printf '%s\n%s' "$changed" "$files")
+  done
+done
+
+if [ "$saw_ref" -eq 0 ] || [ "$force_run" -eq 1 ]; then
+  echo "Could not determine pushed changes — running full checks."
+elif printf '%s\n' "$changed" | grep -Eq "$RUST_RE"; then
+  echo "Rust changes detected in pushed commits — running checks."
+else
+  echo "No Rust changes in pushed commits — skipping fmt-check/lint/doc/test."
+  exit 0
+fi
+
 echo "Executing: cargo fmt --all -- --check"
 cargo fmt --all -- --check
 

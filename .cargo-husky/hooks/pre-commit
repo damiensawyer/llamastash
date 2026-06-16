@@ -4,10 +4,21 @@ set -e
 
 echo "Running pre-commit hook:"
 
+# Every task below is Rust toolchain work. Skip them entirely unless the
+# staged change touches Rust-relevant files: *.rs plus the build/lint/format
+# config that affects fmt/clippy/doc.
+RUST_RE='\.rs$|(^|/)Cargo\.(toml|lock)$|(^|/)(rustfmt|clippy)\.toml$|(^|/)\.cargo/'
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+if ! printf '%s\n' "$STAGED" | grep -Eq "$RUST_RE"; then
+  echo "No Rust changes staged — skipping fmt/lint/doc."
+  exit 0
+fi
+
 echo "Executing: cargo fmt --all"
 # Capture staged .rs files *before* formatting so we only re-add what
 # was already in the index — unstaged .rs changes stay unstaged.
-STAGED_RS=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.rs$' || true)
+STAGED_RS=$(printf '%s\n' "$STAGED" | grep '\.rs$' || true)
 cargo fmt --all
 if [ -n "$STAGED_RS" ]; then
   echo "$STAGED_RS" | xargs git add
