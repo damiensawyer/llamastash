@@ -1,0 +1,139 @@
+comment: LlamaStash README/site demo — the init wizard driven interactively,
+comment: then a TUI tour, with the Lemonade (NPU) backend enabled so the dashboard
+comment: shows both engines.
+comment: Flow: `llamastash init` answered by hand (existing llama-server, a small
+comment: model pasted by HF id), then "Launch the TUI now?" hands straight into the
+comment: TUI: launch gemma-4-E2B on llama.cpp, start qwen3.5-4b-FLM on the Lemonade
+comment: NPU (running 3, dual backend), HuggingFace pull, theme cycle, chat gemma.
+comment:
+comment: Prereq: a daemon started with the Lemonade backend, e.g.
+comment:   target/release/llamastash daemon start --lemonade   # spawns lemond on :13305
+comment:
+comment: Capture (release binary symlinked as `llamastash` on PATH, 131x34 to match
+comment: assets/tui.gif, against the real daemon for a rich dashboard):
+comment:   ln -sf "$PWD/target/release/llamastash" /tmp/ls-demo-bin/llamastash
+comment:   PATH=/tmp/ls-demo-bin:$PATH /tmp/ls-tui-venv/bin/python \
+comment:     scripts/tui/harness.py scripts/tui/demo.prog /tmp/ls-demo-out \
+comment:     /usr/bin/zsh -i --cast /tmp/ls-demo-out/demo.raw.cast --cols 131 --rows 34
+comment: Then trim idle gaps and render:
+comment:   scripts/tui/trim_cast.py demo.raw.cast assets/demo.cast --end <T>
+comment:   agg --font-size 16 assets/demo.cast assets/tui.gif
+
+# ── let the shell paint its prompt, then start the wizard ──
+wait:2.5
+type:llamastash init
+key:enter
+wait:3
+
+# ── Install method: pick "Use existing binary" (3rd option) ──
+key:down
+wait:0.5
+key:down
+wait:0.7
+key:enter
+wait:2.5
+
+# ── Pick a model: walk down to "Paste an HF repo id…" (below the 10 picks) ──
+key:down
+wait:0.25
+key:down
+wait:0.25
+key:down
+wait:0.25
+key:down
+wait:0.25
+key:down
+wait:0.25
+key:down
+wait:0.25
+key:down
+wait:0.25
+key:down
+wait:0.25
+key:down
+wait:0.25
+key:down
+wait:0.6
+key:enter
+wait:1.5
+
+# ── paste a small model's HF id (single file via :filename, so it's quick) ──
+type:lmstudio-community/gemma-4-E2B-it-GGUF:gemma-4-E2B-it-Q4_K_M.gguf
+wait:0.8
+key:enter
+wait:4
+
+# ── Write config? → Yes ──
+key:enter
+wait:1.5
+
+# ── Patch AI tool configs? → leave all unchecked, just confirm ──
+key:enter
+wait:7
+
+# ── Launch the TUI now? → Yes (hands straight into the TUI) ──
+key:enter
+wait:5
+
+# ── launch gemma-4-E2B on llama.cpp (Home→lemond, ↓↓→gemma in Favorites; no filter) ──
+key:home
+wait:0.4
+key:down
+wait:0.4
+key:down
+wait:0.7
+key:enter
+wait:1.5
+key:enter
+wait:11
+
+# ── chat gemma right after launching it (it is auto-selected; r collapses reasoning) ──
+type:C
+wait:1.5
+type:r
+wait:0.5
+type:e
+type:Hello
+wait:1.2
+key:enter
+wait:14
+
+# ── leave the chat, pull from HuggingFace: search by name, show results ──
+key:esc
+wait:0.5
+key:esc
+wait:0.5
+key:esc
+wait:1
+type:P
+wait:2
+type:Qwen3
+wait:3.5
+key:esc
+wait:0.5
+key:esc
+wait:0.5
+key:esc
+wait:1.2
+
+# ── cycle through all five themes, landing back on Macchiato ──
+type:t
+wait:1.2
+type:t
+wait:1.2
+type:t
+wait:1.2
+type:t
+wait:1.2
+type:t
+wait:1.5
+
+# ── finally, jump to the bottom and start the Lemonade NPU model (dual backend) ──
+key:end
+wait:1
+key:enter
+wait:1.5
+key:enter
+wait:9
+# end on the Lemonade model coming up (cast trimmed here; harness tears the TUI down)
+wait:2
