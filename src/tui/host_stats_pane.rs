@@ -30,6 +30,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::daemon::host_metrics::HostMetricsSnapshot;
+use crate::gpu::ClassSource;
 use crate::theme::Palette;
 use crate::tui::fmt::format_bytes_pair;
 
@@ -205,21 +206,42 @@ fn gpu_device_rows<'a>(
 
 /// Effective denominator for the VRAM gauge.
 ///
-/// Discrete cards own a dedicated pool, so the gauge is `used / total`.
-/// On unified memory the GPU and CPU share one physical pool: the GPU
-/// can only reach what the rest of the system isn't already holding, so
-/// the honest ceiling is `pool_total − (ram_used − gpu_in_shared)` — the
-/// pool minus *non-GPU* RAM use. Subtracting the bare `ram_used` would
-/// double-count the GPU's own bytes (sysinfo already folds the GTT
-/// allocation into `ram_used`), so we add `gpu_in_shared` back first.
+/// UMA pools that physically share one pool with system RAM — Linux
+/// `amdgpu` GTT (`CarveSignature`) and Windows DXGI (`ExplicitDxgiUma`) —
+/// can only reach their pool budget while that much RAM is actually free.
+/// So the reachable ceiling is:
+///
+/// ```text
+/// min(pool_total, ram_total − non_gpu_ram_use)
+/// ```
+///
+/// - Plenty of free RAM → the full pool budget (matches `doctor` and
+///   `llama-server --list-devices`).
+/// - RAM pressure climbs past the free-RAM headroom → drops toward
+///   `ram_total − non_gpu_ram_use`.
+///
+/// `non_gpu_ram_use` adds the GPU's own shared bytes back before
+/// subtracting, because sysinfo already folds the shared allocation into
+/// `ram_used` (double-counting it would shrink the ceiling twice). On
+/// Linux the pool ≈ total RAM, so the `min` reduces to the old
+/// `pool − non_gpu_ram_use`; on Windows the pool is ~half RAM, so the
+/// `min` keeps the gauge at the full pool until RAM genuinely fills.
 /// Clamped to `>= used` so the gauge never reads over 100%.
+///
+/// Discrete cards (separate pool) and OS-managed Apple unified memory
+/// (no `uma_class_source`) keep `used / total`.
 fn vram_denominator(host: &HostMetricsSnapshot, used: u64, total: u64) -> u64 {
-  if !host.unified {
+  let ram_shared_uma = matches!(
+    host.uma_class_source,
+    Some(ClassSource::CarveSignature) | Some(ClassSource::ExplicitDxgiUma)
+  );
+  if !ram_shared_uma {
     return total;
   }
   let gpu_in_shared = host.uma_shared_used_bytes.unwrap_or(used);
   let other_ram = host.ram_used_bytes.saturating_sub(gpu_in_shared);
-  total.saturating_sub(other_ram).max(used)
+  let reachable = host.ram_total_bytes.saturating_sub(other_ram);
+  total.min(reachable).max(used)
 }
 
 fn vram_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palette) -> Line<'a> {
@@ -730,6 +752,7 @@ mod tests {
       uma_shared_total_bytes: Some(123 * GIB),
       uma_shared_used_bytes: Some(43 * GIB),
       unified: true,
+      uma_class_source: Some(ClassSource::CarveSignature),
       ..Default::default()
     };
     let rows = render_lines(snap);
@@ -741,6 +764,64 @@ mod tests {
     assert!(
       !vram_row.contains("43/53G"),
       "must not double-count the GPU's own bytes (pool − ram_used), got: {vram_row:?}"
+    );
+  }
+
+  #[test]
+  fn vram_gauge_shows_full_pool_on_windows_uma_when_ram_free() {
+    // Windows DXGI UMA with ample free RAM: the GPU can reach its full
+    // shared-memory budget, so the gauge reads the pool (64), matching
+    // `doctor` / `--list-devices`. Regression for the host pane showing
+    // `0.0/42G` (the old `pool − ram_used` subtraction) when 107 GiB is
+    // free. min(64, 127−21) = 64.
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let snap = HostMetricsSnapshot {
+      cpu_pct: 5.0,
+      ram_used_bytes: 21 * GIB,
+      ram_total_bytes: 127 * GIB,
+      gpu_backend: "amd".into(),
+      gpu_mem_used_bytes: Some(0),
+      gpu_mem_total_bytes: Some(64 * GIB),
+      gpu_device_count: 1,
+      uma_shared_total_bytes: Some(63 * GIB),
+      uma_shared_used_bytes: Some(0),
+      unified: true,
+      uma_class_source: Some(ClassSource::ExplicitDxgiUma),
+      ..Default::default()
+    };
+    let rows = render_lines(snap);
+    let vram_row = rows.iter().find(|r| r.contains("VRAM")).unwrap();
+    assert!(
+      vram_row.contains("0.0/64G"),
+      "Windows UMA gauge should show the full pool when RAM is free, got: {vram_row:?}"
+    );
+  }
+
+  #[test]
+  fn vram_gauge_clamps_on_windows_uma_under_ram_pressure() {
+    // Windows DXGI UMA when the system has eaten most of RAM: the shared
+    // pool competes with that use, so the reachable ceiling drops below
+    // the pool. 100 GiB used, 0 of it the GPU's → min(64, 127−100) = 27.
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let snap = HostMetricsSnapshot {
+      cpu_pct: 5.0,
+      ram_used_bytes: 100 * GIB,
+      ram_total_bytes: 127 * GIB,
+      gpu_backend: "amd".into(),
+      gpu_mem_used_bytes: Some(0),
+      gpu_mem_total_bytes: Some(64 * GIB),
+      gpu_device_count: 1,
+      uma_shared_total_bytes: Some(63 * GIB),
+      uma_shared_used_bytes: Some(0),
+      unified: true,
+      uma_class_source: Some(ClassSource::ExplicitDxgiUma),
+      ..Default::default()
+    };
+    let rows = render_lines(snap);
+    let vram_row = rows.iter().find(|r| r.contains("VRAM")).unwrap();
+    assert!(
+      vram_row.contains("0.0/27G"),
+      "Windows UMA gauge should clamp to free-RAM headroom under pressure, got: {vram_row:?}"
     );
   }
 

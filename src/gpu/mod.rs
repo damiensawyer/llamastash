@@ -581,13 +581,46 @@ pub fn probe() -> GpuInfo {
     unknown_devices = devs;
   }
 
-  // Count total devices across all backends
-  let total =
-    nvidia_devices.len() + amd_devices.len() + metal_devices.len() + unknown_devices.len();
-
-  if total == 0 {
+  // Cheap early-out: nothing found. Done before the lspci subprocess
+  // work below so the CPU-only path stays probe-light.
+  if nvidia_devices.is_empty()
+    && amd_devices.is_empty()
+    && metal_devices.is_empty()
+    && unknown_devices.is_empty()
+  {
     return GpuInfo::CpuOnly;
   }
+
+  // Resolve canonical PCI ids and collapse cross-probe duplicates BEFORE
+  // counting devices. The Vulkan probe is a last-resort "is there any
+  // GPU?" fallback; when it re-detects a card a native/DXGI probe already
+  // found, that duplicate must be dropped here — not after the
+  // single-vs-multi decision below — or one physical GPU is counted
+  // twice and mislabelled `Multi`. That double-count is the norm on
+  // Windows, where the GPU driver ships `vulkaninfo.exe` next to the
+  // DXGI adapter (and on any Linux box carrying both a vendor tool and
+  // `vulkaninfo`). Dedup is by canonical PCI address where available,
+  // else by normalized card name (see `resolve_device_id` /
+  // `normalize_card_name`).
+  let lspci = query_lspci();
+  enrich_with_lspci(&mut nvidia_devices, &lspci);
+  enrich_with_lspci(&mut amd_devices, &lspci);
+  enrich_with_lspci(&mut metal_devices, &lspci);
+  enrich_with_lspci(&mut unknown_devices, &lspci);
+  unknown_devices.retain(|d| {
+    let id = resolve_device_id(d, &lspci);
+    let norm = normalize_card_name(&d.name);
+    let native_dup = nvidia_devices
+      .iter()
+      .chain(amd_devices.iter())
+      .chain(metal_devices.iter())
+      .any(|seen| resolve_device_id(seen, &lspci) == id || normalize_card_name(&seen.name) == norm);
+    !native_dup
+  });
+
+  // Count devices across all backends (post-dedup).
+  let total =
+    nvidia_devices.len() + amd_devices.len() + metal_devices.len() + unknown_devices.len();
 
   // Single-device hits return the native variant for backward compat
   if total == 1 && nvidia_devices.is_empty() && amd_devices.is_empty() && unknown_devices.is_empty()
@@ -619,25 +652,10 @@ pub fn probe() -> GpuInfo {
     };
   }
 
-  // Two or more backends — build cards from all devices.
-  // Group by physical card (PCI address on Linux, name elsewhere)
-  // and attach available drivers per card.
-  let lspci = query_lspci();
-
-  // Enrich devices with lspci PCI lookups so vendor:device IDs
-  // from vulkaninfo resolve to canonical PCI addresses. This is
-  // the key to cross-backend dedup (rocm-smi "AMD Radeon…" vs
-  // vulkaninfo "AMD Radeon… (RADV…)").
-  enrich_with_lspci(&mut nvidia_devices, &lspci);
-  enrich_with_lspci(&mut amd_devices, &lspci);
-  enrich_with_lspci(&mut metal_devices, &lspci);
-  enrich_with_lspci(&mut unknown_devices, &lspci);
-
-  // Collect every device into one list. Native backends (CUDA / ROCm /
-  // Metal) go in as-is; Vulkan devices are added only when they don't
-  // already match a native card (dedup by PCI address or name) so a
-  // RADV-decorated duplicate of a ROCm/CUDA card doesn't surface as a
-  // phantom 0-VRAM device.
+  // Two or more distinct cards — build one combined list. Devices are
+  // already lspci-enriched and the Vulkan fallback's duplicates of a
+  // native card were dropped above; the check in the loop below now only
+  // guards against duplicates *within* the surviving set.
   let mut all_devices = Vec::new();
   for d in nvidia_devices {
     all_devices.push(d);
