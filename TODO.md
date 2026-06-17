@@ -167,6 +167,9 @@ places.
 
 ### High priority
 
+- [ ] Add size to HF downloader Search results page
+- [ ] Add ability to search for model during init flow
+- [x] Windows: why is homebrew showing up as install option in Init flow in windows
 - [ ] Publish to Clawhub/Hermes/etc
 - [ ] Publish to https://www.skills.sh/
 - [ ] Manual UAT smoke run
