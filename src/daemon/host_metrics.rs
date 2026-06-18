@@ -314,6 +314,9 @@ async fn refresh_active_gpu(prev: GpuInfo) -> Option<GpuInfo> {
 }
 
 fn build_snapshot(sys: &System, components: &Components, info: GpuInfo) -> HostMetricsSnapshot {
+  // Debug-build-only multi-GPU simulator; compiled out of release.
+  #[cfg(debug_assertions)]
+  let info = debug_fake_multi_gpu(info);
   let cpu_pct = host_cpu_pct(sys);
   let cpu_temp_c = host_cpu_temp_c(components);
   let agg = aggregate_gpu(&info);
@@ -335,6 +338,49 @@ fn build_snapshot(sys: &System, components: &Components, info: GpuInfo) -> HostM
     unified: info.is_unified(),
     uma_class_source: info.uma_class_source(),
   }
+}
+
+/// Debug-only multi-GPU simulator, **compiled out of release builds**
+/// (`#[cfg(debug_assertions)]`). When `LLAMASTASH_DEBUG_FAKE_GPUS=N`
+/// (N >= 2) is set on the **daemon** process of a debug build, the
+/// detected GPU is fanned out into N synthetic cards so the multi-GPU
+/// host-pane rendering (the combined `GPU*` row + legend) can be
+/// exercised on a single-GPU machine. Each clone gets a distinct name
+/// (so `build_device_rows`' name-dedup keeps it) and stepped util/temp
+/// so the mean-usage / hottest-temp aggregation is actually visible.
+/// No-op unless the var is set — strictly a local testing aid.
+#[cfg(debug_assertions)]
+fn debug_fake_multi_gpu(info: GpuInfo) -> GpuInfo {
+  let n: usize = match std::env::var("LLAMASTASH_DEBUG_FAKE_GPUS")
+    .ok()
+    .and_then(|v| v.parse().ok())
+  {
+    Some(n) if n >= 2 => n,
+    _ => return info,
+  };
+  let base: Vec<GpuDevice> = match &info {
+    GpuInfo::Nvidia { devices }
+    | GpuInfo::Amd { devices }
+    | GpuInfo::Unknown { devices }
+    | GpuInfo::Multi { devices } => devices.clone(),
+    // CpuOnly / AppleMetal carry no per-device list to fan out.
+    _ => return info,
+  };
+  let Some(seed) = base.into_iter().next() else {
+    return info;
+  };
+  let base_util = seed.utilization_pct.unwrap_or(20.0);
+  let base_temp = seed.temperature_c.unwrap_or(45.0);
+  let devices: Vec<GpuDevice> = (0..n)
+    .map(|i| {
+      let mut d = seed.clone();
+      d.name = format!("{} (fake #{i})", seed.name);
+      d.utilization_pct = Some((base_util + i as f32 * 20.0).min(100.0));
+      d.temperature_c = Some(base_temp + i as f32 * 9.0);
+      d
+    })
+    .collect();
+  GpuInfo::Multi { devices }
 }
 
 /// Read the highest CPU package temperature from sysinfo Components.

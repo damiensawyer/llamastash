@@ -21,6 +21,9 @@
 //! Backend-specific variants:
 //! * Apple Silicon (unified memory): CPU + `MEM*` + a
 //!   `GPU  unified` text row.
+//! * Multi-GPU: one `GPU*` row with combined usage (mean) + the hottest
+//!   temp across cards; the per-card breakdown stays in
+//!   `status --json .host.gpu_devices`.
 //! * `CpuOnly`: CPU + MEM only, GPU + VRAM rows omitted.
 
 use ratatui::layout::Rect;
@@ -68,17 +71,12 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, host: &HostMetricsSnapshot, pal
       ]));
     }
     _ => {
-      // Two or more GPUs: render one row per device so the user
-      // sees each card's utilization and temperature.
-      // One GPU: keep the current single-row layout.
-      let n_devices = host.gpu_devices.as_ref().map_or(1, |ds| ds.len());
-      if n_devices > 1 {
-        for gpu_line in gpu_device_rows(host, bar_width, palette) {
-          lines.push(gpu_line);
-        }
-      } else {
-        lines.push(gpu_util_row(host, bar_width, palette));
-      }
+      // One GPU summary row regardless of card count. The Host pane is a
+      // glance view, not a per-device dashboard, so a multi-GPU host
+      // collapses to combined usage + the hottest temp under a `GPU*`
+      // label (the legend explains it; `status --json .host.gpu_devices`
+      // keeps the per-card breakdown).
+      lines.push(gpu_summary_row(host, bar_width, palette));
       // The `MEM*` marker on the memory row already flags that the GPU
       // shares that pool, so the GPU memory keeps its own `VRAM` gauge.
       lines.push(vram_row(host, bar_width, palette));
@@ -143,64 +141,45 @@ fn ram_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palett
   ])
 }
 
-fn gpu_util_row<'a>(
+/// Single GPU utilization row. A multi-GPU host collapses to one `GPU*`
+/// row: combined usage (mean across the cards that report it) and the
+/// hottest temperature (max across cards). Single-GPU hosts read `GPU`
+/// straight from the aggregate snapshot fields. Same left-aligned-column
+/// treatment as the CPU row so values line up across CPU/MEM/GPU/VRAM.
+fn gpu_summary_row<'a>(
   host: &HostMetricsSnapshot,
   bar_width: usize,
   palette: &'a Palette,
 ) -> Line<'a> {
-  let pct = host.gpu_util_pct.unwrap_or(0.0).clamp(0.0, 100.0);
+  let devices = host.gpu_devices.as_deref().unwrap_or(&[]);
+  let multi = devices.len() > 1;
+  let (util, temp) = if multi {
+    let utils: Vec<f32> = devices.iter().filter_map(|d| d.utilization_pct).collect();
+    let util = (!utils.is_empty()).then(|| utils.iter().sum::<f32>() / utils.len() as f32);
+    let hottest = devices
+      .iter()
+      .filter_map(|d| d.temperature_c)
+      .fold(None, |hi, t| Some(hi.map_or(t, |h: f32| h.max(t))));
+    (util, hottest)
+  } else {
+    (host.gpu_util_pct, host.gpu_temp_c)
+  };
+  let label = if multi { "GPU* " } else { "GPU  " };
+  let pct = util.unwrap_or(0.0).clamp(0.0, 100.0);
   let bar = bar(pct, bar_width, gauge_color(pct, palette));
-  // Same left-aligned-column treatment as the CPU row: no leading
-  // pad so values line up with `CPU 3%`, `RAM 31G/62G`, etc.
-  let value = host
-    .gpu_util_pct
+  let value = util
     .map(|p| format!(" {:.0}%", p))
     .unwrap_or_else(|| " —".into());
   let mut spans = vec![
-    Span::styled("GPU  ", palette.label_style()),
+    Span::styled(label, palette.label_style()),
     bar,
     Span::styled(value, palette.text_style()),
   ];
-  if let Some(temp) = host.gpu_temp_c {
+  if let Some(temp) = temp {
     spans.push(Span::raw(" "));
     spans.extend(temp_spans(temp, palette));
   }
   Line::from(spans)
-}
-
-/// Render one GPU row per device (for multi-GPU machines).
-fn gpu_device_rows<'a>(
-  host: &HostMetricsSnapshot,
-  bar_width: usize,
-  palette: &'a Palette,
-) -> Vec<Line<'a>> {
-  let mut lines: Vec<Line<'a>> = Vec::new();
-  if let Some(devices) = &host.gpu_devices {
-    for (i, dev) in devices.iter().enumerate() {
-      let pct = dev.utilization_pct.unwrap_or(0.0).clamp(0.0, 100.0);
-      let bar = bar(pct, bar_width, gauge_color(pct, palette));
-      let label = if devices.len() == 1 {
-        "GPU  ".into()
-      } else {
-        format!("GPU{} ", i)
-      };
-      let value = dev
-        .utilization_pct
-        .map(|p| format!(" {:.0}%", p))
-        .unwrap_or_else(|| " —".into());
-      let mut spans = vec![
-        Span::styled(label, palette.label_style()),
-        bar,
-        Span::styled(value, palette.text_style()),
-      ];
-      if let Some(temp) = dev.temperature_c {
-        spans.push(Span::raw(" "));
-        spans.extend(temp_spans(temp, palette));
-      }
-      lines.push(Line::from(spans));
-    }
-  }
-  lines
 }
 
 /// Effective denominator for the VRAM gauge.
@@ -607,6 +586,62 @@ mod tests {
     };
     let rows = render_lines(snap);
     assert!(rows.iter().any(|r| r.contains("2 GPUs")));
+  }
+
+  fn device_row(util: f32, temp: f32) -> crate::daemon::host_metrics::DeviceRow {
+    crate::daemon::host_metrics::DeviceRow {
+      selector: "Nvidia0".into(),
+      backend: "nvidia".into(),
+      name: "RTX".into(),
+      total_memory_bytes: 0,
+      used_memory_bytes: None,
+      utilization_pct: Some(util),
+      temperature_c: Some(temp),
+    }
+  }
+
+  #[test]
+  fn multi_gpu_collapses_to_combined_star_row() {
+    let palette = crate::theme::palette_for(crate::theme::ThemeName::Macchiato);
+    let snap = HostMetricsSnapshot {
+      gpu_backend: "nvidia".into(),
+      gpu_device_count: 2,
+      gpu_devices: Some(vec![device_row(80.0, 60.0), device_row(20.0, 75.0)]),
+      ..Default::default()
+    };
+    let line = gpu_summary_row(&snap, 6, palette);
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    // Combined usage = mean(80, 20) = 50; hottest temp = max(60, 75) = 75.
+    assert!(
+      text.contains("GPU*"),
+      "expected combined star label: {text}"
+    );
+    assert!(text.contains("50%"), "expected mean utilization: {text}");
+    assert!(text.contains("75°C"), "expected hottest temp: {text}");
+    assert!(
+      !text.contains("GPU0") && !text.contains("GPU1"),
+      "must not render per-device rows: {text}"
+    );
+  }
+
+  #[test]
+  fn single_gpu_row_has_no_star() {
+    let palette = crate::theme::palette_for(crate::theme::ThemeName::Macchiato);
+    let snap = HostMetricsSnapshot {
+      gpu_backend: "nvidia".into(),
+      gpu_util_pct: Some(42.0),
+      gpu_temp_c: Some(55.0),
+      gpu_device_count: 1,
+      ..Default::default()
+    };
+    let line = gpu_summary_row(&snap, 6, palette);
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(
+      text.contains("GPU "),
+      "single GPU keeps the plain label: {text}"
+    );
+    assert!(!text.contains("GPU*"), "single GPU has no star: {text}");
+    assert!(text.contains("42%"));
   }
 
   #[test]

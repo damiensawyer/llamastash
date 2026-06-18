@@ -180,10 +180,16 @@ fn build_sections(app: &App) -> Vec<Section> {
 /// pool), and the `◉`/`♪` modality glyphs the right-pane title carries
 /// when a model has an auto-detected mmproj projector.
 fn legend_section() -> Section {
-  let mut rows = vec![(
-    "MEM*".to_string(),
-    "unified memory (VRAM is the GPU's view of this pool)".to_string(),
-  )];
+  let mut rows = vec![
+    (
+      "MEM*".to_string(),
+      "unified memory (VRAM is the GPU's view of this pool)".to_string(),
+    ),
+    (
+      "GPU*".to_string(),
+      "combined usage + hottest temp across multiple GPUs".to_string(),
+    ),
+  ];
   for (glyph, desc) in crate::discovery::Multimodal::LEGEND {
     rows.push((glyph.to_string(), desc.to_string()));
   }
@@ -372,6 +378,12 @@ mod tests {
     assert!(
       frame.contains("MEM*") && frame.contains("unified memory"),
       "MEM* legend row missing:\n{frame}"
+    );
+    // The Host panel collapses multi-GPU hosts to a `GPU*` row; the
+    // Legend is where the marker is explained.
+    assert!(
+      frame.contains("GPU*") && frame.contains("combined usage"),
+      "GPU* legend row missing:\n{frame}"
     );
   }
 
