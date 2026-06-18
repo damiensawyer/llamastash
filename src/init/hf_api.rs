@@ -76,28 +76,60 @@ impl HfSearchResult {
   pub fn download_size_bytes(&self) -> Option<u64> {
     self.gguf.as_ref().and_then(|g| g.total_file_size)
   }
+
+  /// Total model parameter count, when the `gguf` expand surfaced it.
+  /// Quant-independent (same across every file in the repo), so it's a
+  /// stable per-repo size signal alongside [`Self::download_size_bytes`].
+  pub fn param_count(&self) -> Option<u64> {
+    self.gguf.as_ref().and_then(|g| g.total)
+  }
 }
 
-/// GGUF metadata returned under `expand[]=gguf`. Only `totalFileSize`
-/// (the representative GGUF file's byte size) is consumed; the block
-/// also carries the parameter count, architecture, context length, and
+/// GGUF metadata returned under `expand[]=gguf`. `total` is the model's
+/// parameter count and `totalFileSize` the representative GGUF file's
+/// byte size; the block also carries architecture, context length, and
 /// a chat template that `serde` ignores.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct HfGgufMeta {
+  #[serde(default)]
+  pub total: Option<u64>,
   #[serde(default, rename = "totalFileSize")]
   pub total_file_size: Option<u64>,
 }
 
-/// Sort key for the search endpoint. Maps to HF Hub's API query
-/// tokens — `Trending` and `RecentlyUpdated` are the conventional
-/// labels verified during planning; if the API surprises us, the
-/// mapping moves here without touching the dialog.
+/// Format a parameter count as a compact label: `8B`, `1.2B`, `35B`,
+/// `760M`. Double-digit billions round to a whole number; single-digit
+/// billions keep one decimal (dropping a trailing `.0`).
+pub fn format_param_count(n: u64) -> String {
+  const B: f64 = 1_000_000_000.0;
+  const M: f64 = 1_000_000.0;
+  let nf = n as f64;
+  if nf >= 10.0 * B {
+    format!("{:.0}B", nf / B)
+  } else if nf >= B {
+    let s = format!("{:.1}", nf / B);
+    format!("{}B", s.strip_suffix(".0").unwrap_or(&s))
+  } else if nf >= M {
+    format!("{:.0}M", nf / M)
+  } else {
+    n.to_string()
+  }
+}
+
+/// Sort key for the search results. `Downloads` / `Likes` /
+/// `RecentlyUpdated` / `Trending` map to HF Hub API query tokens
+/// (server-side, globally ordered + paginated). `FileSize` / `ParamSize`
+/// have no HF sort token — the API rejects `sort=totalFileSize` — so
+/// they're applied client-side, reordering the fetched page by the
+/// `gguf` size fields (see `HfDialogState::sort_results_in_place`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HfSortKey {
   Downloads,
   Likes,
   RecentlyUpdated,
   Trending,
+  FileSize,
+  ParamSize,
 }
 
 impl HfSortKey {
@@ -108,22 +140,34 @@ impl HfSortKey {
   /// returns `HTTP 400`). `trendingScore` accepts `search` and
   /// `filter=gguf` natively, so unlike the legacy carve-out we
   /// don't have to strip either param under trending.
+  ///
+  /// The client-side sorts have no server token, so they fetch the
+  /// `downloads` page and reorder it locally.
   pub fn as_query_token(self) -> &'static str {
     match self {
-      HfSortKey::Downloads => "downloads",
+      HfSortKey::Downloads | HfSortKey::FileSize | HfSortKey::ParamSize => "downloads",
       HfSortKey::Likes => "likes",
       HfSortKey::RecentlyUpdated => "lastModified",
       HfSortKey::Trending => "trendingScore",
     }
   }
 
-  /// Cycle order (R107): Downloads → Likes → RecentlyUpdated → Trending → Downloads.
+  /// `true` for sorts the HF API can't do, which the dialog applies in
+  /// memory over the fetched page.
+  pub fn is_client_sort(self) -> bool {
+    matches!(self, HfSortKey::FileSize | HfSortKey::ParamSize)
+  }
+
+  /// Cycle order: Downloads → Likes → RecentlyUpdated → Trending →
+  /// FileSize → ParamSize → Downloads.
   pub fn cycle_next(self) -> Self {
     match self {
       HfSortKey::Downloads => HfSortKey::Likes,
       HfSortKey::Likes => HfSortKey::RecentlyUpdated,
       HfSortKey::RecentlyUpdated => HfSortKey::Trending,
-      HfSortKey::Trending => HfSortKey::Downloads,
+      HfSortKey::Trending => HfSortKey::FileSize,
+      HfSortKey::FileSize => HfSortKey::ParamSize,
+      HfSortKey::ParamSize => HfSortKey::Downloads,
     }
   }
 }
@@ -403,13 +447,21 @@ mod tests {
     // round-3 follow-up is the actual rename. Confirmed via curl
     // against the live Hub at fix time.
     assert_eq!(HfSortKey::Trending.as_query_token(), "trendingScore");
+    // Client-side sorts have no HF token; they fetch the downloads
+    // page and reorder it locally.
+    assert_eq!(HfSortKey::FileSize.as_query_token(), "downloads");
+    assert_eq!(HfSortKey::ParamSize.as_query_token(), "downloads");
+    assert!(HfSortKey::FileSize.is_client_sort());
+    assert!(HfSortKey::ParamSize.is_client_sort());
+    assert!(!HfSortKey::Downloads.is_client_sort());
+    assert!(!HfSortKey::Trending.is_client_sort());
   }
 
   #[test]
-  fn sort_key_cycles_through_all_four() {
+  fn sort_key_cycles_through_all_six() {
     let start = HfSortKey::Downloads;
     let mut cur = start;
-    for _ in 0..4 {
+    for _ in 0..6 {
       cur = cur.cycle_next();
     }
     assert_eq!(cur, start);
@@ -442,9 +494,19 @@ mod tests {
     assert_eq!(results[0].downloads, Some(1234567));
     assert_eq!(results[0].pipeline_tag.as_deref(), Some("text-generation"));
     assert_eq!(results[0].download_size_bytes(), Some(5732991008));
+    assert_eq!(results[0].param_count(), Some(8030261248));
     assert!(results[1].pipeline_tag.is_none());
     // No `gguf` block → no size, not a deserialise failure.
     assert_eq!(results[1].download_size_bytes(), None);
+    assert_eq!(results[1].param_count(), None);
+  }
+
+  #[test]
+  fn format_param_count_picks_compact_units() {
+    assert_eq!(format_param_count(8_030_261_248), "8B");
+    assert_eq!(format_param_count(1_235_814_432), "1.2B");
+    assert_eq!(format_param_count(34_660_610_688), "35B");
+    assert_eq!(format_param_count(760_000_000), "760M");
   }
 
   #[test]

@@ -804,14 +804,14 @@ When enabled, left-click moves focus and the wheel replays the `↑`/`↓` actio
 
 ### HuggingFace pull dialog (`Focus::HfDialog`, `Shift+P` from the Models list)
 
-Three-stage modal: **Search → File picker → Confirm**. Search runs live against the public `/api/models` endpoint (300 ms debounce); paste an `owner/repo[:filename]` slug + Enter to bypass search. Each search row shows the repo's approximate download size (the representative GGUF file HF parsed, e.g. `5.3G`); the exact per-quant size lands in the File picker.
+Three-stage modal: **Search → File picker → Confirm**. Search runs live against the public `/api/models` endpoint (300 ms debounce); paste an `owner/repo[:filename]` slug + Enter to bypass search. Each search row carries two size columns — `params` (model parameter count, e.g. `35B`) and `size` (approximate download size, the representative GGUF file HF parsed, e.g. `5.3G`); the exact per-quant size lands in the File picker.
 
 | Key                         | Action                                                                                                                                                                                                   |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `e`                         | Enter edit mode on the search field (auto-enabled on dialog open). Resting Esc clears the buffer; a further Esc closes the dialog.                                                                       |
 | (alphanumerics / Backspace) | Mutate the search query while editing                                                                                                                                                                    |
 | `↑` / `↓`                   | Move the row cursor                                                                                                                                                                                      |
-| `o`                         | Cycle sort (Downloads → Likes → Recently Updated → Trending). Resets to page 1. Only fires while the search field is resting.                                                                            |
+| `o`                         | Cycle sort (Downloads → Likes → Recently Updated → Trending → File size → Params). The first four are server-side; File size / Params reorder the current page in memory (HF can't sort by size). Resets to page 1. Only fires while the search field is resting. |
 | `n` / `p`                   | Next / previous page (only fires while the search field is resting; `‹›` chevrons next to `page N` indicate when they're available)                                                                      |
 | `Enter`                     | Search → drill into the focused repo's files; FilePicker → confirm the chosen file; Confirm → enqueue the pull on the download strip                                                                     |
 | `Esc`                       | Walk back one layer: editing → exit edit · resting+content → clear · resting+empty → close (in-flight downloads keep running). In the FilePicker / Confirm stages, Esc steps back to the previous stage. |

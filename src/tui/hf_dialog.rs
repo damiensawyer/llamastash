@@ -26,7 +26,7 @@ use crate::discovery::split_gguf::parse_shard_name;
 use crate::init::download::RepoSpec;
 use crate::init::fetch::FetchError;
 use crate::init::hf_api::{
-  HfRepoFile, HfSearchPage, HfSearchResult, HfSortKey, ListRepoFilesError,
+  format_param_count, HfRepoFile, HfSearchPage, HfSearchResult, HfSortKey, ListRepoFilesError,
 };
 use crate::init::recommender::FileFit;
 use crate::theme::Palette;
@@ -444,6 +444,23 @@ impl HfDialogState {
     self.results = page.results;
     self.next_cursor = page.next_cursor;
     self.selected_idx = 0;
+    self.sort_results_in_place();
+  }
+
+  /// Reorder the fetched page for the client-side sorts (file size /
+  /// param size, descending). The HF API can't sort by either, so the
+  /// page arrives in `downloads` order and we reorder it here. Rows
+  /// missing the `gguf` value sort to the bottom. No-op for the
+  /// server-side sorts, which already arrive ordered.
+  fn sort_results_in_place(&mut self) {
+    let key = match self.sort {
+      HfSortKey::FileSize => HfSearchResult::download_size_bytes,
+      HfSortKey::ParamSize => HfSearchResult::param_count,
+      _ => return,
+    };
+    self
+      .results
+      .sort_by(|a, b| key(b).unwrap_or(0).cmp(&key(a).unwrap_or(0)));
   }
 
   /// Apply a SearchFailed event. Same stale-drop rule as
@@ -713,6 +730,8 @@ fn render_header(
     HfSortKey::Likes => "♡ likes",
     HfSortKey::RecentlyUpdated => "⏱ recently updated",
     HfSortKey::Trending => "★ trending",
+    HfSortKey::FileSize => "▾ file size (this page)",
+    HfSortKey::ParamSize => "▾ params (this page)",
   };
   let label_style = palette.label_style();
   let value_style = palette.text_style();
@@ -792,17 +811,20 @@ fn render_search_body(frame: &mut Frame<'_>, area: Rect, state: &HfDialogState, 
   // Scroll the visible window so the selected row stays in view —
   // mirrors the list-pane convention. Without this the Paragraph
   // would always render rows from index 0 and arrow-down past the
-  // visible bottom would silently park the cursor off-screen.
-  let visible = area.height.max(1) as usize;
+  // visible bottom would silently park the cursor off-screen. One
+  // line is reserved for the pinned column header.
+  let visible = (area.height as usize).saturating_sub(1).max(1);
   let scroll_offset = scroll_offset_for(state.selected_idx, state.results.len(), visible);
-  let lines: Vec<Line<'static>> = state
-    .results
-    .iter()
-    .enumerate()
-    .skip(scroll_offset)
-    .take(visible)
-    .map(|(idx, r)| render_search_row(idx, idx == state.selected_idx, state.sort, r, palette))
-    .collect();
+  let mut lines: Vec<Line<'static>> = vec![render_search_header(state.sort, palette)];
+  lines.extend(
+    state
+      .results
+      .iter()
+      .enumerate()
+      .skip(scroll_offset)
+      .take(visible)
+      .map(|(idx, r)| render_search_row(idx, idx == state.selected_idx, state.sort, r, palette)),
+  );
   frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -834,8 +856,12 @@ fn render_search_row(
   if selected {
     style = style.add_modifier(Modifier::REVERSED);
   }
+  // The rightmost metric reflects the active server sort. For the
+  // client-side size sorts the params / size columns already carry the
+  // sorted value, so the metric falls back to downloads as a
+  // popularity hint.
   let metric = match sort {
-    HfSortKey::Downloads => match r.downloads {
+    HfSortKey::Downloads | HfSortKey::FileSize | HfSortKey::ParamSize => match r.downloads {
       Some(n) => format!("↓ {}", short_count(n)),
       None => "↓ —".into(),
     },
@@ -851,19 +877,48 @@ fn render_search_row(
     HfSortKey::Trending => "★ trending".into(),
   };
   let tag = r.pipeline_tag.clone().unwrap_or_else(|| "—".to_string());
+  let params = r
+    .param_count()
+    .map(format_param_count)
+    .unwrap_or_else(|| "—".to_string());
   let size = r
     .download_size_bytes()
     .map(crate::tui::fmt::format_bytes)
     .unwrap_or_else(|| "—".to_string());
   Line::from(vec![
     Span::styled(prefix.to_string(), style),
-    Span::styled(format!("{:<40}  ", truncate(&r.repo_id, 40)), style),
+    Span::styled(format!("{:<36}  ", truncate(&r.repo_id, 36)), style),
+    Span::styled(format!("{params:>6}  "), style),
     Span::styled(format!("{size:>6}  "), style),
     Span::styled(
-      format!("{:<18}  ", truncate(&tag, 18)),
+      format!("{:<16}  ", truncate(&tag, 16)),
       palette.muted_style(),
     ),
     Span::styled(metric, palette.label_style()),
+  ])
+}
+
+/// Column header for the search results, aligned to
+/// [`render_search_row`]'s widths. The active sort's column is
+/// emphasized so the ordering is self-describing.
+fn render_search_header(sort: HfSortKey, palette: &Palette) -> Line<'static> {
+  let label = palette.label_style();
+  let active = palette.accent_style();
+  let params_style = if sort == HfSortKey::ParamSize {
+    active
+  } else {
+    label
+  };
+  let size_style = if sort == HfSortKey::FileSize {
+    active
+  } else {
+    label
+  };
+  Line::from(vec![
+    Span::styled(format!("  {:<36}  ", "repo"), label),
+    Span::styled(format!("{:>6}  ", "params"), params_style),
+    Span::styled(format!("{:>6}  ", "size"), size_style),
+    Span::styled(format!("{:<16}  ", "task"), label),
   ])
 }
 
@@ -1147,6 +1202,7 @@ mod tests {
       pipeline_tag: Some("text-generation".into()),
       tags: vec!["gguf".into()],
       gguf: Some(crate::init::hf_api::HfGgufMeta {
+        total: Some(8_030_261_248),
         total_file_size: Some(5_732_991_008),
       }),
     }
@@ -1156,11 +1212,19 @@ mod tests {
   fn search_row_renders_download_size_and_placeholder() {
     let palette = crate::theme::palette_for(crate::theme::ThemeName::Macchiato);
     let mut r = fake_result("owner/Some-Model-GGUF");
-    // 5_732_991_008 bytes → format_bytes → "5.3G".
+    // 5_732_991_008 bytes → format_bytes → "5.3G"; 8_030_261_248
+    // params → format_param_count → "8B".
     let line = render_search_row(0, false, HfSortKey::Downloads, &r, palette);
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(text.contains("owner/Some-Model-GGUF"), "repo id missing: {text}");
-    assert!(text.contains("5.3G"), "download-size column missing: {text}");
+    assert!(
+      text.contains("owner/Some-Model-GGUF"),
+      "repo id missing: {text}"
+    );
+    assert!(
+      text.contains("5.3G"),
+      "download-size column missing: {text}"
+    );
+    assert!(text.contains("8B"), "param-size column missing: {text}");
     // No gguf block → placeholder, not a panic.
     r.gguf = None;
     let placeholder_line = render_search_row(0, false, HfSortKey::Downloads, &r, palette);
@@ -1268,10 +1332,10 @@ mod tests {
   }
 
   #[test]
-  fn cycle_sort_walks_all_four_back_to_downloads() {
+  fn cycle_sort_walks_all_six_back_to_downloads() {
     let mut s = HfDialogState::open(false, HardwareFitContext::default());
     let start = s.sort;
-    for _ in 0..4 {
+    for _ in 0..6 {
       s.cycle_sort();
     }
     assert_eq!(s.sort, start);
@@ -1279,6 +1343,41 @@ mod tests {
     s.page = 5;
     s.cycle_sort();
     assert_eq!(s.page, 1);
+  }
+
+  #[test]
+  fn client_side_sorts_reorder_results_by_size_descending() {
+    let mut s = HfDialogState::open(false, HardwareFitContext::default());
+    let mk = |id: &str, params: u64, bytes: u64| HfSearchResult {
+      gguf: Some(crate::init::hf_api::HfGgufMeta {
+        total: Some(params),
+        total_file_size: Some(bytes),
+      }),
+      ..fake_result(id)
+    };
+    // Arrive in downloads order (small, big, mid).
+    let page = HfSearchPage {
+      results: vec![
+        mk("a/small", 1_000_000_000, 800_000_000),
+        mk("b/big", 70_000_000_000, 40_000_000_000),
+        mk("c/mid", 8_000_000_000, 5_000_000_000),
+      ],
+      next_cursor: None,
+    };
+    s.sort = HfSortKey::FileSize;
+    s.mark_dispatched();
+    s.apply_search_results(s.last_dispatched_seq, page.clone());
+    let order: Vec<&str> = s.results.iter().map(|r| r.repo_id.as_str()).collect();
+    assert_eq!(order, ["b/big", "c/mid", "a/small"], "file-size desc");
+
+    s.sort = HfSortKey::ParamSize;
+    s.apply_search_results(s.last_dispatched_seq, page);
+    let param_order: Vec<&str> = s.results.iter().map(|r| r.repo_id.as_str()).collect();
+    assert_eq!(
+      param_order,
+      ["b/big", "c/mid", "a/small"],
+      "param-size desc"
+    );
   }
 
   #[test]
