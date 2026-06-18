@@ -100,7 +100,13 @@ fn read_card(device: &Path, idx: usize) -> Option<GpuDevice> {
     uma_shared_total_bytes,
     uma_shared_used_bytes,
     source,
-  ) = classify_amd_memory(vram_total, vram_used, gtt_total, gtt_used);
+  ) = classify_amd_memory(
+    vram_total,
+    vram_used,
+    gtt_total,
+    gtt_used,
+    is_integrated_pci_class(device),
+  );
 
   Some(GpuDevice {
     name: format!("card{idx}"),
@@ -114,6 +120,20 @@ fn read_card(device: &Path, idx: usize) -> Option<GpuDevice> {
     uma_shared_used_bytes,
     classification_source: Some(source),
   })
+}
+
+/// `true` when the card's PCI class is "Display controller, other"
+/// (`0x0380xx`). Integrated GPUs (Strix Halo et al.) enumerate this way;
+/// discrete cards are "VGA compatible controller" (`0x0300xx`). This is
+/// a *sufficient* integrated signal — no discrete GPU uses `0x0380`, so
+/// it never misclassifies a discrete card as unified. APUs that report
+/// `0x0300` fall back to the VRAM carve-out size heuristic.
+fn is_integrated_pci_class(device: &Path) -> bool {
+  fs::read_to_string(device.join("class"))
+    .ok()
+    .and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok())
+    .map(|class| class >> 8 == 0x0380)
+    .unwrap_or(false)
 }
 
 /// Read a `u64` from a sysfs node, trimming the trailing newline.
@@ -161,6 +181,7 @@ mod tests {
       486_838_272,
       Some(133_143_986_176),
       Some(2_843_930_624),
+      false,
     );
     assert_eq!(total, 536_870_912 + 133_143_986_176);
     assert_eq!(used, 486_838_272 + 2_843_930_624);
@@ -178,6 +199,19 @@ mod tests {
     assert_eq!(read_u64(&f), Some(133_143_986_176));
     fs::write(&f, "not-a-number").unwrap();
     assert_eq!(read_u64(&f), None);
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn integrated_pci_class_detects_display_controller() {
+    let dir = std::env::temp_dir().join(format!("llamastash-class-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    // 0x0380xx (Display controller, other) → integrated (Strix Halo).
+    fs::write(dir.join("class"), "0x038000\n").unwrap();
+    assert!(is_integrated_pci_class(&dir));
+    // 0x0300xx (VGA compatible) → not a sufficient integrated signal.
+    fs::write(dir.join("class"), "0x030000\n").unwrap();
+    assert!(!is_integrated_pci_class(&dir));
     fs::remove_dir_all(&dir).ok();
   }
 }

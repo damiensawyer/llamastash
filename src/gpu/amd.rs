@@ -241,6 +241,10 @@ pub(crate) fn parse(stdout: &str) -> Vec<GpuDevice> {
           vram_used.unwrap_or(0),
           gtt_total,
           gtt_used,
+          // rocm-smi carries no PCI class; fall back to the carve-out
+          // size heuristic. The sysfs probe (the primary path) supplies
+          // the authoritative integrated flag.
+          false,
         );
         out.push(GpuDevice {
           name: gpu_key.clone(),
@@ -477,7 +481,7 @@ mod tests {
     let big_gtt = 100 * 1024 * 1024 * 1024;
     // Carve signature (vram < 1 GiB) → sum, GTT marked shared.
     assert_eq!(
-      classify_amd_memory(carve, 1, Some(big_gtt), Some(40)),
+      classify_amd_memory(carve, 1, Some(big_gtt), Some(40), false),
       (
         carve + big_gtt,
         41,
@@ -486,15 +490,29 @@ mod tests {
         ClassSource::CarveSignature
       )
     );
-    // Discrete (vram >= 1 GiB) → vram only even when GTT is larger.
+    // Discrete (vram >= 1 GiB, not integrated) → vram only even when GTT is larger.
     let vram16 = 16 * 1024 * 1024 * 1024;
     assert_eq!(
-      classify_amd_memory(vram16, 5, Some(big_gtt), Some(1)),
+      classify_amd_memory(vram16, 5, Some(big_gtt), Some(1), false),
       (vram16, 5, None, None, ClassSource::Discrete)
+    );
+    // Integrated APU with a large VRAM carve-out (Strix Halo reports
+    // 4 GiB ≫ the 1 GiB heuristic ceiling) → the PCI-class flag forces
+    // unified: sum VRAM + GTT, GTT marked shared.
+    let vram4 = 4 * 1024 * 1024 * 1024;
+    assert_eq!(
+      classify_amd_memory(vram4, 5, Some(big_gtt), Some(2), true),
+      (
+        vram4 + big_gtt,
+        7,
+        Some(big_gtt),
+        Some(2),
+        ClassSource::CarveSignature
+      )
     );
     // Carve signature with GTT total but no used → still sums, adds 0.
     assert_eq!(
-      classify_amd_memory(carve, 1, Some(big_gtt), None),
+      classify_amd_memory(carve, 1, Some(big_gtt), None, false),
       (
         carve + big_gtt,
         1,
@@ -505,7 +523,7 @@ mod tests {
     );
     // No GTT data on a carve card → sums with 0 GTT (degenerate).
     assert_eq!(
-      classify_amd_memory(carve, 2, None, None),
+      classify_amd_memory(carve, 2, None, None, false),
       (carve, 2, Some(0), Some(0), ClassSource::CarveSignature)
     );
   }

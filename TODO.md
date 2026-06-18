@@ -166,6 +166,9 @@ places.
 ## R5 (v0.0.5 checklist)
 
 - [ ] MLX as a native peer backend (the generic `ModelIdentity` seam already supports it; would drop in alongside llama.cpp/Lemonade).
+- [ ] why not pick last available upstream? `• [snapshot_stale] benchmark snapshot was bundled 21 days ago — the daily CI refresh has not landed; recommender picks may be stale → fix with: (no action — daily CI refresh will heal automatically; re-run `llamastash doctor` later)`
+- [x] TUI: for multi gpu, dont show a row for each. instead show combined usage and hottest temp in a single gpu row. when multi gpu, show GPU* with legend entry in help
+- [x] Validate `gpu::is_cross_probe_duplicate` name-matching on more GPUs — closed: `normalize_card_name` now strips a leading vendor token (rocm-smi `Radeon …` vs Vulkan `AMD Radeon …`), and the pure `resolve_devices` core is table-tested across every backend combo (`src/gpu/mod.rs` tests). The PCI-id path (vendor:device parsing) was the actual Strix Halo dedup miss and is fixed + regression-tested.
 - [x] Add model size to HF downloader Search results page (`params` + approx download `size` columns from `gguf.total` / `gguf.totalFileSize`, single search call; sort cycles to File size / Params client-side)
 - [x] Add ability to search for model during init flow (Approach A: cliclack multi-step — "Search HuggingFace by name…" item → query prompt → results select reusing `hf_api::search`; chosen repo flows through the paste/download path)
 - [x] Windows: why is homebrew showing up as install option in Init flow in windows
@@ -221,7 +224,6 @@ places.
   - [ ] NVidia: Windows
   - [ ] Apple Metal : macOS
 - [ ] No glyphs fallback.
-- [ ] Validate `gpu::is_cross_probe_duplicate` name-matching on more GPUs (the no-lspci/Windows path leans on `normalize_card_name`, so DXGI-vs-Vulkan names that diverge before the first `(` won't dedup → phantom `Multi`; confirmed only on one APU). See `src/gpu/mod.rs::is_cross_probe_duplicate`.
 - [ ] **Need brainstorm/plan**: HTTP and MCP surfaces (origin: R34).
   - [ ] **MCP server surface.** Tracked under R34 alongside LAN exposure. The CLI is already agent-friendly via `--json`; MCP would add a Model Context Protocol server endpoint for agents that prefer it.
   - [ ] check and make sure HTTP and CLI surfaces are consistent and reuses code and flow where it makes sense.

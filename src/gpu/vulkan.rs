@@ -15,7 +15,11 @@ pub fn probe_devices() -> Option<Vec<GpuDevice>> {
   // cross-backend dedup. Fall back to summary-only parsing (which
   // gives `vendorID:deviceID` but no PCI bus) when JSON is
   // unavailable (some drivers suppress JSON output).
-  let json_devices = probe_json().unwrap_or_default();
+  let json_devices: Vec<GpuDevice> = probe_json()
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|d| !is_software_rasterizer(&d.name))
+    .collect();
   if !json_devices.is_empty() {
     return Some(json_devices);
   }
@@ -28,26 +32,37 @@ pub fn probe_devices() -> Option<Vec<GpuDevice>> {
     return None;
   }
   let stdout = String::from_utf8(output.stdout).ok()?;
-  let gpus = parse(&stdout);
-  if gpus.is_empty() {
-    return None;
-  }
   // Vulkan can't tell us vendor reliably or memory accurately. We
   // surface it under `Unknown` rather than mislabelling the card as
-  // AMD — Intel Arc, llvmpipe (software), and AMD-without-rocm-smi
-  // all hit this path on Linux, and the TUI renders
-  // `backend  unknown` so the user knows the vendor probe failed.
-  Some(
-    gpus
-      .into_iter()
-      .map(|(name, device_id)| GpuDevice {
-        name,
-        backend: "unknown".into(),
-        device_id: Some(device_id),
-        ..Default::default()
-      })
-      .collect(),
-  )
+  // AMD — Intel Arc and AMD-without-rocm-smi hit this path on Linux,
+  // and the TUI renders `backend  unknown` so the user knows the vendor
+  // probe failed. Software rasterizers (llvmpipe / lavapipe /
+  // swiftshader) are dropped: counting them as a GPU turns a CPU-only
+  // host into a phantom `Unknown`/`Multi` and skews launch budgeting.
+  let devices: Vec<GpuDevice> = parse(&stdout)
+    .into_iter()
+    .filter(|(name, _)| !is_software_rasterizer(name))
+    .map(|(name, device_id)| GpuDevice {
+      name,
+      backend: "unknown".into(),
+      device_id: Some(device_id),
+      ..Default::default()
+    })
+    .collect();
+  if devices.is_empty() {
+    return None;
+  }
+  Some(devices)
+}
+
+/// `true` when a Vulkan device name is a CPU software rasterizer rather
+/// than real hardware. These present a full Vulkan device but run on the
+/// CPU, so treating them as a GPU is always wrong.
+pub(crate) fn is_software_rasterizer(name: &str) -> bool {
+  let n = name.to_lowercase();
+  ["llvmpipe", "lavapipe", "swiftshader", "softpipe"]
+    .iter()
+    .any(|sw| n.contains(sw))
 }
 
 /// Parse `vulkaninfo -j` JSON for physical devices. Each device
@@ -201,5 +216,17 @@ mod tests {
   fn empty_summary_yields_no_devices() {
     assert!(parse("").is_empty());
     assert!(parse("WARNING: vulkan loader missing\n").is_empty());
+  }
+
+  #[test]
+  fn software_rasterizers_are_recognised() {
+    assert!(is_software_rasterizer("llvmpipe (LLVM 16.0.6, 256 bits)"));
+    assert!(is_software_rasterizer("lavapipe (LLVM 17)"));
+    assert!(is_software_rasterizer("SwiftShader Device (LLVM 10)"));
+    assert!(!is_software_rasterizer("AMD Radeon RX 7900 XTX"));
+    assert!(!is_software_rasterizer("Intel(R) Arc(tm) A770 Graphics"));
+    assert!(!is_software_rasterizer(
+      "AMD Radeon 8060S Graphics (RADV STRIX_HALO)"
+    ));
   }
 }

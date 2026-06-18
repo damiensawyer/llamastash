@@ -38,16 +38,16 @@ pub mod vulkan;
 /// Dedicated-VRAM ceiling below which an AMD card is classified as an
 /// integrated UMA APU by carve-out signature (R18). No discrete GPU
 /// ships with under 1 GiB of dedicated VRAM, so a tiny `vram_total`
-/// paired with a large system-RAM-backed GTT pool is the APU marker
-/// (Strix Halo's BIOS carve-out is 512 MiB on the reference box).
+/// paired with a large system-RAM-backed GTT pool is the APU marker.
 ///
-/// This is the *constrained* fallback heuristic: Linux amdgpu exposes
-/// no driver-level "integrated" flag (unlike the Windows D3D12 `UMA`
-/// flag or Apple's constitutional unified memory), so size is the only
-/// signal. A large BIOS carve-out (e.g. 4 GiB) on an APU is genuinely
-/// ambiguous from memory sizes alone and would misclassify as discrete;
-/// the classification source is surfaced in `doctor` so the verdict is
-/// inspectable rather than silent.
+/// This is the *fallback* heuristic. The authoritative signal is the
+/// PCI class (`0x0380` = Display controller → integrated), read by the
+/// sysfs probe and passed as `is_integrated` to [`classify_amd_memory`]
+/// — necessary because amdgpu auto-detects a 4 GiB VRAM region on Strix
+/// Halo regardless of the BIOS carve-out, sailing past this 1 GiB
+/// ceiling. The size heuristic still covers the rocm-smi fallback path
+/// (no PCI class) and APUs that report a small carve. The verdict's
+/// source is surfaced in `doctor` so it stays inspectable.
 pub const CARVE_VRAM_CEILING_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Decide whether a card's dedicated-VRAM size matches the integrated
@@ -60,16 +60,23 @@ pub fn is_carve_signature(vram_total: u64) -> bool {
 /// Classify an AMD card from its VRAM / GTT sizes (R18) — the single
 /// source of truth shared by the sysfs probe and the rocm-smi fallback.
 /// Returns `(total_memory_bytes, used_memory_bytes, uma_shared_total,
-/// uma_shared_used, source)`. A carve-signature APU sums VRAM + GTT and
+/// uma_shared_used, source)`. An integrated/UMA APU sums VRAM + GTT and
 /// marks the GTT portion as the shared system-RAM pool; a discrete card
 /// reports VRAM only.
+///
+/// `is_integrated` is the authoritative signal (the sysfs probe reads it
+/// from the PCI class — Strix Halo and friends report VRAM ≫ 1 GiB so
+/// the size heuristic alone misses them). It ORs with the legacy
+/// carve-out signature (tiny VRAM + large GTT) so an APU still
+/// classifies as unified when the class is unavailable (rocm-smi path).
 pub fn classify_amd_memory(
   vram_total: u64,
   vram_used: u64,
   gtt_total: Option<u64>,
   gtt_used: Option<u64>,
+  is_integrated: bool,
 ) -> (u64, u64, Option<u64>, Option<u64>, ClassSource) {
-  if is_carve_signature(vram_total) {
+  if is_integrated || is_carve_signature(vram_total) {
     let gt = gtt_total.unwrap_or(0);
     let gu = gtt_used.unwrap_or(0);
     (
@@ -464,24 +471,19 @@ fn resolve_device_id(device: &GpuDevice, lspci: &Option<LspciMaps>) -> String {
       name_map
         .get(&device.name)
         .or_else(|| {
-          // Try resolving vendor:device IDs (e.g. "0x1002:0x7551")
-          // from vulkaninfo by stripping the "0x" prefix and lowercasing.
+          // vulkaninfo reports vendor:device as "0xVVVV:0xDDDD"; strip
+          // the "0x" off *each* part (not just the leading one) and
+          // lowercase so it matches lspci's "vvvv:dddd" key. Leading
+          // zeros are kept — `last_vendor_device` stores the raw
+          // bracket digits, so both sides agree.
           if let Some(pci) = &device.device_id {
             if pci.starts_with("0x") && pci.contains(':') {
-              let stripped: String = pci
-                .trim_start_matches("0x")
+              let key = pci
                 .split(':')
-                .map(|part| {
-                  let hex = part.trim_start_matches('0');
-                  if hex.is_empty() {
-                    "0".to_string()
-                  } else {
-                    hex.to_lowercase()
-                  }
-                })
+                .map(|part| part.trim().trim_start_matches("0x").to_lowercase())
                 .collect::<Vec<_>>()
                 .join(":");
-              return pci_id_map.get(&stripped);
+              return pci_id_map.get(&key);
             }
           }
           None
@@ -507,11 +509,21 @@ fn normalize_card_name(name: &str) -> String {
     Some((head, _)) => head,
     None => name,
   };
-  base
+  let lowered = base
     .split_whitespace()
     .collect::<Vec<_>>()
     .join(" ")
-    .to_lowercase()
+    .to_lowercase();
+  // Strip a single leading vendor token: one tool emits it (Vulkan's
+  // "AMD Radeon RX 7900 XT"), another omits it (rocm-smi's "Radeon RX
+  // 7900 XT"). Removing it from both sides closes that match gap without
+  // over-collapsing — distinct cards still differ on the model tokens.
+  for vendor in ["amd", "nvidia", "intel", "ati", "apple"] {
+    if let Some(rest) = lowered.strip_prefix(&format!("{vendor} ")) {
+      return rest.to_string();
+    }
+  }
+  lowered
 }
 
 /// True when `candidate` (a Vulkan-fallback device) is the same physical
@@ -598,8 +610,35 @@ pub fn probe() -> GpuInfo {
     unknown_devices = devs;
   }
 
-  // Cheap early-out: nothing found. Done before the lspci subprocess
-  // work below so the CPU-only path stays probe-light.
+  let raw_total =
+    nvidia_devices.len() + amd_devices.len() + metal_devices.len() + unknown_devices.len();
+  // lspci feeds cross-probe dedup, which only matters with >1 device;
+  // skip the subprocess for a lone card (it hits a single-device variant
+  // that never reads `device_id`).
+  let lspci = if raw_total > 1 { query_lspci() } else { None };
+  resolve_devices(
+    nvidia_devices,
+    amd_devices,
+    metal_devices,
+    unknown_devices,
+    lspci,
+  )
+}
+
+/// Pure dedup + classification over already-probed per-backend device
+/// lists. Split out of [`probe`] so every hardware combination is
+/// unit-testable without the vendor-tool IO that made this logic
+/// regress repeatedly on hardware no test could reach. `lspci` is the
+/// Linux cross-probe PCI map (`None` on other platforms / single-device
+/// hosts, where dedup isn't needed).
+pub(crate) fn resolve_devices(
+  mut nvidia_devices: Vec<GpuDevice>,
+  mut amd_devices: Vec<GpuDevice>,
+  mut metal_devices: Vec<GpuDevice>,
+  mut unknown_devices: Vec<GpuDevice>,
+  lspci: Option<LspciMaps>,
+) -> GpuInfo {
+  // Nothing found anywhere → CPU-only.
   if nvidia_devices.is_empty()
     && amd_devices.is_empty()
     && metal_devices.is_empty()
@@ -610,63 +649,62 @@ pub fn probe() -> GpuInfo {
 
   // Collapse cross-probe duplicates BEFORE counting: the Vulkan fallback
   // re-detects cards a native/DXGI probe already found (the norm on
-  // Windows), and counting one card twice mislabels it `Multi`. Skip the
-  // work — and the `lspci` subprocess — for a lone card, which hits a
-  // single-device variant below that never reads `device_id`.
+  // Windows), and counting one card twice mislabels it `Multi`.
   let raw_total =
     nvidia_devices.len() + amd_devices.len() + metal_devices.len() + unknown_devices.len();
-  let lspci = if raw_total > 1 {
-    let maps = query_lspci();
-    enrich_with_lspci(&mut nvidia_devices, &maps);
-    enrich_with_lspci(&mut amd_devices, &maps);
-    enrich_with_lspci(&mut metal_devices, &maps);
-    enrich_with_lspci(&mut unknown_devices, &maps);
+  if raw_total > 1 {
+    enrich_with_lspci(&mut nvidia_devices, &lspci);
+    enrich_with_lspci(&mut amd_devices, &lspci);
+    enrich_with_lspci(&mut metal_devices, &lspci);
+    enrich_with_lspci(&mut unknown_devices, &lspci);
     let natives: Vec<&GpuDevice> = nvidia_devices
       .iter()
       .chain(amd_devices.iter())
       .chain(metal_devices.iter())
       .collect();
-    unknown_devices.retain(|d| !is_cross_probe_duplicate(d, &natives, &maps));
-    maps
-  } else {
-    None
-  };
+    unknown_devices.retain(|d| !is_cross_probe_duplicate(d, &natives, &lspci));
+  }
 
-  // Count devices across all backends (post-dedup).
-  let total =
-    nvidia_devices.len() + amd_devices.len() + metal_devices.len() + unknown_devices.len();
+  // Backend variant is decided by how many *distinct backends* survived
+  // dedup, not the device count. `Multi` means two or more backends each
+  // found a card (the documented `gpu_backend = "multi"` contract); a
+  // single backend with several cards (dual-RTX, CrossFire) stays that
+  // backend's variant so routing/admission see the real vendor — not a
+  // generic `multi` that, e.g., dropped a dual-NVIDIA host onto the
+  // Vulkan build instead of CUDA.
+  let backends_present = [
+    !nvidia_devices.is_empty(),
+    !amd_devices.is_empty(),
+    !metal_devices.is_empty(),
+    !unknown_devices.is_empty(),
+  ]
+  .into_iter()
+  .filter(|present| *present)
+  .count();
 
-  // Single-device hits return the native variant for backward compat
-  if total == 1 && nvidia_devices.is_empty() && amd_devices.is_empty() && unknown_devices.is_empty()
-  {
-    // Only Metal — return AppleMetal for the unified-memory path
-    let dev = &metal_devices[0];
-    return GpuInfo::AppleMetal {
-      total_memory_bytes: dev.total_memory_bytes,
-    };
-  }
-  if total == 1 && amd_devices.is_empty() && metal_devices.is_empty() && unknown_devices.is_empty()
-  {
-    return GpuInfo::Nvidia {
-      devices: nvidia_devices,
-    };
-  }
-  if total == 1
-    && nvidia_devices.is_empty()
-    && metal_devices.is_empty()
-    && unknown_devices.is_empty()
-  {
-    return GpuInfo::Amd {
-      devices: amd_devices,
-    };
-  }
-  if total == 1 && nvidia_devices.is_empty() && amd_devices.is_empty() && metal_devices.is_empty() {
+  if backends_present == 1 {
+    if !metal_devices.is_empty() {
+      // Apple is one unified GPU; report its memory for the shared pool.
+      return GpuInfo::AppleMetal {
+        total_memory_bytes: metal_devices[0].total_memory_bytes,
+      };
+    }
+    if !nvidia_devices.is_empty() {
+      return GpuInfo::Nvidia {
+        devices: nvidia_devices,
+      };
+    }
+    if !amd_devices.is_empty() {
+      return GpuInfo::Amd {
+        devices: amd_devices,
+      };
+    }
     return GpuInfo::Unknown {
       devices: unknown_devices,
     };
   }
 
-  // Two or more distinct cards — build one combined list. Devices are
+  // Two or more distinct backends — build one combined list. Devices are
   // already lspci-enriched and the Vulkan fallback's duplicates of a
   // native card were dropped above; the check in the loop below now only
   // guards against duplicates *within* the surviving set.
@@ -879,6 +917,213 @@ mod tests {
     }
   }
 
+  // ---- resolve_devices: hardware-combination coverage ----
+  //
+  // resolve_devices is the pure dedup + classification core extracted
+  // from probe(). Exercising it across every backend combination is what
+  // makes this logic regression-proof on hardware no CI runner has.
+
+  fn gib(n: u64) -> u64 {
+    n * 1024 * 1024 * 1024
+  }
+  fn dev(name: &str, backend: &str, total: u64, pci: Option<&str>, uma: Option<u64>) -> GpuDevice {
+    GpuDevice {
+      name: name.into(),
+      backend: backend.into(),
+      total_memory_bytes: total,
+      device_id: pci.map(String::from),
+      uma_shared_total_bytes: uma,
+      ..Default::default()
+    }
+  }
+  fn nv(name: &str, pci: &str) -> GpuDevice {
+    dev(name, "nvidia", gib(24), Some(pci), None)
+  }
+  fn amd_dev(name: &str, pci: &str) -> GpuDevice {
+    dev(name, "amd", gib(16), Some(pci), None)
+  }
+  fn vk(name: &str, id: &str) -> GpuDevice {
+    dev(name, "unknown", 0, Some(id), None)
+  }
+
+  #[test]
+  fn resolve_empty_is_cpu_only() {
+    assert_eq!(
+      resolve_devices(vec![], vec![], vec![], vec![], None),
+      GpuInfo::CpuOnly
+    );
+  }
+
+  #[test]
+  fn resolve_single_backend_variants() {
+    assert!(matches!(
+      resolve_devices(vec![nv("RTX 4090", "00000000:01:00.0")], vec![], vec![], vec![], None),
+      GpuInfo::Nvidia { devices } if devices.len() == 1
+    ));
+    assert!(matches!(
+      resolve_devices(vec![], vec![amd_dev("RX 7900", "00000000:03:00.0")], vec![], vec![], None),
+      GpuInfo::Amd { devices } if devices.len() == 1
+    ));
+    assert!(matches!(
+      resolve_devices(vec![], vec![], vec![dev("Apple M3 Max", "metal", gib(96), None, None)], vec![], None),
+      GpuInfo::AppleMetal { total_memory_bytes } if total_memory_bytes == gib(96)
+    ));
+    // Vulkan-only (Intel Arc, or AMD without rocm-smi) → Unknown.
+    assert!(matches!(
+      resolve_devices(vec![], vec![], vec![], vec![vk("Intel Arc A770", "0x8086:0x56a0")], None),
+      GpuInfo::Unknown { devices } if devices.len() == 1
+    ));
+  }
+
+  #[test]
+  fn resolve_two_same_backend_cards_keep_their_variant() {
+    // Dual-NVIDIA / CrossFire: one backend with several cards must NOT
+    // collapse to `Multi` (which would route a dual-NVIDIA Linux box to
+    // the Vulkan build instead of CUDA).
+    assert!(matches!(
+      resolve_devices(
+        vec![nv("RTX 4090", "00000000:01:00.0"), nv("RTX 4090", "00000000:02:00.0")],
+        vec![], vec![], vec![], None,
+      ),
+      GpuInfo::Nvidia { devices } if devices.len() == 2
+    ));
+    assert!(matches!(
+      resolve_devices(
+        vec![],
+        vec![amd_dev("RX 7900", "00000000:03:00.0"), amd_dev("RX 7900", "00000000:04:00.0")],
+        vec![], vec![], None,
+      ),
+      GpuInfo::Amd { devices } if devices.len() == 2
+    ));
+  }
+
+  #[test]
+  fn resolve_dedups_vulkan_duplicate_by_pci() {
+    // Same NVIDIA card via nvidia-smi + Vulkan, both carrying the
+    // canonical PCI address → one Nvidia device, not Multi.
+    let r = resolve_devices(
+      vec![nv("NVIDIA GeForce RTX 4090", "00000000:01:00.0")],
+      vec![],
+      vec![],
+      vec![vk("NVIDIA GeForce RTX 4090", "00000000:01:00.0")],
+      None,
+    );
+    assert!(
+      matches!(r, GpuInfo::Nvidia { ref devices } if devices.len() == 1),
+      "{r:?}"
+    );
+  }
+
+  #[test]
+  fn resolve_dedups_vulkan_duplicate_by_name_without_lspci() {
+    // Windows / no-lspci path: the Vulkan vendor:device id can't resolve
+    // to a bus address, so dedup falls back to the normalized name.
+    let r = resolve_devices(
+      vec![nv("NVIDIA GeForce RTX 4090", "00000000:01:00.0")],
+      vec![],
+      vec![],
+      vec![vk("NVIDIA GeForce RTX 4090", "0x10de:0x2684")],
+      None,
+    );
+    assert!(
+      matches!(r, GpuInfo::Nvidia { ref devices } if devices.len() == 1),
+      "{r:?}"
+    );
+  }
+
+  #[test]
+  fn resolve_amd_apu_collapses_vulkan_via_lspci_and_keeps_unified() {
+    // The Strix Halo regression end-to-end: native AMD APU (unified, GTT
+    // marked shared) + its Vulkan vendor:device duplicate, collapsed via
+    // lspci → one Amd device that still carries the shared-pool size.
+    let lspci = Some(parse_lspci(
+      "0000:c4:00.0 Display controller [0380]: AMD Strix Halo [1002:1586]\n",
+    ));
+    let r = resolve_devices(
+      vec![],
+      vec![dev(
+        "card0",
+        "amd",
+        gib(128),
+        Some("00000000:c4:00.0"),
+        Some(gib(124)),
+      )],
+      vec![],
+      vec![vk(
+        "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+        "0x1002:0x1586",
+      )],
+      lspci,
+    );
+    match r {
+      GpuInfo::Amd { devices } => {
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].uma_shared_total_bytes, Some(gib(124)));
+      }
+      other => panic!("expected Amd, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn resolve_genuine_two_backends_is_multi() {
+    // dGPU + iGPU (NVIDIA discrete + AMD APU) → Multi with both.
+    let r = resolve_devices(
+      vec![nv("NVIDIA GeForce RTX 4090", "00000000:01:00.0")],
+      vec![dev(
+        "card0",
+        "amd",
+        gib(96),
+        Some("00000000:c4:00.0"),
+        Some(gib(92)),
+      )],
+      vec![],
+      vec![],
+      None,
+    );
+    assert!(
+      matches!(r, GpuInfo::Multi { ref devices } if devices.len() == 2),
+      "{r:?}"
+    );
+  }
+
+  #[test]
+  fn resolve_multi_drops_dup_keeps_genuine_second_card() {
+    // NVIDIA + two Vulkan devices: one is the NVIDIA card's duplicate
+    // (same PCI), the other a genuine Intel iGPU → Multi with exactly
+    // the NVIDIA + Intel, the duplicate dropped.
+    let r = resolve_devices(
+      vec![nv("NVIDIA GeForce RTX 4090", "00000000:01:00.0")],
+      vec![],
+      vec![],
+      vec![
+        vk("NVIDIA GeForce RTX 4090", "00000000:01:00.0"),
+        vk("Intel Arc A770", "00000000:03:00.0"),
+      ],
+      None,
+    );
+    match r {
+      GpuInfo::Multi { devices } => {
+        assert_eq!(devices.len(), 2, "{devices:?}");
+        assert!(devices.iter().any(|d| d.name.contains("Intel")));
+      }
+      other => panic!("expected Multi, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn resolve_metal_plus_moltenvk_duplicate_stays_apple() {
+    // MoltenVK re-reports the Apple GPU through Vulkan; the name dedup
+    // (vendor-prefix-stripped) collapses it so the host stays AppleMetal.
+    let r = resolve_devices(
+      vec![],
+      vec![],
+      vec![dev("Apple M3 Max", "metal", gib(96), None, None)],
+      vec![vk("Apple M3 Max", "0x106b:0x1000")],
+      None,
+    );
+    assert!(matches!(r, GpuInfo::AppleMetal { .. }), "{r:?}");
+  }
+
   #[test]
   fn cross_probe_duplicate_collapses_driver_tagged_vulkan_name() {
     // Same card, bare native name vs "(RADV …)"-tagged Vulkan name, no
@@ -896,14 +1141,42 @@ mod tests {
   }
 
   #[test]
-  fn cross_probe_duplicate_name_mismatch_is_a_known_gap() {
-    // Known gap (see TODO): same card, but the names don't normalize alike
-    // (native drops the "AMD" prefix) and there's no PCI id, so it won't
-    // dedup. Characterization test — gh_releases' Multi route is what
-    // keeps init working when this fires.
+  fn cross_probe_duplicate_collapses_across_vendor_prefix_mismatch() {
+    // Previously a known gap: rocm-smi drops the "AMD" prefix ("Radeon RX
+    // 7900 XT") while Vulkan keeps it ("AMD Radeon RX 7900 XT (RADV
+    // NAVI31)"), and with no PCI id the name fallback didn't collapse
+    // them → phantom `Multi`. normalize_card_name now strips the leading
+    // vendor token on both sides, so they dedup even without lspci.
     let native = named_device("Radeon RX 7900 XT", "amd");
     let vulkan = named_device("AMD Radeon RX 7900 XT (RADV NAVI31)", "unknown");
-    assert!(!is_cross_probe_duplicate(&vulkan, &[&native], &None));
+    assert!(is_cross_probe_duplicate(&vulkan, &[&native], &None));
+  }
+
+  #[test]
+  fn cross_probe_duplicate_collapses_vulkan_vendor_device_via_lspci() {
+    // Regression (Strix Halo, PR #40): the native AMD probe tags the
+    // canonical PCI address, while the Vulkan probe reports only a
+    // "0xVVVV:0xDDDD" vendor:device id. lspci maps that id to the same
+    // address, so they must dedup — the per-part "0x" strip is what
+    // makes "0x1002:0x1586" match lspci's "1002:1586" key. Before the
+    // fix the second part mangled to "x1586", the lookup missed, and the
+    // single iGPU surfaced as a phantom `Multi`.
+    let lspci = Some(parse_lspci(
+      "0000:c4:00.0 Display controller [0380]: Advanced Micro Devices, Inc. [AMD/ATI] Strix Halo [1002:1586] (rev c1)\n",
+    ));
+    let native = GpuDevice {
+      name: "card0".into(),
+      backend: "amd".into(),
+      device_id: Some("00000000:c4:00.0".into()),
+      ..Default::default()
+    };
+    let vulkan = GpuDevice {
+      name: "AMD Radeon 8060S Graphics (RADV STRIX_HALO)".into(),
+      backend: "unknown".into(),
+      device_id: Some("0x1002:0x1586".into()),
+      ..Default::default()
+    };
+    assert!(is_cross_probe_duplicate(&vulkan, &[&native], &lspci));
   }
 
   #[test]

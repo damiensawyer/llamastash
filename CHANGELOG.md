@@ -9,6 +9,10 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 - HuggingFace pull dialog search rows now show `params` (model size, e.g. `35B`) and `size` (approximate download size, e.g. `5.3G`) columns, fetched in the same search request. Sort (`o`) now also cycles through File size, Params, and Repo name (reordering the current page).
 - `init` / `recommend` model picker gains a "Search HuggingFace by name…" option: prompts for a query, lists live results (params · size · downloads), and downloads the chosen repo.
 
+### Changed
+
+- TUI Host pane now shows a single `GPU*` row on multi-GPU machines (combined usage + hottest temp) instead of one row per card; the help legend explains the marker, and `status --json .host.gpu_devices` keeps the per-card breakdown.
+
 ### Fixed
 
 - Windows `init` no longer aborts with "no GH Releases asset matches this hardware" on single-GPU machines. A lone AMD/NVIDIA card that both the DXGI and Vulkan probes detect was double-counted and reported as `gpu_backend: multi`, which had no install route. The probe now collapses the cross-probe duplicate before classifying, so a single card reports its vendor (e.g. `amd`); the GH Releases router also handles genuine multi-GPU hosts (CUDA when any NVIDIA card is present, else the universal Vulkan build).
