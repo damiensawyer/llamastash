@@ -9,6 +9,7 @@ both tools give it a real PTY, render the live screen with a terminal emulator
 |------|-------------|
 | **`tui_drive.py`** | Quick, throwaway inspection. Zero deps beyond `pyte`, JSON-on-argv (easy for an agent to generate inline), prints each screen to stdout. No assertions, no exit code. Reach for this to *look* at a flow. |
 | **`harness.py`** | Repeatable UAT / regression checks. Adds `expect`/`refute` assertions, PASS/FAIL accounting, a non-zero exit code for CI, persisted `snap:` screenshots, and mid-run re-`spawn:`. Reach for this to *gate* on a flow. Needs `pexpect` on top of `pyte`. |
+| **`drive_init_search.py`** | Drive the `init` **cliclack** wizard (not the ratatui TUI), specifically the model picker's "Search HuggingFace by name…" flow. Reach for this to inspect the init model-search path. Needs `pexpect` + `pyte`. |
 
 Both inherit this process's env, so pair either with an isolated state dir
 (`LLAMASTASH_STATE_DIR` + friends, see `../../AGENTS.md`) to drive a clean
@@ -113,6 +114,19 @@ Two helpers consume a recorded cast (both handle v2 and v3):
   guessing.
 
 [asciinema]: https://asciinema.org/
+
+## drive_init_search.py
+
+```bash
+/tmp/ls-tui-venv/bin/python scripts/tui/drive_init_search.py target/debug/llamastash qwen3
+```
+
+Args: `[binary] [query]` (defaults `target/debug/llamastash` / `qwen3`). Drives
+`init --only models` to the "Search HuggingFace by name…" item, types the query,
+prints the live results, walks back to the model list, and ends on **Skip** — so
+it never downloads a model (the search step does hit the live HF API). Pair with
+an isolated `LLAMASTASH_STATE_DIR` + friends. This is the only driver here for
+the `cliclack` init wizard; the others drive the full-screen ratatui app.
 
 ### Program steps
 

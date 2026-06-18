@@ -816,7 +816,7 @@ async fn run_models_step(
       remote_snapshot_attempt,
     });
   }
-  let choice = prompts::pick_model(args, &recs).await?;
+  let choice = prompts::pick_model(args, fetch, &recs).await?;
   log::debug!("init: model chosen: {choice:?}");
   // `--revision` only carries through on the paste branch — curated
   // picks are deliberately HEAD-tracked because the benchmark

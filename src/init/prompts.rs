@@ -23,6 +23,8 @@ use crate::cli::exit_codes::{CliExit, INIT_ABORTED};
 use crate::gpu::{GpuDevice, GpuInfo};
 use crate::init::benchmark::ModelEntry;
 use crate::init::detection::{BinaryPresence, CpuArch, HardwareSnapshot, OsFamily};
+use crate::init::fetch::FetchClient;
+use crate::init::hf_api::{self, format_param_count, HfSearchResult, HfSortKey};
 use crate::init::install::InstallChoice;
 use crate::init::recommender::{Recommendation, RecommendationKind};
 use crate::init::wizard::InitSummary;
@@ -554,7 +556,11 @@ enum InstallPick {
 /// `ModelOverride::Recommended` and the recommended-mode short-circuit
 /// both resolve to the top curated recommendation, so this fn handles
 /// the override + recommended-mode + non-TTY branches uniformly.
-pub async fn pick_model(args: &InitArgs, recs: &[Recommendation]) -> Result<ModelChoice, CliExit> {
+pub async fn pick_model(
+  args: &InitArgs,
+  fetch: &FetchClient,
+  recs: &[Recommendation],
+) -> Result<ModelChoice, CliExit> {
   let curated_default = recs.iter().find_map(|r| match &r.kind {
     RecommendationKind::Curated { entry } => Some(entry.clone()),
     _ => None,
@@ -595,22 +601,61 @@ pub async fn pick_model(args: &InitArgs, recs: &[Recommendation]) -> Result<Mode
     .iter()
     .position(|r| matches!(r.kind, RecommendationKind::Curated { .. }))
     .unwrap_or(0);
-  // Append a synthetic "Skip" entry as the last option in the picker
-  // so users can decline the model-download step from the UI without
-  // having to abort the wizard or pass `--model none`. The index is
-  // `owned_recs.len()` (one past the last real recommendation); the
-  // match arm below maps that index to `ModelChoice::Skip`.
-  let skip_idx = owned_recs.len();
-  // Return the chosen Recommendation directly from the blocking task
-  // so the index never crosses the spawn_blocking boundary back to
-  // an unrelated slice. Removes the "two parallel slices must stay
-  // in sync" hazard the prior code had. Skip is signalled by an
-  // `Ok(None)` from the blocking task (sentinel index `skip_idx`).
-  let chosen: Option<Recommendation> = tokio::task::spawn_blocking(move || {
+  // Search hits the network, so only offer it when egress is allowed.
+  let online = !fetch.is_offline();
+  // Re-show the model list after the search sub-flow's "back" so the
+  // user isn't trapped in search if they change their mind.
+  loop {
+    match show_model_menu(owned_recs.clone(), initial_idx, online).await? {
+      ModelMenuOutcome::Pick(RecommendationKind::Curated { entry }) => {
+        return Ok(ModelChoice::Curated(entry))
+      }
+      ModelMenuOutcome::Pick(RecommendationKind::Escape) => {
+        return Ok(ModelChoice::Paste(prompt_paste_repo().await?))
+      }
+      // OnDisk variants were filtered out above; any other pick is a
+      // no-op that falls through to Skip.
+      ModelMenuOutcome::Pick(_) | ModelMenuOutcome::Skip => return Ok(ModelChoice::Skip),
+      ModelMenuOutcome::Search => {
+        if let Some(repo) = search_and_pick(fetch).await? {
+          return Ok(ModelChoice::Paste(repo));
+        }
+        // "back" → fall through to re-show the model list.
+      }
+    }
+  }
+}
+
+/// What the model-list prompt resolved to. `Pick` carries the chosen
+/// recommendation's kind so the caller branches without re-indexing.
+enum ModelMenuOutcome {
+  Pick(RecommendationKind),
+  Search,
+  Skip,
+}
+
+/// Render the "Pick a model" cliclack list: recommendations, an
+/// optional "Search HuggingFace" item (online only), and "Skip".
+async fn show_model_menu(
+  recs: Vec<Recommendation>,
+  initial_idx: usize,
+  online: bool,
+) -> Result<ModelMenuOutcome, CliExit> {
+  let n = recs.len();
+  let search_idx = online.then_some(n);
+  let skip_idx = if online { n + 1 } else { n };
+  tokio::task::spawn_blocking(move || {
     let mut select = cliclack::select("Pick a model").initial_value(initial_idx);
-    for (i, r) in owned_recs.iter().enumerate() {
+    for (i, r) in recs.iter().enumerate() {
       let (label, hint) = render_recommendation(r);
       select = select.item(i, label, hint);
+    }
+    if let Some(si) = search_idx {
+      select = select.item(
+        si,
+        "Search HuggingFace by name…".to_string(),
+        "type a query, pick from results".to_string(),
+      );
     }
     select = select.item(
       skip_idx,
@@ -618,47 +663,185 @@ pub async fn pick_model(args: &InitArgs, recs: &[Recommendation]) -> Result<Mode
       "use `llamastash pull` later".to_string(),
     );
     let idx = select.interact()?;
-    if idx == skip_idx {
-      return Ok::<_, std::io::Error>(None);
-    }
-    Ok::<_, std::io::Error>(owned_recs.into_iter().nth(idx))
+    let outcome = if Some(idx) == search_idx {
+      ModelMenuOutcome::Search
+    } else if idx == skip_idx {
+      ModelMenuOutcome::Skip
+    } else {
+      match recs.into_iter().nth(idx) {
+        Some(r) => ModelMenuOutcome::Pick(r.kind),
+        None => ModelMenuOutcome::Skip,
+      }
+    };
+    Ok::<_, std::io::Error>(outcome)
   })
   .await
   .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: prompt join failed: {e}")))?
-  .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: model prompt: {e}")))?;
-  match chosen.map(|r| r.kind) {
-    Some(RecommendationKind::Curated { entry }) => Ok(ModelChoice::Curated(entry)),
-    Some(RecommendationKind::Escape) => {
-      let repo: String = tokio::task::spawn_blocking(|| {
-        cliclack::input("Paste an HF repo id")
-          .placeholder("owner/repo")
-          .validate(|s: &String| {
-            if !s.contains('/') {
-              return Err("expected `owner/repo`");
-            }
-            if s.chars().any(char::is_whitespace) {
-              return Err("must not contain whitespace");
-            }
-            // Control characters (incl. null bytes) flow into
-            // filesystem paths + URLs downstream; reject at the
-            // validator boundary, not after they cause a confusing
-            // OS-level error.
-            if s.chars().any(char::is_control) {
-              return Err("must not contain control characters");
-            }
-            Ok(())
-          })
-          .interact()
-      })
-      .await
-      .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: prompt join failed: {e}")))?
-      .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: paste prompt: {e}")))?;
-      Ok(ModelChoice::Paste(repo))
-    }
-    // OnDisk variants were filtered out above; treat any residual
-    // None (empty selection, or unexpected variant) as Skip.
-    _ => Ok(ModelChoice::Skip),
+  .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: model prompt: {e}")))
+}
+
+/// The existing "paste an owner/repo slug" prompt. Shared by the
+/// `Escape` menu item.
+async fn prompt_paste_repo() -> Result<String, CliExit> {
+  tokio::task::spawn_blocking(|| {
+    cliclack::input("Paste an HF repo id")
+      .placeholder("owner/repo")
+      .validate(validate_repo_slug)
+      .interact()
+  })
+  .await
+  .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: prompt join failed: {e}")))?
+  .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: paste prompt: {e}")))
+}
+
+/// `owner/repo` slug validator, shared by the paste prompt and the
+/// search query (which forbids the slash a query wouldn't carry).
+fn validate_repo_slug(s: &String) -> Result<(), &'static str> {
+  if !s.contains('/') {
+    return Err("expected `owner/repo`");
   }
+  if s.chars().any(char::is_whitespace) {
+    return Err("must not contain whitespace");
+  }
+  // Control characters (incl. null bytes) flow into filesystem paths +
+  // URLs downstream; reject at the validator boundary, not after they
+  // cause a confusing OS-level error.
+  if s.chars().any(char::is_control) {
+    return Err("must not contain control characters");
+  }
+  Ok(())
+}
+
+/// What the search results prompt resolved to.
+enum SearchPick {
+  Repo(String),
+  Again,
+  Back,
+}
+
+/// Search HuggingFace by name and let the user pick a repo. Returns
+/// `Some(repo_id)` once a result is chosen (the caller wraps it as
+/// `ModelChoice::Paste`, reusing the slug download path), or `None` to
+/// return to the model list. Reuses `hf_api::search`; only the cliclack
+/// rendering is local.
+async fn search_and_pick(fetch: &FetchClient) -> Result<Option<String>, CliExit> {
+  let mut query = prompt_search_query(None).await?;
+  loop {
+    let results = match hf_api::search(fetch, &query, HfSortKey::Downloads, None).await {
+      Ok(page) => page.results,
+      Err(err) => {
+        note_search_error(&err).await?;
+        query = prompt_search_query(Some(&query)).await?;
+        continue;
+      }
+    };
+    match pick_search_result(&query, results).await? {
+      SearchPick::Repo(repo) => return Ok(Some(repo)),
+      SearchPick::Again => query = prompt_search_query(Some(&query)).await?,
+      SearchPick::Back => return Ok(None),
+    }
+  }
+}
+
+/// Prompt for a free-text search query, pre-filled with `initial` when
+/// re-searching.
+async fn prompt_search_query(initial: Option<&str>) -> Result<String, CliExit> {
+  let initial = initial.map(str::to_string);
+  tokio::task::spawn_blocking(move || {
+    let mut input = cliclack::input("Search HuggingFace").placeholder("e.g. qwen3 coder");
+    if let Some(seed) = initial {
+      input = input.default_input(&seed);
+    }
+    input
+      .validate(|s: &String| {
+        if s.trim().is_empty() {
+          return Err("enter a search term");
+        }
+        Ok(())
+      })
+      .interact::<String>()
+  })
+  .await
+  .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: prompt join failed: {e}")))?
+  .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: search prompt: {e}")))
+}
+
+/// Render the search results as a cliclack list (plus "search again" /
+/// "back"). Each row's label is the repo id; the hint carries the
+/// reused params / size / downloads summary.
+async fn pick_search_result(
+  query: &str,
+  results: Vec<HfSearchResult>,
+) -> Result<SearchPick, CliExit> {
+  let query = query.to_string();
+  tokio::task::spawn_blocking(move || {
+    let n = results.len();
+    let again_idx = n;
+    let back_idx = n + 1;
+    let title = if results.is_empty() {
+      format!("No GGUF matches for `{query}`")
+    } else {
+      format!("Results for `{query}`")
+    };
+    let mut select = cliclack::select(title);
+    for (i, r) in results.iter().enumerate() {
+      select = select.item(i, r.repo_id.clone(), search_result_hint(r));
+    }
+    select = select.item(again_idx, "↻ Search again".to_string(), String::new());
+    select = select.item(back_idx, "← Back to model list".to_string(), String::new());
+    let idx = select.interact()?;
+    let pick = if idx == again_idx {
+      SearchPick::Again
+    } else if idx == back_idx {
+      SearchPick::Back
+    } else {
+      match results.into_iter().nth(idx) {
+        Some(r) => SearchPick::Repo(r.repo_id),
+        None => SearchPick::Back,
+      }
+    };
+    Ok::<_, std::io::Error>(pick)
+  })
+  .await
+  .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: prompt join failed: {e}")))?
+  .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: results prompt: {e}")))
+}
+
+/// One-line metadata hint for a search result row: params, approximate
+/// download size, downloads. Reuses [`format_param_count`]; sizes/counts
+/// are local display helpers.
+fn search_result_hint(r: &HfSearchResult) -> String {
+  let mut parts: Vec<String> = Vec::new();
+  if let Some(p) = r.param_count() {
+    parts.push(format_param_count(p));
+  }
+  if let Some(b) = r.download_size_bytes() {
+    parts.push(format_gib(b));
+  }
+  if let Some(d) = r.downloads {
+    parts.push(format!("↓{}", short_count(d)));
+  }
+  parts.join(" · ")
+}
+
+/// K/M/B short count for popularity totals.
+fn short_count(n: u64) -> String {
+  match n {
+    0..=999 => n.to_string(),
+    1_000..=999_999 => format!("{:.1}K", n as f64 / 1_000.0),
+    1_000_000..=999_999_999 => format!("{:.1}M", n as f64 / 1_000_000.0),
+    _ => format!("{:.1}B", n as f64 / 1_000_000_000.0),
+  }
+}
+
+/// Surface a search failure as a cliclack note so the user can retry
+/// rather than have the wizard abort on a transient network error.
+async fn note_search_error(err: &crate::init::fetch::FetchError) -> Result<(), CliExit> {
+  let msg = format!("search failed: {err}");
+  tokio::task::spawn_blocking(move || cliclack::log::warning(msg))
+    .await
+    .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: prompt join failed: {e}")))?
+    .map_err(|e| CliExit::new(INIT_ABORTED, format!("init: search note: {e}")))
 }
 
 /// Resolve the config-write confirm. Override / recommended /
@@ -1159,11 +1342,33 @@ mod tests {
     }
   }
 
+  #[test]
+  fn search_result_hint_joins_available_metadata() {
+    use crate::init::hf_api::HfGgufMeta;
+    let mut r = HfSearchResult {
+      repo_id: "owner/Model-GGUF".into(),
+      downloads: Some(1_234_567),
+      likes: None,
+      last_modified: None,
+      pipeline_tag: None,
+      tags: vec![],
+      gguf: Some(HfGgufMeta {
+        total: Some(8_030_261_248),
+        total_file_size: Some(5_732_991_008),
+      }),
+    };
+    // params · size · downloads, in order, only the parts present.
+    assert_eq!(search_result_hint(&r), "8B · 5.3 GiB · ↓1.2M");
+    r.gguf = None;
+    r.downloads = None;
+    assert_eq!(search_result_hint(&r), "", "no metadata → empty hint");
+  }
+
   #[tokio::test]
   async fn pick_model_paste_override_carries_repo() {
     let mut args = empty_args();
     args.model = Some(ModelOverride::Paste("owner/repo".into()));
-    let result = pick_model(&args, &[])
+    let result = pick_model(&args, &FetchClient::offline(), &[])
       .await
       .expect("override should not fail");
     match result {
@@ -1176,7 +1381,7 @@ mod tests {
   async fn pick_model_none_override_returns_skip() {
     let mut args = empty_args();
     args.model = Some(ModelOverride::None);
-    let result = pick_model(&args, &[])
+    let result = pick_model(&args, &FetchClient::offline(), &[])
       .await
       .expect("override should not fail");
     assert!(matches!(result, ModelChoice::Skip));
@@ -1186,7 +1391,7 @@ mod tests {
   async fn pick_model_recommended_override_with_empty_recs_returns_skip() {
     let mut args = empty_args();
     args.model = Some(ModelOverride::Recommended);
-    let result = pick_model(&args, &[])
+    let result = pick_model(&args, &FetchClient::offline(), &[])
       .await
       .expect("override should not fail");
     assert!(matches!(result, ModelChoice::Skip));
@@ -1196,7 +1401,7 @@ mod tests {
   async fn pick_model_recommended_mode_with_empty_recs_returns_skip() {
     let mut args = empty_args();
     args.recommended = true;
-    let result = pick_model(&args, &[])
+    let result = pick_model(&args, &FetchClient::offline(), &[])
       .await
       .expect("recommended mode should not fail without recs");
     assert!(matches!(result, ModelChoice::Skip));

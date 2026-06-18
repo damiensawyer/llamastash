@@ -710,7 +710,7 @@ Each `--json` finding carries `{id, severity, message, fix_hint, safe_to_log}`. 
 
 ### `llamastash recommend`
 
-Shortcut for `init --only models` that ranks the top picks for this hardware and lets the user choose from them interactively. Useful when `llama-server` is already installed and the user just wants weights. The picker shows up to 10 ranked candidates from the `init::recommender` (default `DEFAULT_TOP_N`); pass `--model recommended` if you want it to short-circuit to the top entry without prompting.
+Shortcut for `init --only models` that ranks the top picks for this hardware and lets the user choose from them interactively. Useful when `llama-server` is already installed and the user just wants weights. The picker shows up to 10 ranked candidates from the `init::recommender` (default `DEFAULT_TOP_N`); pass `--model recommended` if you want it to short-circuit to the top entry without prompting. Besides the ranked picks, the list offers **Paste an HF repo id…** (type an `owner/repo` slug) and **Search HuggingFace by name…** (online only) — the latter prompts for a query, runs a live HF search, and lets you pick from the results (each row shows params · approx size · downloads); the chosen repo flows through the same download path as a pasted slug.
 
 ```
 llamastash recommend [--json] [--offline] [--model <CHOICE>] [--revision <SHA>]
