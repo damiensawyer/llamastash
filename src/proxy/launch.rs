@@ -28,10 +28,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::cli::resolve::CatalogRow;
 use crate::daemon::supervisor::ManagedState;
 use crate::gguf::identity::ModelId;
 use crate::ipc::methods::{start_model_inner, LaunchModeWire, StartParams};
+use crate::launch::resolve::CatalogRow;
 
 use super::coalesce::{AcquireOutcome, SharedOutcome};
 use super::state::ProxyState;

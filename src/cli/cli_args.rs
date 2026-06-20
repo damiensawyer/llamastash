@@ -1046,6 +1046,19 @@ impl LaunchMode {
   }
 }
 
+/// Convert the clap value-enum into the `clap`-free domain enum at the
+/// CLI boundary. The conversion lives here (cli → launch) so `launch`
+/// never depends "up" on the CLI args layer.
+impl From<LaunchMode> for crate::launch::mode::LaunchMode {
+  fn from(m: LaunchMode) -> Self {
+    match m {
+      LaunchMode::Chat => crate::launch::mode::LaunchMode::Chat,
+      LaunchMode::Embedding => crate::launch::mode::LaunchMode::Embedding,
+      LaunchMode::Rerank => crate::launch::mode::LaunchMode::Rerank,
+    }
+  }
+}
+
 /// `llamastash uat` arguments. Only compiled when
 /// the `uat` Cargo feature is enabled — the release binary on
 /// crates.io and Homebrew bottles never carries this subcommand.

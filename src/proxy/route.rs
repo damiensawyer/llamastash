@@ -25,10 +25,10 @@ use std::sync::Arc;
 use http_body_util::{BodyExt, Limited};
 use hyper::body::{Bytes, Incoming};
 
-use crate::cli::resolve::{resolve_model_with_candidates, CatalogRow, ResolveError};
 use crate::daemon::supervisor::ManagedState;
 use crate::discovery::DiscoveredModel;
 use crate::gguf::identity::ModelId;
+use crate::launch::resolve::{resolve_model_with_candidates, CatalogRow, ResolveError};
 
 use super::launch::{self, LaunchOutcome};
 use super::mru::{pick_fallback, FallbackCandidate};

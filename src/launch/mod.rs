@@ -17,6 +17,7 @@ pub mod list_devices;
 pub mod mode;
 pub mod params;
 pub mod presets;
+pub mod resolve;
 
 pub use binary::{locate as locate_binary, LocateError, LocateInputs};
 pub use defaults_table::lookup as lookup_defaults;

@@ -31,12 +31,13 @@ use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use tokio::{net::TcpListener, task::JoinHandle, time::Instant};
 
-use super::auth::{extract_bearer, IpcToken};
+use super::auth::IpcToken;
 use crate::daemon::shutdown::ShutdownToken;
 use crate::ipc::methods::{dispatch_request, MethodContext};
 use crate::ipc::protocol::{
   ErrorCode, ErrorObject, Request as RpcRequest, Response as RpcResponse,
 };
+use crate::util::http_auth::extract_bearer;
 
 /// Default control-plane port. Sits in the high-4xxxx range —
 /// above IANA's well-known + registered band (1–49151) but below the

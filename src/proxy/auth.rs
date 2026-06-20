@@ -19,7 +19,7 @@ use base64::{
 use hyper::header::{HeaderMap, AUTHORIZATION};
 use rand::TryRngCore;
 
-use crate::daemon::auth::{constant_time_eq, extract_bearer};
+use crate::util::http_auth::{constant_time_eq, extract_bearer};
 
 /// Raw entropy bytes behind a generated key (before encoding). 32
 /// bytes is ~256 bits — the same bar as the control-plane token.

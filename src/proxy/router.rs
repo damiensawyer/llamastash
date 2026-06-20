@@ -38,10 +38,10 @@ use super::ollama_compat::{
 use super::openai::{ErrorObject, ErrorResponse, ModelList, ModelObject};
 use super::route::{self, RouteDecision};
 use super::state::ProxyState;
-use crate::cli::resolve::{resolve_model_with_candidates, CatalogRow, ResolveError};
 use crate::daemon::supervisor::ManagedState;
 use crate::discovery::DiscoveredModel;
 use crate::gguf::metadata::{ModeHint, ModelMetadata};
+use crate::launch::resolve::{resolve_model_with_candidates, CatalogRow, ResolveError};
 
 /// The error type our `BoxBody` carries. Forwarding streams upstream
 /// `reqwest::Response::bytes_stream()` chunks through `StreamBody`,
