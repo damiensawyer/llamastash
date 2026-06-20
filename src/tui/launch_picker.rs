@@ -13,7 +13,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use crate::config::{KnobValue, KnobValueOpt, TypedKnobs};
+use crate::config::TypedKnobs;
 use crate::launch::flag_aliases::{
   knob_display_groups, knob_row_visible, KnobField, KV_CACHE_TYPES, SPLIT_MODES,
 };
@@ -558,168 +558,62 @@ impl LaunchPickerState {
   }
 
   fn user_has(&self, field: KnobField) -> bool {
-    match field {
-      KnobField::Ctx => self.user_knobs.ctx.is_some(),
-      KnobField::Reasoning => self.user_knobs.reasoning.is_some(),
-      KnobField::NGpuLayers => self.user_knobs.n_gpu_layers.is_some(),
-      KnobField::NCpuMoe => self.user_knobs.n_cpu_moe.is_some(),
-      KnobField::Threads => self.user_knobs.threads.is_some(),
-      KnobField::CacheTypeK => self.user_knobs.cache_type_k.is_some(),
-      KnobField::CacheTypeV => self.user_knobs.cache_type_v.is_some(),
-      KnobField::FlashAttn => self.user_knobs.flash_attn.is_some(),
-      KnobField::Mlock => self.user_knobs.mlock.is_some(),
-      KnobField::NoMmap => self.user_knobs.no_mmap.is_some(),
-      KnobField::Parallel => self.user_knobs.parallel.is_some(),
-      KnobField::BatchSize => self.user_knobs.batch_size.is_some(),
-      KnobField::UbatchSize => self.user_knobs.ubatch_size.is_some(),
-      KnobField::RopeFreqScale => self.user_knobs.rope_freq_scale.is_some(),
-      KnobField::Keep => self.user_knobs.keep.is_some(),
-      KnobField::Device => self.user_knobs.device.is_some(),
-      KnobField::TensorSplit => self.user_knobs.tensor_split.is_some(),
-      KnobField::MainGpu => self.user_knobs.main_gpu.is_some(),
-      KnobField::SplitMode => self.user_knobs.split_mode.is_some(),
-    }
+    self.user_knobs.slot(field).is_some()
   }
 
   fn user_value_u32(&self, field: KnobField) -> Option<u32> {
-    match field {
-      KnobField::Ctx => self.user_knobs.ctx.set_value().copied(),
-      KnobField::NGpuLayers => self.user_knobs.n_gpu_layers.set_value().copied(),
-      KnobField::NCpuMoe => self.user_knobs.n_cpu_moe.set_value().copied(),
-      KnobField::Threads => self.user_knobs.threads.set_value().copied(),
-      KnobField::Parallel => self.user_knobs.parallel.set_value().copied(),
-      KnobField::BatchSize => self.user_knobs.batch_size.set_value().copied(),
-      KnobField::UbatchSize => self.user_knobs.ubatch_size.set_value().copied(),
-      KnobField::Keep => self.user_knobs.keep.set_value().copied(),
-      KnobField::MainGpu => self.user_knobs.main_gpu.set_value().copied(),
-      _ => None,
-    }
+    self.user_knobs.slot(field).as_u32()
   }
 
   fn user_value_f32(&self, field: KnobField) -> Option<f32> {
-    match field {
-      KnobField::RopeFreqScale => self.user_knobs.rope_freq_scale.set_value().copied(),
-      _ => None,
-    }
+    self.user_knobs.slot(field).as_f32()
   }
 
   fn user_value_str(&self, field: KnobField) -> Option<&str> {
-    match field {
-      KnobField::CacheTypeK => self.user_knobs.cache_type_k.set_value().map(String::as_str),
-      KnobField::CacheTypeV => self.user_knobs.cache_type_v.set_value().map(String::as_str),
-      KnobField::Device => self.user_knobs.device.set_value().map(String::as_str),
-      KnobField::TensorSplit => self.user_knobs.tensor_split.set_value().map(String::as_str),
-      KnobField::SplitMode => self.user_knobs.split_mode.set_value().map(String::as_str),
-      _ => None,
-    }
+    self.user_knobs.slot(field).as_str()
   }
 
   fn user_value_bool(&self, field: KnobField) -> Option<bool> {
-    match field {
-      KnobField::Reasoning => self.user_knobs.reasoning.set_value().copied(),
-      KnobField::FlashAttn => self.user_knobs.flash_attn.set_value().copied(),
-      KnobField::Mlock => self.user_knobs.mlock.set_value().copied(),
-      KnobField::NoMmap => self.user_knobs.no_mmap.set_value().copied(),
-      _ => None,
-    }
+    self.user_knobs.slot(field).as_bool()
   }
 
   fn resolved_u32(&self, field: KnobField) -> Option<u32> {
-    match field {
-      KnobField::Ctx => self.resolved.ctx.set_value().copied(),
-      KnobField::NGpuLayers => self.resolved.n_gpu_layers.set_value().copied(),
-      KnobField::NCpuMoe => self.resolved.n_cpu_moe.set_value().copied(),
-      KnobField::Threads => self.resolved.threads.set_value().copied(),
-      KnobField::Parallel => self.resolved.parallel.set_value().copied(),
-      KnobField::BatchSize => self.resolved.batch_size.set_value().copied(),
-      KnobField::UbatchSize => self.resolved.ubatch_size.set_value().copied(),
-      KnobField::Keep => self.resolved.keep.set_value().copied(),
-      KnobField::MainGpu => self.resolved.main_gpu.set_value().copied(),
-      _ => None,
-    }
+    self.resolved.slot(field).as_u32()
   }
 
   fn resolved_f32(&self, field: KnobField) -> Option<f32> {
-    match field {
-      KnobField::RopeFreqScale => self.resolved.rope_freq_scale.set_value().copied(),
-      _ => None,
-    }
+    self.resolved.slot(field).as_f32()
   }
 
   fn resolved_str(&self, field: KnobField) -> Option<&str> {
-    match field {
-      KnobField::CacheTypeK => self.resolved.cache_type_k.set_value().map(String::as_str),
-      KnobField::CacheTypeV => self.resolved.cache_type_v.set_value().map(String::as_str),
-      KnobField::Device => self.resolved.device.set_value().map(String::as_str),
-      KnobField::TensorSplit => self.resolved.tensor_split.set_value().map(String::as_str),
-      KnobField::SplitMode => self.resolved.split_mode.set_value().map(String::as_str),
-      _ => None,
-    }
+    self.resolved.slot(field).as_str()
   }
 
   fn resolved_bool(&self, field: KnobField) -> Option<bool> {
-    match field {
-      KnobField::Reasoning => self.resolved.reasoning.set_value().copied(),
-      KnobField::FlashAttn => self.resolved.flash_attn.set_value().copied(),
-      KnobField::Mlock => self.resolved.mlock.set_value().copied(),
-      KnobField::NoMmap => self.resolved.no_mmap.set_value().copied(),
-      _ => None,
-    }
+    self.resolved.slot(field).as_bool()
   }
 
   pub fn set_user_u32(&mut self, field: KnobField, value: Option<u32>) {
     // An explicit value sets `Set(v)`; clearing (`None`) drops the slot
-    // back to Inherited. The Auto state is set via the cycle helpers,
-    // not this typed-value setter.
-    let value = value.map(KnobValue::Set);
-    match field {
-      KnobField::Ctx => self.user_knobs.ctx = value,
-      KnobField::NGpuLayers => self.user_knobs.n_gpu_layers = value,
-      KnobField::NCpuMoe => self.user_knobs.n_cpu_moe = value,
-      KnobField::Threads => self.user_knobs.threads = value,
-      KnobField::Parallel => self.user_knobs.parallel = value,
-      KnobField::BatchSize => self.user_knobs.batch_size = value,
-      KnobField::UbatchSize => self.user_knobs.ubatch_size = value,
-      KnobField::Keep => self.user_knobs.keep = value,
-      KnobField::MainGpu => self.user_knobs.main_gpu = value,
-      _ => {}
-    }
+    // back to Inherited. A non-`u32` field is a no-op. The Auto state is
+    // set via the cycle helpers, not this typed-value setter.
+    self.user_knobs.slot_mut(field).set_u32(value);
   }
 
   pub fn set_user_f32(&mut self, field: KnobField, value: Option<f32>) {
-    if matches!(field, KnobField::RopeFreqScale) {
-      self.user_knobs.rope_freq_scale = value.map(KnobValue::Set);
-    }
+    self.user_knobs.slot_mut(field).set_f32(value);
   }
 
   pub fn set_user_str(&mut self, field: KnobField, value: Option<String>) {
-    let value = value.map(KnobValue::Set);
-    match field {
-      KnobField::CacheTypeK => self.user_knobs.cache_type_k = value,
-      KnobField::CacheTypeV => self.user_knobs.cache_type_v = value,
-      KnobField::Device => self.user_knobs.device = value,
-      KnobField::TensorSplit => self.user_knobs.tensor_split = value,
-      KnobField::SplitMode => self.user_knobs.split_mode = value,
-      _ => {}
-    }
+    self.user_knobs.slot_mut(field).set_str(value);
   }
 
   pub fn set_user_bool(&mut self, field: KnobField, value: Option<bool>) {
-    let value = value.map(KnobValue::Set);
-    match field {
-      KnobField::Reasoning => self.user_knobs.reasoning = value,
-      KnobField::FlashAttn => self.user_knobs.flash_attn = value,
-      KnobField::Mlock => self.user_knobs.mlock = value,
-      KnobField::NoMmap => self.user_knobs.no_mmap = value,
-      _ => {}
-    }
+    self.user_knobs.slot_mut(field).set_bool(value);
   }
 
   fn clear_user(&mut self, field: KnobField) {
-    self.set_user_u32(field, None);
-    self.set_user_f32(field, None);
-    self.set_user_str(field, None);
-    self.set_user_bool(field, None);
+    self.user_knobs.slot_mut(field).clear();
   }
 
   /// Display label for the Device row. Resolves the selector against
@@ -881,6 +775,7 @@ fn cycle_through<T: PartialEq + PartialOrd + Copy>(
 mod tests {
   #![allow(clippy::useless_conversion)]
   use super::*;
+  use crate::config::KnobValue;
 
   #[test]
   fn cycle_ctx_walks_through_presets_then_returns_to_native() {
@@ -1255,5 +1150,59 @@ mod tests {
     assert_eq!(s.user_value_str(KnobField::Device), None);
     s.cycle_device(KnobField::Device, false);
     assert_eq!(s.user_value_str(KnobField::Device), None);
+  }
+
+  /// Regression net for the silent-edit-loss class: a user value set on
+  /// any `KnobField` must read back through the picker. A missing
+  /// accessor arm (the bug the old wildcard `_ => None` masked) fails
+  /// here for the affected variant.
+  #[test]
+  fn picker_round_trips_a_user_edit_for_every_knob_field() {
+    use crate::launch::flag_aliases::{knob_specs, ValueKind};
+    for spec in knob_specs() {
+      let mut s = LaunchPickerState::for_model("qwen");
+      let field = spec.field;
+      match spec.kind {
+        ValueKind::U32 => {
+          s.set_user_u32(field, Some(7));
+          assert_eq!(s.user_value_u32(field), Some(7), "{field:?} u32 round-trip");
+        }
+        ValueKind::F32 => {
+          s.set_user_f32(field, Some(2.5));
+          assert_eq!(
+            s.user_value_f32(field),
+            Some(2.5),
+            "{field:?} f32 round-trip"
+          );
+        }
+        ValueKind::Bool => {
+          s.set_user_bool(field, Some(true));
+          assert_eq!(
+            s.user_value_bool(field),
+            Some(true),
+            "{field:?} bool round-trip"
+          );
+        }
+        ValueKind::KvCacheType | ValueKind::SplitMode | ValueKind::Str => {
+          let v = match spec.kind {
+            ValueKind::KvCacheType => "q8_0",
+            ValueKind::SplitMode => "row",
+            _ => "0",
+          };
+          s.set_user_str(field, Some(v.to_string()));
+          assert_eq!(s.user_value_str(field), Some(v), "{field:?} str round-trip");
+        }
+      }
+      assert!(s.user_has(field), "{field:?} should report a user override");
+    }
+  }
+
+  #[test]
+  fn untouched_picker_reports_no_user_override_for_any_knob() {
+    use crate::launch::flag_aliases::knob_specs;
+    let s = LaunchPickerState::for_model("qwen");
+    for spec in knob_specs() {
+      assert!(!s.user_has(spec.field), "{:?} must start unset", spec.field);
+    }
   }
 }

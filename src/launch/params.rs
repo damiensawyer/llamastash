@@ -22,7 +22,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{DefaultLaunchMode, KnobValue, KnobValueOpt, TypedKnobs};
+use crate::config::{
+  DefaultLaunchMode, KnobSlotMut, KnobSlotRef, KnobValue, KnobValueOpt, TypedKnobs,
+};
 use crate::launch::flag_aliases::{knob_specs, KnobField, ValueKind};
 use crate::launch::mode::LaunchMode;
 
@@ -572,53 +574,13 @@ pub fn seed_layerless(resolved: &mut Resolved, mode: DefaultLaunchMode) {
 /// field. The counterpart to [`set_field_auto`]; used by the TUI picker
 /// to render/cycle the Auto stop.
 pub fn field_is_auto(knobs: &TypedKnobs, field: KnobField) -> bool {
-  match field {
-    KnobField::Ctx => knobs.ctx.is_auto(),
-    KnobField::Reasoning => knobs.reasoning.is_auto(),
-    KnobField::NGpuLayers => knobs.n_gpu_layers.is_auto(),
-    KnobField::NCpuMoe => knobs.n_cpu_moe.is_auto(),
-    KnobField::Threads => knobs.threads.is_auto(),
-    KnobField::CacheTypeK => knobs.cache_type_k.is_auto(),
-    KnobField::CacheTypeV => knobs.cache_type_v.is_auto(),
-    KnobField::FlashAttn => knobs.flash_attn.is_auto(),
-    KnobField::Mlock => knobs.mlock.is_auto(),
-    KnobField::NoMmap => knobs.no_mmap.is_auto(),
-    KnobField::Parallel => knobs.parallel.is_auto(),
-    KnobField::BatchSize => knobs.batch_size.is_auto(),
-    KnobField::UbatchSize => knobs.ubatch_size.is_auto(),
-    KnobField::RopeFreqScale => knobs.rope_freq_scale.is_auto(),
-    KnobField::Keep => knobs.keep.is_auto(),
-    KnobField::Device => knobs.device.is_auto(),
-    KnobField::TensorSplit => knobs.tensor_split.is_auto(),
-    KnobField::MainGpu => knobs.main_gpu.is_auto(),
-    KnobField::SplitMode => knobs.split_mode.is_auto(),
-  }
+  knobs.slot(field).is_auto()
 }
 
 /// Set a single knob slot to [`KnobValue::Auto`], keyed by field. Used
 /// by the seeding rule and by the CLI `auto` literal parser.
 pub fn set_field_auto(knobs: &mut TypedKnobs, field: KnobField) {
-  match field {
-    KnobField::Ctx => knobs.ctx = Some(KnobValue::Auto),
-    KnobField::Reasoning => knobs.reasoning = Some(KnobValue::Auto),
-    KnobField::NGpuLayers => knobs.n_gpu_layers = Some(KnobValue::Auto),
-    KnobField::NCpuMoe => knobs.n_cpu_moe = Some(KnobValue::Auto),
-    KnobField::Threads => knobs.threads = Some(KnobValue::Auto),
-    KnobField::CacheTypeK => knobs.cache_type_k = Some(KnobValue::Auto),
-    KnobField::CacheTypeV => knobs.cache_type_v = Some(KnobValue::Auto),
-    KnobField::FlashAttn => knobs.flash_attn = Some(KnobValue::Auto),
-    KnobField::Mlock => knobs.mlock = Some(KnobValue::Auto),
-    KnobField::NoMmap => knobs.no_mmap = Some(KnobValue::Auto),
-    KnobField::Parallel => knobs.parallel = Some(KnobValue::Auto),
-    KnobField::BatchSize => knobs.batch_size = Some(KnobValue::Auto),
-    KnobField::UbatchSize => knobs.ubatch_size = Some(KnobValue::Auto),
-    KnobField::RopeFreqScale => knobs.rope_freq_scale = Some(KnobValue::Auto),
-    KnobField::Keep => knobs.keep = Some(KnobValue::Auto),
-    KnobField::Device => knobs.device = Some(KnobValue::Auto),
-    KnobField::TensorSplit => knobs.tensor_split = Some(KnobValue::Auto),
-    KnobField::MainGpu => knobs.main_gpu = Some(KnobValue::Auto),
-    KnobField::SplitMode => knobs.split_mode = Some(KnobValue::Auto),
-  }
+  knobs.slot_mut(field).set_auto();
 }
 
 /// Strict-`"1"` env-var read for `LLAMASTASH_BENCH_DISABLE_DEFAULTS`.
@@ -634,26 +596,12 @@ pub(crate) fn bench_disable_defaults_from_env() -> bool {
 /// If `field` is `Some` on `from` and `None` on `into`, copy it.
 /// Returns true when a copy happened.
 fn try_inherit_field(into: &mut TypedKnobs, from: &TypedKnobs, field: KnobField) -> bool {
-  match field {
-    KnobField::Ctx => copy_some(&mut into.ctx, from.ctx),
-    KnobField::Reasoning => copy_some(&mut into.reasoning, from.reasoning),
-    KnobField::NGpuLayers => copy_some(&mut into.n_gpu_layers, from.n_gpu_layers),
-    KnobField::NCpuMoe => copy_some(&mut into.n_cpu_moe, from.n_cpu_moe),
-    KnobField::Threads => copy_some(&mut into.threads, from.threads),
-    KnobField::CacheTypeK => copy_some_clone(&mut into.cache_type_k, &from.cache_type_k),
-    KnobField::CacheTypeV => copy_some_clone(&mut into.cache_type_v, &from.cache_type_v),
-    KnobField::FlashAttn => copy_some(&mut into.flash_attn, from.flash_attn),
-    KnobField::Mlock => copy_some(&mut into.mlock, from.mlock),
-    KnobField::NoMmap => copy_some(&mut into.no_mmap, from.no_mmap),
-    KnobField::Parallel => copy_some(&mut into.parallel, from.parallel),
-    KnobField::BatchSize => copy_some(&mut into.batch_size, from.batch_size),
-    KnobField::UbatchSize => copy_some(&mut into.ubatch_size, from.ubatch_size),
-    KnobField::RopeFreqScale => copy_some(&mut into.rope_freq_scale, from.rope_freq_scale),
-    KnobField::Keep => copy_some(&mut into.keep, from.keep),
-    KnobField::Device => copy_some_clone(&mut into.device, &from.device),
-    KnobField::TensorSplit => copy_some_clone(&mut into.tensor_split, &from.tensor_split),
-    KnobField::MainGpu => copy_some(&mut into.main_gpu, from.main_gpu),
-    KnobField::SplitMode => copy_some_clone(&mut into.split_mode, &from.split_mode),
+  match (into.slot_mut(field), from.slot(field)) {
+    (KnobSlotMut::U32(i), KnobSlotRef::U32(f)) => copy_some(i, *f),
+    (KnobSlotMut::F32(i), KnobSlotRef::F32(f)) => copy_some(i, *f),
+    (KnobSlotMut::Bool(i), KnobSlotRef::Bool(f)) => copy_some(i, *f),
+    (KnobSlotMut::Str(i), KnobSlotRef::Str(f)) => copy_some_clone(i, f),
+    _ => unreachable!("a KnobField maps to exactly one slot kind"),
   }
 }
 

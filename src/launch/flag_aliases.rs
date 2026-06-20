@@ -61,6 +61,35 @@ impl KnobField {
       KnobField::Ctx | KnobField::NGpuLayers | KnobField::NCpuMoe | KnobField::TensorSplit
     )
   }
+
+  /// The snake_case serde key this knob serialises under in `TypedKnobs`
+  /// and persisted state. Single source for any field-name display (the
+  /// Settings label, error text) so a label can never drift from the
+  /// persisted JSON key — a drift test pins it against the actual serde
+  /// output.
+  pub fn field_name(self) -> &'static str {
+    match self {
+      KnobField::Ctx => "ctx",
+      KnobField::Reasoning => "reasoning",
+      KnobField::NGpuLayers => "n_gpu_layers",
+      KnobField::NCpuMoe => "n_cpu_moe",
+      KnobField::Threads => "threads",
+      KnobField::CacheTypeK => "cache_type_k",
+      KnobField::CacheTypeV => "cache_type_v",
+      KnobField::FlashAttn => "flash_attn",
+      KnobField::Mlock => "mlock",
+      KnobField::NoMmap => "no_mmap",
+      KnobField::Parallel => "parallel",
+      KnobField::BatchSize => "batch_size",
+      KnobField::UbatchSize => "ubatch_size",
+      KnobField::RopeFreqScale => "rope_freq_scale",
+      KnobField::Keep => "keep",
+      KnobField::Device => "device",
+      KnobField::TensorSplit => "tensor_split",
+      KnobField::MainGpu => "main_gpu",
+      KnobField::SplitMode => "split_mode",
+    }
+  }
 }
 
 /// What the parser expects after the flag head. Bool consumes no

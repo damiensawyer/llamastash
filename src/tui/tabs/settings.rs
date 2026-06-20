@@ -61,7 +61,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
               .unwrap_or_else(|| format_persisted_knob_value(dispatched, KnobField::Ctx)),
             _ => format_persisted_knob_value(dispatched, *field),
           };
-          lines.push(kv(knob_label(*field), value, palette));
+          lines.push(kv(field.field_name(), value, palette));
         }
       }
       let extras: String = app
@@ -193,7 +193,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
         && picker_view.inline_edit.field == Some(PickerField::Knob(field))
       {
         lines.push(inline_edit_row(
-          knob_label(field),
+          field.field_name(),
           picker_view.inline_edit.input.buffer(),
           focused,
           palette,
@@ -205,7 +205,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
         let value = format_knob_value(picker_view, field);
         let source = picker_view.source_for(field).label();
         lines.push(kv_focused(
-          knob_label(field),
+          field.field_name(),
           value,
           Some(source),
           focused,
@@ -325,30 +325,6 @@ fn clamp_scroll_with_margin(current: u16, focused: u16, viewport: u16, total: u1
     next = lower_bound;
   }
   next.min(max_scroll)
-}
-
-fn knob_label(field: KnobField) -> &'static str {
-  match field {
-    KnobField::Ctx => "ctx",
-    KnobField::Reasoning => "reasoning",
-    KnobField::NGpuLayers => "n_gpu_layers",
-    KnobField::NCpuMoe => "n_cpu_moe",
-    KnobField::Threads => "threads",
-    KnobField::CacheTypeK => "cache_type_k",
-    KnobField::CacheTypeV => "cache_type_v",
-    KnobField::FlashAttn => "flash_attn",
-    KnobField::Mlock => "mlock",
-    KnobField::NoMmap => "no_mmap",
-    KnobField::Parallel => "parallel",
-    KnobField::BatchSize => "batch_size",
-    KnobField::UbatchSize => "ubatch_size",
-    KnobField::RopeFreqScale => "rope_freq_scale",
-    KnobField::Keep => "keep",
-    KnobField::Device => "device",
-    KnobField::TensorSplit => "tensor_split",
-    KnobField::MainGpu => "main_gpu",
-    KnobField::SplitMode => "split_mode",
-  }
 }
 
 /// Read-only formatter for the running-launch view. Same vocabulary
