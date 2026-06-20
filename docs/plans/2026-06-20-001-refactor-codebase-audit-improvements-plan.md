@@ -274,7 +274,7 @@ BEFORE (inverted):                         AFTER (correct direction):
 
 ### Phase 1 — Drift fixes & hygiene (independent quick wins)
 
-- [ ] **Unit 1: Proxy duplication & drift fixes**
+- [x] **Unit 1: Proxy duplication & drift fixes**
 
 **Goal:** Collapse the duplicated proxy projections/helpers onto single sources of
 truth and fix the two live drift bugs (`mode_hint`, umbrella-skip).
@@ -335,7 +335,7 @@ pass; existing proxy integration suite stays green.
 
 ---
 
-- [ ] **Unit 2: Comment & dead-code hygiene to AGENTS.md rules**
+- [x] **Unit 2: Comment & dead-code hygiene to AGENTS.md rules**
 
 **Goal:** Bring comments into line with the project's comment rules and remove stale
 `#[allow]`/dead code, including the `PULL_FAILED` drift.
