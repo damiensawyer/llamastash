@@ -982,8 +982,8 @@ impl crate::init::download::DownloadProgress for WizardDownloadProgress {
   fn on_file_started(&self, filename: &str, size: u64, index: usize, total: usize) {
     let label = format!("Downloading {}/{} `{filename}`", index + 1, total);
     let sp = prompts::StepProgress::start(label.clone());
-    *self.spinner.lock().unwrap() = Some(sp);
-    *self.file_progress.lock().unwrap() = Some(WizardFileProgress {
+    *self.spinner.lock().unwrap_or_else(|e| e.into_inner()) = Some(sp);
+    *self.file_progress.lock().unwrap_or_else(|e| e.into_inner()) = Some(WizardFileProgress {
       label,
       file_size: size,
       bytes_in_file: 0,
@@ -993,15 +993,20 @@ impl crate::init::download::DownloadProgress for WizardDownloadProgress {
   }
 
   fn on_file_finished(&self, filename: &str, index: usize, total: usize) {
-    *self.file_progress.lock().unwrap() = None;
-    if let Some(sp) = self.spinner.lock().unwrap().take() {
+    *self.file_progress.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    if let Some(sp) = self
+      .spinner
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .take()
+    {
       sp.success(format!("Downloaded {}/{} `{filename}`", index + 1, total));
     }
   }
 
   fn on_bytes_progress(&self, _filename: &str, bytes_in_file: u64) {
     let msg = {
-      let mut pg = self.file_progress.lock().unwrap();
+      let mut pg = self.file_progress.lock().unwrap_or_else(|e| e.into_inner());
       let Some(state) = pg.as_mut() else { return };
       let now = std::time::Instant::now();
       let elapsed = now
@@ -1019,7 +1024,12 @@ impl crate::init::download::DownloadProgress for WizardDownloadProgress {
       let speed = crate::tui::fmt::format_bytes(state.throughput_bps as u64);
       format!("{} · {pair} · {pct}% · {speed}/s", state.label)
     };
-    if let Some(sp) = self.spinner.lock().unwrap().as_ref() {
+    if let Some(sp) = self
+      .spinner
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .as_ref()
+    {
       sp.update(msg);
     }
   }
@@ -1028,11 +1038,21 @@ impl crate::init::download::DownloadProgress for WizardDownloadProgress {
     // Reset EMA timing so the throughput measurement restarts cleanly
     // from the resumed byte offset — the old instant_bps spike would
     // otherwise skew the first post-retry reading.
-    if let Some(state) = self.file_progress.lock().unwrap().as_mut() {
+    if let Some(state) = self
+      .file_progress
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .as_mut()
+    {
       state.throughput_bps = 0.0;
       state.last_at = std::time::Instant::now();
     }
-    if let Some(sp) = self.spinner.lock().unwrap().as_ref() {
+    if let Some(sp) = self
+      .spinner
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .as_ref()
+    {
       sp.update(format!(
         "Connection error — retrying ({attempt}/{})…",
         crate::init::download::MAX_DOWNLOAD_ATTEMPTS - 1

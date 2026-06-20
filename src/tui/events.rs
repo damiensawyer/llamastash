@@ -2868,7 +2868,7 @@ struct StripProgressInner {
 
 impl crate::init::download::DownloadProgress for StripProgress {
   fn on_files_resolved(&self, files: &[(String, u64)]) {
-    let mut inner = self.inner.lock().unwrap();
+    let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
     inner.file_sizes = files.iter().cloned().collect();
     inner.bytes_total = files.iter().map(|(_, n)| *n).sum();
     inner.bytes_done = 0;
@@ -2883,12 +2883,12 @@ impl crate::init::download::DownloadProgress for StripProgress {
   fn on_file_started(&self, _filename: &str, _size: u64, _index: usize, _total: usize) {
     // Per-file byte counter resets on every file boundary; the
     // hf-hub adapter then drives `on_bytes_progress` as chunks land.
-    let mut inner = self.inner.lock().unwrap();
+    let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
     inner.bytes_in_current_file = 0;
   }
 
   fn on_file_finished(&self, filename: &str, _index: usize, _total: usize) {
-    let mut inner = self.inner.lock().unwrap();
+    let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
     let size = inner.file_sizes.get(filename).copied().unwrap_or(0);
     let prior_in_file = inner.bytes_in_current_file;
     // Aggregate the file's full size into the pull total (subtract any
@@ -2910,7 +2910,7 @@ impl crate::init::download::DownloadProgress for StripProgress {
   }
 
   fn on_bytes_progress(&self, _filename: &str, bytes_in_file: u64) {
-    let mut inner = self.inner.lock().unwrap();
+    let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
     // Replace the running per-file count with the new cumulative
     // value. Subtract the previous in-file credit so the pull's
     // aggregate `bytes_done` only ever grows monotonically.
@@ -5483,5 +5483,30 @@ mod tests {
       app.chat.response, "abc",
       "every queued delta must be applied within the single coalesced batch"
     );
+  }
+
+  #[test]
+  fn poisoned_strip_progress_lock_degrades_instead_of_panicking() {
+    use crate::init::download::DownloadProgress;
+    use std::sync::Arc;
+    let (tx, _rx) = mpsc::channel::<Event>(1);
+    let strip = Arc::new(StripProgress {
+      tx,
+      repo_id: "owner/repo".into(),
+      inner: std::sync::Mutex::new(StripProgressInner::default()),
+    });
+    // Poison the cell: a worker thread panics mid-update.
+    let poisoner = Arc::clone(&strip);
+    let _ = std::thread::spawn(move || {
+      let _guard = poisoner.inner.lock().expect("first lock is clean");
+      panic!("simulated download-thread panic");
+    })
+    .join();
+    assert!(strip.inner.is_poisoned(), "lock should be poisoned now");
+    // Every trait method must recover the inner value, not propagate the panic.
+    strip.on_files_resolved(&[("f.gguf".to_string(), 10)]);
+    strip.on_file_started("f.gguf", 10, 0, 1);
+    strip.on_bytes_progress("f.gguf", 5);
+    strip.on_file_finished("f.gguf", 0, 1);
   }
 }
