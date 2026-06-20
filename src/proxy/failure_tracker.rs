@@ -4,7 +4,7 @@
 //! Ready supervisor kicks off a fresh `start_model_inner` — and if
 //! the model can't load (VRAM contention, broken GGUF, missing CUDA),
 //! every retry pays the full GGUF read + child fork + probe wait
-//! before failing again. Observed in the wild 2026-05-25: a single
+//! before failing again. Observed in the wild: a single
 //! agent looped on Qwen3.6-27B-Q4_K_M for ~30 s and produced 10+
 //! identical failed launches in `~/.cache/llamastash/logs/` before
 //! the user noticed.

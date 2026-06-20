@@ -140,7 +140,7 @@ pub struct ModelEntry {
   pub source_hf_id: String,
   /// Active parameters per token, for MoE models (e.g. 3_000_000_000
   /// for Qwen3-Next-80B-A3B). `None` on dense models. Read by the
-  /// MoE-aware estimator (Unit 2 of plan 2026-05-20-001).
+  /// MoE-aware peak-memory estimator.
   #[serde(default)]
   pub params_active: Option<u64>,
   /// True for MoE architectures (Mixtral, DeepSeek V3, Qwen3-Next, …).
@@ -182,10 +182,9 @@ pub enum LoadRemoteError {
   SchemaTooNew { got: u32, max: u32 },
 }
 
-/// Max remote-snapshot body size. Tracks the bundle budget (2 MiB
-/// after Unit 6 of plan 2026-05-20-001) plus a 64 KiB tolerance for
-/// formatting drift; a CI run that drifts past must raise both
-/// numbers deliberately.
+/// Max remote-snapshot body size. Tracks the bundle budget (2 MiB)
+/// plus a 64 KiB tolerance for formatting drift; a CI run that drifts
+/// past must raise both numbers deliberately.
 pub const REMOTE_MAX_BYTES: u64 = (BUNDLED_SIZE_BUDGET_BYTES as u64) + 64 * 1024;
 
 /// Schema versions this build understands. Reading a snapshot whose

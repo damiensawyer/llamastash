@@ -18,7 +18,7 @@ use crate::tui::status_icons::{glyph_for, SurfaceState};
 /// Decode the canonical model path out of a daemon row's nested
 /// `id.path` shape. Centralised so the five CLI subcommands that
 /// project status / list_models / favorites / last_params rows
-/// stop respelling the same two-level `get` (audit §1.1 #7).
+/// stop respelling the same two-level `get`.
 pub fn row_path(v: &Value) -> Option<&str> {
   v.get("id")
     .and_then(|id| id.get("path"))

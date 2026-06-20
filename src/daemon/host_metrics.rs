@@ -140,7 +140,7 @@ impl HostMetricsSnapshot {
 
   /// Classify the raw `gpu_backend` string into a typed variant.
   /// Render layers should branch on this enum instead of comparing
-  /// the wire string at the callsite (audit §1.1 #4).
+  /// the wire string at the callsite.
   pub fn flavor(&self) -> GpuFlavor {
     GpuFlavor::from_label(self.gpu_backend.as_str())
   }

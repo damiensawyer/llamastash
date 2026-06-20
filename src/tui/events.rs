@@ -984,7 +984,7 @@ enum ArrowDir {
 
 /// Per-pane policy for what an ↑/↓ arrow does. Centralises the five
 /// near-identical match arms `Action::MoveUp` and `Action::MoveDown`
-/// used to spell out (audit §F2.1 #1).
+/// used to spell out.
 fn apply_arrow_in_pane(app: &mut App, dir: ArrowDir) {
   match app.focus {
     Focus::RightPane => match app.right_tab {
@@ -1063,7 +1063,7 @@ fn apply_cycle_value(app: &mut App, dir: ValueDir) {
   if running_view_is_locked(app) {
     return;
   }
-  // Audit §F5 #21: the chip strip advertises `←/→:cycle value`
+  // the chip strip advertises `←/→:cycle value`
   // even when the focused field (e.g. Advanced) is non-cyclable.
   // Toast on miss so the user understands why nothing changed.
   with_picker(app, |p| match dir {
@@ -1081,7 +1081,7 @@ fn apply_cycle_value(app: &mut App, dir: ValueDir) {
 }
 
 /// Auto-materialise the inline Settings picker if absent, then run
-/// `f` against it. Audit §F2.1 #3 — collapses the three
+/// `f` against it. Collapses the three
 /// `if app.launch_picker.is_none() { app.open_launch_picker(); } if
 /// let Some(p) = app.launch_picker.as_mut() { ... }` blocks.
 fn with_picker<F: FnOnce(&mut crate::tui::launch_picker::LaunchPickerState)>(app: &mut App, f: F) {
@@ -1507,8 +1507,8 @@ fn edit_focus_for_tab(tab: RightTab) -> Option<Focus> {
 }
 
 /// Resolve the focused managed row or toast a context-specific
-/// "no Ready model focused for `<action>`" message. Audit §1.1 #6
-/// — the same lookup + toast guard was duplicated across
+/// "no Ready model focused for `<action>`" message. The same lookup +
+/// toast guard was duplicated across
 /// `apply_send_chat`, `apply_embed_submit`, `apply_rerank_submit`
 /// and the right-pane yank handlers.
 fn focused_managed_or_toast(app: &mut App, action: &str) -> Option<crate::tui::app::ManagedRow> {
@@ -3164,7 +3164,7 @@ mod tests {
 
   #[test]
   fn arrows_scroll_chat_output_while_composing() {
-    // Issue #31: in the chat tab the response wouldn't scroll with the
+    // in the chat tab the response wouldn't scroll with the
     // arrow keys — ↑/↓ were unbound in the composer focus, so they
     // never reached the chat viewport. They must scroll the output
     // while focus stays on the prompt (where the user sits after
@@ -5010,7 +5010,7 @@ mod tests {
 
   #[test]
   fn right_arrow_on_models_list_does_not_change_focus() {
-    // 2026-05-21: the `→` shortcut was removed (read as
+    // The `→` shortcut is intentionally unbound (it read as
     // "cycle value" everywhere else and the asymmetric pane-jump
     // confused users). Pane focus moves via Tab / Shift+Tab / `l`
     // / `h` instead. Verify a stray Right keystroke is a no-op.

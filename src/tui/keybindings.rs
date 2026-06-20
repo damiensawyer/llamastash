@@ -1467,11 +1467,10 @@ mod tests {
 
   #[test]
   fn list_right_arrow_enters_right_pane_but_left_is_unbound() {
-    // 2026-05-21: the `→` shortcut from the Models list was removed
-    // — it read as "cycle value" everywhere else (Settings tab) and
-    // the asymmetric pane-jump confused users. Pane cycle is now
-    // reachable via Tab / Shift+Tab / `h` / `l` only. Left was
-    // already unbound; Right joins it.
+    // The `→` shortcut from the Models list is intentionally unbound:
+    // it read as "cycle value" everywhere else (Settings tab) and the
+    // asymmetric pane-jump confused users. Pane cycle is reachable via
+    // Tab / Shift+Tab / `h` / `l` only. Left and Right are both unbound.
     assert_eq!(
       action_for(Focus::List, KeyCode::Right, KeyModifiers::NONE),
       None,
@@ -1602,7 +1601,7 @@ mod tests {
 
   #[test]
   fn chat_embed_input_up_down_resolve_to_scroll() {
-    // Issue #31: ↑/↓ in the chat/embed composer must resolve to
+    // ↑/↓ in the chat/embed composer must resolve to
     // MoveUp/MoveDown so the output viewport scrolls. They were
     // unbound in these focuses before, so nothing happened.
     for focus in [Focus::ChatInput, Focus::EmbedInput] {

@@ -252,7 +252,7 @@ async fn models_endpoint_matches(port: u16, expected: &Path, timeout: Duration) 
 /// GET `/v1/models` via `reqwest` — the same client the right-pane
 /// chat tab uses, so the orphan probe doesn't carry its own HTTP/1.1
 /// framing. Capped at 32 KiB so a misbehaving peer can't balloon our
-/// memory (audit §2.2). Returns `(status, body)` or an io error.
+/// memory. Returns `(status, body)` or an io error.
 async fn fetch_models_body(port: u16, timeout: Duration) -> std::io::Result<(u16, Vec<u8>)> {
   let client = reqwest::Client::builder()
     .timeout(timeout)

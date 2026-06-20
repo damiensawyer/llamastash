@@ -362,8 +362,8 @@ pub struct App {
   /// `download_strip.is_active()` is true.
   pub download_strip: crate::tui::download_strip::DownloadStripState,
   /// Per-frame memo of `rendered_rows()`. Primed at the top of
-  /// `render::render` and cleared at the bottom — see audit §4.1
-  /// #1 (the biggest single perf finding). The same `Vec<ListRow>`
+  /// `render::render` and cleared at the bottom — the biggest single
+  /// per-frame perf win. The same `Vec<ListRow>`
   /// used to be rebuilt 5+ times per frame via `focused_path`,
   /// `focused_managed`, `focused_name`, and the right-pane render
   /// helpers. None outside a frame so event handlers always see
@@ -371,7 +371,7 @@ pub struct App {
   pub(crate) rows_cache: Option<Vec<ListRow>>,
   /// Per-frame memo of `available_right_tabs()`. Three calls per
   /// frame used to walk `models` linearly + allocate a fresh
-  /// `Vec<RightTab>` each time (audit §F4.1 #2). Same lifetime
+  /// `Vec<RightTab>` each time. Same lifetime
   /// rules as `rows_cache`.
   pub(crate) right_tabs_cache: Option<Vec<RightTab>>,
   /// Hit-test rectangles refreshed every frame by the renderer.
@@ -561,7 +561,7 @@ impl App {
   /// duration of one frame so the 12+ in-frame `rendered_rows()`
   /// calls and 3+ in-frame `available_right_tabs()` calls amortise
   /// to a single build each. Paired with
-  /// [`Self::clear_frame_caches`]. See audit §4.1 #1 and §F4.1 #2.
+  /// [`Self::clear_frame_caches`].
   pub(crate) fn prime_frame_caches(&mut self) {
     self.rows_cache = Some(self.rendered_rows_uncached());
     self.right_tabs_cache = Some(self.available_right_tabs_uncached());

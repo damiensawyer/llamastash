@@ -16,7 +16,7 @@
 //!   us the user edited the value by hand → preserve it.
 //! - `llama_server_digest` is the binary's sha256, recorded so
 //!   `doctor` can flag drift on GH-Releases-installed binaries (brew
-//!   installs are carved out per the doctor finding #2 design).
+//!   installs are carved out by design).
 //! - `remote_fetch_failures` is the silent-fallback counter the
 //!   `RemoteSnapshotUnreachable` doctor finding consumes.
 

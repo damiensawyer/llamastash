@@ -761,8 +761,8 @@ async fn signal_child_with_guard(model: &ManagedModel, flavour: SignalFlavour) {
   let Some(pid) = child.id() else { return };
   // `setsid()` ran in `pre_exec` so the child is its own PGID
   // leader. Signalling `ProcessGroup(pid)` reaches every process
-  // it forked — addressing audit §2.1 #3 (a SIGTERM to just the
-  // immediate child left grandchildren running).
+  // it forked — a SIGTERM to just the immediate child would leave
+  // grandchildren running.
   //
   // We hold the child mutex across the trait call so the kernel
   // can't reap-then-recycle the PGID between our `try_wait` check

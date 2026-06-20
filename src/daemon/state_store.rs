@@ -180,7 +180,7 @@ pub fn load(state_dir: &Path) -> Result<DaemonState, LoadError> {
 /// either the old content or the new content, never partial.
 ///
 /// Implementation: `tempfile::NamedTempFile` handles the unique-name,
-/// O_EXCL, and 0o600 dance natively (audit §2.1 #2 — replaces ~80
+/// O_EXCL, and 0o600 dance natively (replaces ~80
 /// lines of hand-rolled `write_tmp_safely` + `random_suffix`). The
 /// crate's mkstemp-style naming is unpredictable across processes,
 /// preserving the same-UID-symlink-DoS defence the manual code had.

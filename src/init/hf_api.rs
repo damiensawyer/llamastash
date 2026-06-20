@@ -449,10 +449,8 @@ mod tests {
     assert_eq!(HfSortKey::Likes.as_query_token(), "likes");
     assert_eq!(HfSortKey::RecentlyUpdated.as_query_token(), "lastModified");
     // Regression: HF Hub renamed `sort=trending` → `sort=trendingScore`
-    // (the legacy token now returns HTTP 400). The 2026-05-21 round-1
-    // fix tried to compensate by dropping `search=` server-side; the
-    // round-3 follow-up is the actual rename. Confirmed via curl
-    // against the live Hub at fix time.
+    // (the legacy token now returns HTTP 400). Confirmed via curl
+    // against the live Hub.
     assert_eq!(HfSortKey::Trending.as_query_token(), "trendingScore");
     // Client-side sorts have no HF token; they fetch the downloads
     // page and reorder it locally.

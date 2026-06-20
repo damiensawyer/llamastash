@@ -39,7 +39,7 @@ const HOST_PANEL_WIDTH: u16 = 25;
 /// Lower bound on what `render()` will paint a full dashboard into.
 /// Matches the `--render-size` parser's minimum (60×20). Anything
 /// smaller renders the placeholder instead so a sub-minimum terminal
-/// doesn't silently clip every panel (audit §5 #9). 60 cells is the
+/// doesn't silently clip every panel. 60 cells is the
 /// "compact" floor — below 100 the right pane hides by default and
 /// the left list runs the marker column + a generous Name column
 /// (data columns drop by rank — see `list_pane::layout_columns`).
@@ -70,7 +70,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
   app.ensure_right_tab_reachable();
   // Prime the per-frame `rendered_rows` memo so the 12+ in-frame
   // calls (focused_path / focused_managed / right_pane / settings)
-  // amortise to a single build (audit §4.1 #1). Cleared at the
+  // amortise to a single build. Cleared at the
   // bottom so event-handler invocations between frames recompute.
   // `Palette` is `Copy`, so take a snapshot up front and free
   // the borrow on `app` for the `prime_rows_cache` / mutable cache
@@ -564,7 +564,7 @@ fn build_models_hints(
     push_ranked(40, Some("↑/↓:nav".to_string()));
     return out;
   }
-  // Audit §F5 #23: only surface `Enter:launch` when the cursor
+  // only surface `Enter:launch` when the cursor
   // sits on a launchable row. `open_launch_picker` is silently a
   // no-op on header rows (`★ Favorites`, `↺ Recent`, folder
   // group headings), so showing the chip there would teach a
@@ -701,7 +701,7 @@ mod tests {
 
   #[test]
   fn sub_minimum_size_renders_too_small_placeholder() {
-    // Audit §5 #9: sub-`MIN_RENDER_*` terminals used to paint the
+    // sub-`MIN_RENDER_*` terminals used to paint the
     // full dashboard with clipped borders. The placeholder now
     // surfaces "too small" instead so the user understands why
     // the dashboard isn't drawing.

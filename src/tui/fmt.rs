@@ -14,7 +14,7 @@ use crate::theme::Palette;
 
 /// Single caret span (`▏` painted in `palette.accent` + REVERSED).
 /// Used by every single-line text input so the cursor reads
-/// identically across the TUI (audit §F2.1 #4 — replaces three
+/// identically across the TUI (replaces three
 /// open-coded `Span::styled("▏", …)` sites in `advanced_panel`,
 /// `list_pane`'s filter chip, and `tabs/input_pane`).
 pub(crate) fn caret(palette: &Palette) -> Span<'static> {

@@ -1154,7 +1154,7 @@ mod tests {
 
   #[test]
   fn cross_probe_duplicate_collapses_vulkan_vendor_device_via_lspci() {
-    // Regression (Strix Halo, PR #40): the native AMD probe tags the
+    // Regression (Strix Halo): the native AMD probe tags the
     // canonical PCI address, while the Vulkan probe reports only a
     // "0xVVVV:0xDDDD" vendor:device id. lspci maps that id to the same
     // address, so they must dedup — the per-part "0x" strip is what
