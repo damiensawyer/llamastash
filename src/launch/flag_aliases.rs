@@ -349,20 +349,6 @@ pub fn recognise(token: &str) -> Option<Recognised<'_>> {
   None
 }
 
-/// True when `token`'s head (before any `=`) is one of the canonical
-/// flag names or short aliases for `field`. Used by `argvify` to
-/// avoid duplicating a flag the caller already supplied in `extras`.
-#[allow(dead_code)]
-pub fn token_matches(token: &str, field: KnobField) -> bool {
-  let head = token
-    .split('=')
-    .next()
-    .unwrap_or(token)
-    .to_ascii_lowercase();
-  let spec = spec_for(field);
-  spec.canonical == head || spec.aliases.iter().any(|a| *a == head)
-}
-
 /// One titled cluster of knobs in the Settings editor's **display**
 /// order. This is deliberately distinct from [`knob_specs`] (which is
 /// the pinned *argv* emission order): the editor groups knobs by what
@@ -501,14 +487,6 @@ mod tests {
     let r = recognise("--THREADS=8").unwrap();
     assert_eq!(r.field, KnobField::Threads);
     assert_eq!(r.inline_value, Some("8"));
-  }
-
-  #[test]
-  fn token_matches_accepts_canonical_and_aliases() {
-    assert!(token_matches("--threads", KnobField::Threads));
-    assert!(token_matches("-t", KnobField::Threads));
-    assert!(token_matches("--threads=8", KnobField::Threads));
-    assert!(!token_matches("--threads", KnobField::NGpuLayers));
   }
 
   #[test]

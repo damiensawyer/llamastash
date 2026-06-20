@@ -1164,12 +1164,6 @@ pub(crate) fn existing_daemon_pid(state_dir: &Path) -> Option<i32> {
   raw.trim().parse::<i32>().ok().filter(|p| *p > 0)
 }
 
-// Re-export the symbols downstream callers reach for.
-#[allow(unused_imports)]
-pub use lockfile::AcquireOutcome as LockfileOutcome;
-#[allow(unused_imports)]
-pub use lockfile::Lockfile as DaemonLockfile;
-
 /// Default drain timeout exposed for callers (tests, CLI status command).
 pub const SHUTDOWN_DRAIN_TIMEOUT: Duration = control_plane::DRAIN_TIMEOUT;
 

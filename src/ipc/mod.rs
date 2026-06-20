@@ -11,9 +11,6 @@ pub mod client;
 pub mod methods;
 pub mod protocol;
 
-#[allow(unused_imports)]
 pub use client::{Client, ClientError, DEFAULT_CALL_TIMEOUT};
-#[allow(unused_imports)]
 pub use methods::{dispatch_request, MethodContext};
-#[allow(unused_imports)]
 pub use protocol::{ErrorCode, ErrorObject, Request, Response, JSONRPC_VERSION};

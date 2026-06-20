@@ -32,25 +32,22 @@ use crate::init::fetch::{FetchClient, FetchError};
 pub const BUNDLED_PATH: &str = "../../data/benchmark-snapshot.json";
 
 /// Bundled snapshot bytes — fixed at build time by `include_str!`.
-/// 2 MiB build-time cap is enforced by [`bundled_size_budget`]. The
-/// ceiling was raised from the original 500 KiB in Unit 6 of plan
-/// 2026-05-20-001 to make room for the ~100-row live-discovery
-/// catalog (Qwen3.6 / Gemma 4 / DeepSeek V3.2 / GLM-5 / Llama 4 /
-/// Phi-4 / MoE flagships) without trimming task tiers.
+/// 2 MiB build-time cap is enforced by the const-assert below. The
+/// ceiling allows the ~100-row live-discovery catalog (Qwen3.6 /
+/// Gemma 4 / DeepSeek V3.2 / GLM-5 / Llama 4 / Phi-4 / MoE flagships)
+/// without trimming task tiers.
 const BUNDLED_RAW: &str = include_str!("../../data/benchmark-snapshot.json");
 
 /// Build-time size budget for the bundled snapshot. A future regen
-/// that blows past this fails the build via the assertion in
-/// [`bundled_size_budget`] rather than silently bloating the binary.
-/// 2 MiB ≈ 0.05% of the release binary — comfortable headroom for the
-/// 100-row catalog cap (`SNAPSHOT_MODEL_LIMIT` in the regen script).
+/// that blows past this fails the build via the const-assert below
+/// rather than silently bloating the binary. 2 MiB ≈ 0.05% of the
+/// release binary — comfortable headroom for the 100-row catalog cap
+/// (`SNAPSHOT_MODEL_LIMIT` in the regen script).
 const BUNDLED_SIZE_BUDGET_BYTES: usize = 2 * 1024 * 1024;
 
-/// Compile-time-evaluable size check. Calling it from
-/// `load_bundled_or_panic` would surface a runtime panic; the
-/// `const_assert!` form fires at build time.
-#[allow(dead_code)]
-const _BUNDLED_SIZE_CHECK: () = {
+// Anonymous const so the budget overrun fails the build instead of
+// surfacing as a runtime panic from `load_bundled_or_panic`.
+const _: () = {
   if BUNDLED_RAW.len() > BUNDLED_SIZE_BUDGET_BYTES {
     panic!(
       "bundled benchmark snapshot exceeds the 2 MiB build-time \
@@ -60,8 +57,7 @@ const _BUNDLED_SIZE_CHECK: () = {
   }
 };
 
-/// Runtime accessor for the size budget. Used by unit tests so the
-/// constant isn't dead code in the eyes of `clippy`.
+/// Test-only accessor for the size budget constant.
 pub fn bundled_size_budget() -> usize {
   BUNDLED_SIZE_BUDGET_BYTES
 }
