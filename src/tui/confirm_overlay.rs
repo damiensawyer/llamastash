@@ -71,16 +71,12 @@ pub fn render(
   let hint = Paragraph::new(Line::from(vec![
     Span::styled(
       format!("{submit_label} / y"),
-      Style::default()
-        .fg(palette.success)
-        .add_modifier(Modifier::BOLD),
+      Style::default().fg(palette.success),
     ),
     Span::styled(" confirm  ·  ", palette.muted_style()),
     Span::styled(
       format!("{cancel_label} / n"),
-      Style::default()
-        .fg(palette.warning)
-        .add_modifier(Modifier::BOLD),
+      Style::default().fg(palette.warning),
     ),
     Span::styled(" cancel", palette.muted_style()),
   ]))

@@ -265,12 +265,7 @@ fn render_column(sections: &[&Section], palette: &Palette) -> Vec<Line<'static>>
 fn render_binding_line(keys: &str, description: &str, palette: &Palette) -> Line<'static> {
   Line::from(vec![
     Span::styled("  ".to_string(), Style::default()),
-    Span::styled(
-      format!("{keys:<12}"),
-      Style::default()
-        .fg(palette.label)
-        .add_modifier(Modifier::BOLD),
-    ),
+    Span::styled(format!("{keys:<12}"), Style::default().fg(palette.label)),
     Span::styled("  ".to_string(), Style::default()),
     Span::styled(description.to_string(), palette.text_style()),
   ])

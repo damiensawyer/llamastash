@@ -30,7 +30,7 @@ use crate::tui::tabs::{chat, embed, logs, rerank, settings, RightTab};
 /// dashboard owns the keyboard chain at a glance.
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette, focused: bool) {
   let tabs = app.available_right_tabs();
-  let (title_line, tab_rects) = block_title_with_rects(app, &tabs, palette, area);
+  let (title_line, tab_rects) = block_title_with_rects(app, &tabs, palette, area, focused);
   // Stash the per-tab rects on App so the mouse-focus click handler
   // can resolve `(column, row)` → `RightTab`. The list/right-pane
   // rects were written by `render_body`; we only touch `right_tabs`
@@ -422,6 +422,7 @@ fn block_title_with_rects(
   tabs: &[RightTab],
   palette: &Palette,
   area: Rect,
+  focused: bool,
 ) -> (Line<'static>, Vec<(RightTab, Rect)>) {
   let mut spans: Vec<Span<'static>> = Vec::with_capacity(tabs.len() * 3 + 4);
   let mut rects: Vec<(RightTab, Rect)> = Vec::with_capacity(tabs.len());
@@ -452,9 +453,12 @@ fn block_title_with_rects(
     // Active tab gets `panel_title` + bold so it reads like the
     // panel's heading text (matches Host/Daemon/Models titles).
     // Inactive tabs stay muted so the heading carries clear focus.
-    // The mnemonic underline (first letter) is applied separately
-    // by [`mnemonic_spans`].
-    let active = *tab == app.right_tab;
+    // When the whole right pane is unfocused, every tab drops to the
+    // muted + first-letter-underlined treatment (matching the Models
+    // pane title) so the heading recedes and the active list/other
+    // pane reads as live. The mnemonic underline is applied by
+    // [`mnemonic_spans`].
+    let active = *tab == app.right_tab && focused;
     spans.extend(mnemonic_spans(label, active, palette));
     col = col.saturating_add(label_width);
   }
@@ -1141,7 +1145,7 @@ mod tests {
     app.focus = Focus::RightPane;
     let palette = app.palette();
     let tabs = app.available_right_tabs();
-    let (line, _) = block_title_with_rects(&app, &tabs, palette, Rect::new(0, 0, 60, 10));
+    let (line, _) = block_title_with_rects(&app, &tabs, palette, Rect::new(0, 0, 60, 10), true);
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(text.contains("Logs"));
     assert!(text.contains("Settings"));
@@ -1158,10 +1162,10 @@ mod tests {
 
   #[test]
   fn block_title_underlines_mnemonic_letter_for_inactive_tabs() {
-    // The first letter of each *inactive* tab label carries the
-    // UNDERLINED modifier so it reads as a press-this-letter
-    // shortcut hint. The active tab drops the underline so it
-    // doesn't double up with the bold focus styling.
+    // With the right pane FOCUSED: the first letter of each *inactive*
+    // tab label carries the UNDERLINED modifier so it reads as a
+    // press-this-letter shortcut hint. The active tab drops the
+    // underline so it doesn't double up with the bold focus styling.
     use crate::tui::keybindings::Focus;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -1176,7 +1180,7 @@ mod tests {
     let palette = app.palette();
     let mut term = Terminal::new(TestBackend::new(80, 18)).unwrap();
     term
-      .draw(|f| render(f, Rect::new(0, 0, 80, 18), &app, palette, false))
+      .draw(|f| render(f, Rect::new(0, 0, 80, 18), &app, palette, true))
       .unwrap();
     let buf = term.backend().buffer().clone();
     // Iterate cells on the top border row tracking column (x)
@@ -1206,6 +1210,54 @@ mod tests {
     assert!(
       l_cell.modifier.contains(Modifier::UNDERLINED),
       "inactive Logs tab's first letter must be underlined as a mnemonic"
+    );
+  }
+
+  #[test]
+  fn unfocused_right_pane_dims_active_tab_to_muted_underlined_non_bold() {
+    // When the right pane is UNFOCUSED, the active tab loses its bold
+    // panel_title styling and reads like an inactive tab: muted fg,
+    // first letter underlined, non-bold — so the heading recedes and
+    // the focused (list) pane reads as live. Mirrors the Models pane
+    // title's unfocused treatment.
+    use crate::tui::keybindings::Focus;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::style::Modifier;
+    use ratatui::Terminal;
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake_model()];
+    app.managed = vec![ready_managed("qwen", None, None)];
+    app.list_cursor = 2;
+    app.right_tab = RightTab::Settings; // active tab
+    app.focus = Focus::List; // but the LIST owns focus
+    let palette = app.palette();
+    let mut term = Terminal::new(TestBackend::new(80, 18)).unwrap();
+    term
+      .draw(|f| render(f, Rect::new(0, 0, 80, 18), &app, palette, false))
+      .unwrap();
+    let buf = term.backend().buffer().clone();
+    let mut settings_x: Option<u16> = None;
+    for x in 0..buf.area.width {
+      if buf.cell((x, 0)).unwrap().symbol() == "S" {
+        settings_x = Some(x);
+        break;
+      }
+    }
+    let s_cell = buf
+      .cell((settings_x.expect("S of Settings on top row"), 0))
+      .unwrap();
+    assert!(
+      s_cell.modifier.contains(Modifier::UNDERLINED),
+      "unfocused pane: active tab's first letter must be underlined"
+    );
+    assert!(
+      !s_cell.modifier.contains(Modifier::BOLD),
+      "unfocused pane: active tab must not be bold"
+    );
+    assert_eq!(
+      s_cell.fg, palette.muted,
+      "unfocused pane: active tab must be painted muted"
     );
   }
 

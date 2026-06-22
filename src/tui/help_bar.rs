@@ -13,7 +13,7 @@
 
 use crossterm::event::KeyCode;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -62,6 +62,16 @@ const GLOBAL_CHIPS: &[GlobalChip] = &[
     focus: Focus::List,
     actions: &[Action::OpenHfDialog],
   },
+  // `↑↓:scroll` mirrors the per-pane bottom-border scroll chip
+  // (`right_pane::bidirectional_chip`) but surfaces it always-on so
+  // the scroll affordance is discoverable before the user focuses a
+  // scrollable pane. Resolved from MoveUp/MoveDown so a rebind flows
+  // through; joined without a `/` so it reads as one affordance.
+  GlobalChip {
+    description: "scroll",
+    focus: Focus::List,
+    actions: &[Action::MoveUp, Action::MoveDown],
+  },
   // RestartDaemon (Ctrl+R) and KillDaemon (Ctrl+K) intentionally
   // do NOT appear in the global hint strip. Both are confirmation-
   // gated destructive actions; surfacing them in the always-on chip
@@ -106,10 +116,16 @@ fn chip_keys(app: &App, chip: &GlobalChip) -> Option<String> {
     acc
   };
   if labels.is_empty() {
-    None
-  } else {
-    Some(labels.join("/"))
+    return None;
   }
+  // The scroll chip reads as one `↑↓` affordance (no separator); every
+  // other multi-key chip joins its labels with `/`.
+  let sep = if chip.actions == [Action::MoveUp, Action::MoveDown] {
+    ""
+  } else {
+    "/"
+  };
+  Some(labels.join(sep))
 }
 
 /// Curated label picker for the `panes` chip. Walks the live
@@ -228,15 +244,12 @@ pub fn render_global(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Pal
   frame.render_widget(para, area);
 }
 
-/// Build a `key:label` span. The key+colon+label are bolded together;
-/// both inherit the accent-bg/bg-fg style from the parent Paragraph.
+/// Build a `key:label` span. Non-bold — it inherits the
+/// accent-bg/on-accent-fg style from the parent Paragraph as-is.
 /// `keys` is allocated per render (the runtime-resolved key string);
 /// `label` is `&'static` because the chip descriptions are fixed.
 fn hint_span(keys: &str, label: &'static str) -> Span<'static> {
-  Span::styled(
-    [keys, ":", label].concat(),
-    Style::default().add_modifier(Modifier::BOLD),
-  )
+  Span::raw([keys, ":", label].concat())
 }
 
 #[cfg(test)]
@@ -299,12 +312,16 @@ mod tests {
     // The HF pull dialog chip sits immediately after `panes` so the
     // affordance is discoverable from the top row.
     assert!(text.contains("P:pull"), "got: {text}");
+    // The scroll chip reads `↑↓:scroll` (no slash) and sits between
+    // pull and theme.
+    assert!(text.contains("↑↓:scroll"), "got: {text}");
     let panes_pos = text.find(":panes").expect("panes chip present");
     let pull_pos = text.find(":pull").expect("pull chip present");
+    let scroll_pos = text.find(":scroll").expect("scroll chip present");
     let theme_pos = text.find(":theme").expect("theme chip present");
     assert!(
-      panes_pos < pull_pos && pull_pos < theme_pos,
-      "expected order: panes → pull → theme, got: {text}"
+      panes_pos < pull_pos && pull_pos < scroll_pos && scroll_pos < theme_pos,
+      "expected order: panes → pull → scroll → theme, got: {text}"
     );
     // `/:filter` is panel-scoped now (lives in the Models block
     // title) — it should not appear in the global strip.
@@ -339,9 +356,9 @@ mod tests {
   #[test]
   fn global_hint_text_fits_typical_terminal_widths() {
     // The strip must stay scannable on a normal terminal. Restart /
-    // kill chips are out, the HF `D:pull` chip is in; the
-    // default keymap now produces ~50 cells. Keep the budget under
-    // 70 so a small label tweak still catches accidental blowups.
+    // kill chips are out; the HF `P:pull` and `↑↓:scroll` chips are
+    // in; the default keymap now produces ~60 cells. Keep the budget
+    // under 70 so a small label tweak still catches accidental blowups.
     let app = default_app();
     assert!(global_hint_text(&app).chars().count() < 70);
   }
