@@ -838,23 +838,28 @@ pub(crate) fn build_block_title(
   // Now build the actual Line with styled spans.
   let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
   spans.push(Span::raw(" "));
-  // Underline the leading `M` of `Models` so it reads as a
-  // press-this-letter shortcut (Shift+M re-focuses the list). When
-  // the pane is unfocused, drop to `muted_style` so the heading
-  // recedes — the active pane (right) wears the bold panel_title
-  // tone. Matches the inactive-tab treatment in `right_pane`.
+  // When unfocused, drop to `muted_style` so the heading recedes —
+  // the active pane wears the bold panel_title tone. Matches the
+  // inactive-tab treatment in `right_pane`.
   let title_style = if pane_focused {
     palette.title_style()
   } else {
     palette.muted_style()
   };
+  // Underline the leading `M` (Shift+M re-focuses the list) only while
+  // the pane is unfocused, so it reads as a press-this-letter mnemonic.
+  // When focused, the bold panel_title already carries the heading, so
+  // the underline is dropped — matching the right pane's active tab,
+  // which is bold-not-underlined.
+  let first_style = if pane_focused {
+    title_style
+  } else {
+    title_style.add_modifier(Modifier::UNDERLINED)
+  };
   let mut count_chars = count.chars();
   match count_chars.next() {
     Some(first) => {
-      spans.push(Span::styled(
-        first.to_string(),
-        title_style.add_modifier(Modifier::UNDERLINED),
-      ));
+      spans.push(Span::styled(first.to_string(), first_style));
       let rest: String = count_chars.collect();
       if !rest.is_empty() {
         spans.push(Span::styled(rest, title_style));
@@ -1983,10 +1988,11 @@ mod tests {
   }
 
   #[test]
-  fn models_title_underlines_leading_m_as_shift_jump_mnemonic() {
-    // Shift+M re-focuses the model list. The leading `M` of
-    // `Models [N]` carries the UNDERLINED modifier on top of the
-    // panel-title bold so it reads as a press-this-letter hint.
+  fn models_title_active_pane_first_char_not_underlined() {
+    // When the Models pane is FOCUSED, the leading `M` is bold
+    // panel_title with NO underline — consistent with the right pane's
+    // active tab (bold-not-underlined). The underline is a mnemonic
+    // that only shows while the pane is unfocused.
     use crate::theme::{palette_for, ThemeName};
     let palette = palette_for(ThemeName::Macchiato);
     let line = build_block_title(
@@ -2006,8 +2012,12 @@ mod tests {
       .find(|s| s.content.as_ref() == "M")
       .expect("leading M span present in title");
     assert!(
-      m_span.style.add_modifier.contains(Modifier::UNDERLINED),
-      "leading M must be underlined as a mnemonic"
+      !m_span.style.add_modifier.contains(Modifier::UNDERLINED),
+      "focused Models title must NOT underline the leading M"
+    );
+    assert!(
+      m_span.style.add_modifier.contains(Modifier::BOLD),
+      "focused Models title M must stay bold panel_title"
     );
   }
 
@@ -2048,12 +2058,16 @@ mod tests {
       !m_unfocused.style.add_modifier.contains(Modifier::BOLD),
       "unfocused title must drop the bold modifier"
     );
-    // The mnemonic underline survives both states so Shift+M still
-    // reads as a press-this-letter hint.
+    // The mnemonic underline shows only while unfocused; the focused
+    // (bold) heading drops it, matching the right pane's active tab.
     assert!(m_unfocused
       .style
       .add_modifier
       .contains(Modifier::UNDERLINED));
+    assert!(
+      !m_focused.style.add_modifier.contains(Modifier::UNDERLINED),
+      "focused title must drop the mnemonic underline"
+    );
   }
 
   #[test]
