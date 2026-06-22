@@ -61,6 +61,35 @@ impl KnobField {
       KnobField::Ctx | KnobField::NGpuLayers | KnobField::NCpuMoe | KnobField::TensorSplit
     )
   }
+
+  /// The snake_case serde key this knob serialises under in `TypedKnobs`
+  /// and persisted state. Single source for any field-name display (the
+  /// Settings label, error text) so a label can never drift from the
+  /// persisted JSON key — a drift test pins it against the actual serde
+  /// output.
+  pub fn field_name(self) -> &'static str {
+    match self {
+      KnobField::Ctx => "ctx",
+      KnobField::Reasoning => "reasoning",
+      KnobField::NGpuLayers => "n_gpu_layers",
+      KnobField::NCpuMoe => "n_cpu_moe",
+      KnobField::Threads => "threads",
+      KnobField::CacheTypeK => "cache_type_k",
+      KnobField::CacheTypeV => "cache_type_v",
+      KnobField::FlashAttn => "flash_attn",
+      KnobField::Mlock => "mlock",
+      KnobField::NoMmap => "no_mmap",
+      KnobField::Parallel => "parallel",
+      KnobField::BatchSize => "batch_size",
+      KnobField::UbatchSize => "ubatch_size",
+      KnobField::RopeFreqScale => "rope_freq_scale",
+      KnobField::Keep => "keep",
+      KnobField::Device => "device",
+      KnobField::TensorSplit => "tensor_split",
+      KnobField::MainGpu => "main_gpu",
+      KnobField::SplitMode => "split_mode",
+    }
+  }
 }
 
 /// What the parser expects after the flag head. Bool consumes no
@@ -349,20 +378,6 @@ pub fn recognise(token: &str) -> Option<Recognised<'_>> {
   None
 }
 
-/// True when `token`'s head (before any `=`) is one of the canonical
-/// flag names or short aliases for `field`. Used by `argvify` to
-/// avoid duplicating a flag the caller already supplied in `extras`.
-#[allow(dead_code)]
-pub fn token_matches(token: &str, field: KnobField) -> bool {
-  let head = token
-    .split('=')
-    .next()
-    .unwrap_or(token)
-    .to_ascii_lowercase();
-  let spec = spec_for(field);
-  spec.canonical == head || spec.aliases.iter().any(|a| *a == head)
-}
-
 /// One titled cluster of knobs in the Settings editor's **display**
 /// order. This is deliberately distinct from [`knob_specs`] (which is
 /// the pinned *argv* emission order): the editor groups knobs by what
@@ -501,14 +516,6 @@ mod tests {
     let r = recognise("--THREADS=8").unwrap();
     assert_eq!(r.field, KnobField::Threads);
     assert_eq!(r.inline_value, Some("8"));
-  }
-
-  #[test]
-  fn token_matches_accepts_canonical_and_aliases() {
-    assert!(token_matches("--threads", KnobField::Threads));
-    assert!(token_matches("-t", KnobField::Threads));
-    assert!(token_matches("--threads=8", KnobField::Threads));
-    assert!(!token_matches("--threads", KnobField::NGpuLayers));
   }
 
   #[test]

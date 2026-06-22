@@ -98,7 +98,7 @@ fn refuse_cross_uid_symlink(path: &Path) -> Result<(), InstallError> {
 }
 
 /// Accessor used by callers that just need to confirm a path is safe
-/// before pre-selecting it in the install picker (R54).
+/// before pre-selecting it in the install picker.
 pub fn is_safe_to_adopt(path: &Path) -> bool {
   preflight_integrity(path).is_ok()
 }

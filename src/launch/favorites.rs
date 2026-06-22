@@ -1,4 +1,4 @@
-//! Favorited models (`R24` storage half; TUI mark/render is Unit 6).
+//! Favorited models (storage half; TUI mark/render lives in the TUI).
 //!
 //! Persisted as `favorites: Vec<FavoriteEntry>` in `state.json`. The
 //! set is small (humans favorite tens of models, not thousands) so a

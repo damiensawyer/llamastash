@@ -1,4 +1,4 @@
-//! Tempdir isolation + child-process env-var configuration (Unit 4).
+//! Tempdir isolation + child-process env-var configuration.
 //!
 //! The UAT runs against a fresh tempdir so its state, config, control-
 //! plane runtime info, cache/logs, and the HuggingFace download cache

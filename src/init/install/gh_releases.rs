@@ -1,13 +1,12 @@
 //! `ggml-org/llama.cpp` GitHub Releases install path.
 //!
-//! Two facts from the Unit 1 spike anchor this module:
+//! Two facts anchor this module:
 //! 1. SHA-256 lives in the API JSON `digest` field (`sha256:<hex>`).
 //!    No discrete sidecar files; no body-text parsing.
 //! 2. Linux + Nvidia has **no** CUDA prebuilt — Vulkan is the
-//!    routing default with an actionable downgrade banner Unit 10
-//!    prints.
+//!    routing default with an actionable downgrade banner.
 //!
-//! Variant table (per spike):
+//! Variant table:
 //!
 //! | Host | Asset name suffix |
 //! |---|---|
@@ -108,8 +107,8 @@ pub fn pick_asset_suffix(hw: &HardwareSnapshot) -> Option<String> {
     // this arm the common case on any Windows box whose driver ships
     // `vulkaninfo.exe`, not just true multi-card rigs. Pick the build
     // that covers the strongest device present: CUDA when any NVIDIA card
-    // is in the set (Windows only — Linux has no CUDA prebuilt per the
-    // Unit 1 spike), else Vulkan, which runs on every GPU llama.cpp
+    // is in the set (Windows only — Linux has no CUDA prebuilt), else
+    // Vulkan, which runs on every GPU llama.cpp
     // targets. (macOS `Multi` already resolves via the `OsFamily::MacOs`
     // catch-all above; `OsFamily::Other` via the top arm.)
     (GpuInfo::Multi { devices }, OsFamily::Windows) => {
@@ -157,7 +156,7 @@ pub struct AssetPick {
 /// asset matching the host's variant suffix. Walking back through the
 /// page covers the upstream-incomplete-release case (e.g. `b9352`
 /// shipped without `ubuntu-x64.tar.gz`); only when no surveyed release
-/// matches do we return `NoMatchingAsset`. The wizard (Unit 10) layers
+/// matches do we return `NoMatchingAsset`. The wizard layers
 /// a user-visible fallback on top for the interactive flow.
 /// Backoff between the first and second GH API attempt when the
 /// initial call comes back rate-limited. 60 s is the practical floor
@@ -175,7 +174,7 @@ pub async fn fetch_latest_asset(
     os: hw.os,
     arch: hw.cpu_arch,
   })?;
-  // R71: GH Releases API allows 60 unauthenticated requests/hour.
+  // GH Releases API allows 60 unauthenticated requests/hour.
   // On the first 429/403 we sleep briefly and try again; a second
   // rate-limit response is surfaced as-is so the wizard can offer
   // the "point at existing binary" fallback. Any other error is
@@ -476,7 +475,7 @@ mod tests {
 
   #[test]
   fn linux_multi_gpu_picks_vulkan() {
-    // No CUDA prebuilt on Linux (Unit 1 spike), so even an NVIDIA-bearing
+    // No CUDA prebuilt on Linux, so even an NVIDIA-bearing
     // multi-GPU set routes to the universal Vulkan tarball.
     let gpu = GpuInfo::Multi {
       devices: vec![dev("nvidia"), dev("unknown")],

@@ -1,15 +1,14 @@
 //! Single-shot JSON-RPC client over HTTP loopback.
 //!
-//! Phase A of the Windows+HTTP-IPC plan: the client talks `POST
-//! {ipc_url}/rpc` carrying the JSON-RPC 2.0 envelope, with the
+//! The client talks `POST {ipc_url}/rpc` carrying the JSON-RPC 2.0
+//! envelope, with the
 //! per-daemon bearer token baked into a default `Authorization`
 //! header. Attach order: `LLAMASTASH_IPC_URL` +
 //! `LLAMASTASH_IPC_TOKEN` env (both required if either set), then
 //! `runtime.json` under the state directory, else `Connect` error.
 //!
-//! The Unix-socket transport is removed in Unit 4 of the plan; this
-//! module is the canonical IPC client for every TUI / CLI surface
-//! during Phase A onward.
+//! This module is the canonical IPC client for every TUI / CLI
+//! surface.
 
 use std::{
   path::{Path, PathBuf},
@@ -95,13 +94,12 @@ impl Client {
   /// 3. Otherwise `ClientError::Connect`.
   ///
   /// `path` is interpreted as the daemon's state directory. As a
-  /// transitional accommodation during Phase A of the
-  /// Windows+HTTP-IPC plan, if the caller passes a file path (or a
-  /// non-existent path) whose **parent** is a directory holding
+  /// transitional accommodation, if the caller passes a file path (or
+  /// a non-existent path) whose **parent** is a directory holding
   /// `runtime.json`, the parent is used as the state directory. This
   /// lets existing callers that hand in a socket path (e.g.,
   /// `…/daemon.sock`) keep working while the migration to explicit
-  /// `state_dir` arguments lands. Unit 4 removes the fallback.
+  /// `state_dir` arguments lands.
   pub async fn connect(path: &Path) -> Result<Self, ClientError> {
     let state_dir = effective_state_dir(path);
     let (ipc_url, ipc_token) = resolve_attach(&state_dir)?;
@@ -203,9 +201,9 @@ impl Client {
 }
 
 /// Interpret `path` as a state directory. When `path` is a file (or
-/// missing), fall back to its parent — the Phase A accommodation that
+/// missing), fall back to its parent — the accommodation that
 /// lets `Client::connect(&socket_path)` keep working while the bulk
-/// rename to explicit `state_dir` arguments lands in Unit 4.
+/// rename to explicit `state_dir` arguments lands.
 fn effective_state_dir(path: &Path) -> PathBuf {
   if path.is_dir() {
     return path.to_owned();
@@ -269,7 +267,7 @@ mod tests {
     // We can't reliably manipulate process-global env in unit
     // tests without serialising every test in this file behind a
     // mutex — env var resolution is covered end-to-end in
-    // `tests/control_plane_client_test.rs` (added in Unit 2). Here
+    // `tests/control_plane_client_test.rs`. Here
     // we only check the error message phrasing.
     use std::sync::Mutex;
     use std::sync::OnceLock;

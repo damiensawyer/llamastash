@@ -1,6 +1,6 @@
 //! `llamastash init` CLI handler. Thin shim into `init::wizard::run`
-//! so the wizard's body can land in Unit 10 without touching the
-//! dispatcher again.
+//! so the wizard's body can evolve without touching the dispatcher
+//! again.
 
 use crate::cli::cli_args::{Cli, InitArgs};
 use crate::cli::exit_codes::CliResult;

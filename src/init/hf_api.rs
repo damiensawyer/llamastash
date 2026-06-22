@@ -1,4 +1,4 @@
-//! HuggingFace Hub API client (Unit 3 / R104–R109).
+//! HuggingFace Hub API client.
 //!
 //! Two surfaces, both routed through [`FetchClient`] so the v2 fetch
 //! contract (HTTPS-only, host allowlist, redirect cap, body cap,
@@ -14,7 +14,7 @@
 //! - [`list_repo_files`] hits `GET /api/models/<repo>/tree/main`, which
 //!   returns per-file `path` + `size` (unlike `hf-hub::Api::model(id).info()`,
 //!   whose `Siblings` struct only carries the filename). Sizes feed the
-//!   picker's hardware-fit indicator (R111) directly.
+//!   picker's hardware-fit indicator directly.
 //!
 //! Search + listing are deliberately unauthenticated; the v2 fetch
 //! contract forbids opportunistic `Authorization` headers, and both
@@ -335,7 +335,7 @@ fn parse_next_link(header: &str) -> Option<String> {
 /// List the files of a single repo with their resolved sizes. Hits
 /// `/api/models/<repo>/tree/main` via [`FetchClient`] so the v2 fetch
 /// contract guards the request (cap, allowlist, offline branch) and
-/// the picker's hardware-fit indicator (R111) can read real sizes for
+/// the picker's hardware-fit indicator can read real sizes for
 /// every row. Directories are filtered out — the picker only renders
 /// flat files.
 ///
@@ -449,10 +449,8 @@ mod tests {
     assert_eq!(HfSortKey::Likes.as_query_token(), "likes");
     assert_eq!(HfSortKey::RecentlyUpdated.as_query_token(), "lastModified");
     // Regression: HF Hub renamed `sort=trending` → `sort=trendingScore`
-    // (the legacy token now returns HTTP 400). The 2026-05-21 round-1
-    // fix tried to compensate by dropping `search=` server-side; the
-    // round-3 follow-up is the actual rename. Confirmed via curl
-    // against the live Hub at fix time.
+    // (the legacy token now returns HTTP 400). Confirmed via curl
+    // against the live Hub.
     assert_eq!(HfSortKey::Trending.as_query_token(), "trendingScore");
     // Client-side sorts have no HF token; they fetch the downloads
     // page and reorder it locally.

@@ -15,7 +15,7 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// A single JSON-RPC request as it arrives on the wire.
 ///
 /// `id` is `Option<...>` because notifications (the spec's name for
-/// fire-and-forget requests) omit it. Unit 2 doesn't have any
+/// fire-and-forget requests) omit it. We don't have any
 /// notification-style methods, but accepting `null`/missing here keeps us
 /// compatible with any client that follows the spec.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,7 +47,7 @@ impl Request {
 pub struct Response {
   pub jsonrpc: String,
   /// Echoed from the request. Always present in our responses (we don't
-  /// generate spontaneous server-pushed messages in Unit 2).
+  /// generate spontaneous server-pushed messages).
   pub id: Value,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub result: Option<Value>,

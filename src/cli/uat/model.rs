@@ -1,4 +1,4 @@
-//! Reference GGUF + fallback identity (Unit 4).
+//! Reference GGUF + fallback identity.
 //!
 //! Pinned by HuggingFace commit SHA so the byte-stream the UAT
 //! exercises is reproducible across runs and across the maintainer's

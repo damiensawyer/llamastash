@@ -68,7 +68,7 @@ use serde::{Deserialize, Serialize};
 pub const UNKNOWN_MTIME: &str = "1970-01-01T00:00:00Z";
 
 /// Placeholder `expires_at` value emitted on `/api/ps` while idle-TTL
-/// eviction is deferred (R34). Far-future = "no expiry."
+/// eviction is deferred. Far-future = "no expiry."
 pub const FAR_FUTURE_EXPIRY: &str = "9999-12-31T23:59:59Z";
 
 /// Format 32 BLAKE3 bytes as the `blake3:<hex>` string used by
@@ -181,7 +181,7 @@ pub struct PsModel {
   /// ([`FAR_FUTURE_EXPIRY`]) until idle-TTL eviction lands.
   pub expires_at: String,
   /// Per-PID VRAM footprint. `0` until the VRAM attribution TODO
-  /// (R2) lands.
+  ///  lands.
   pub size_vram: u64,
 }
 

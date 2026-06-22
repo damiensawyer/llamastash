@@ -1,4 +1,4 @@
-//! Centralized memory-headroom policy (R16).
+//! Centralized memory-headroom policy.
 //!
 //! The budget authority (admission control) and the refusal messages it
 //! produces are the *only* consumers. Every display surface — `status`,

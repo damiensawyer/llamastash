@@ -1,16 +1,16 @@
-//! Init wizard's config.yaml write half (R66 / R67 / R68 / R72).
+//! Init wizard's config.yaml write half.
 //!
-//! Thin user-facing wrapper around Unit 2's
+//! Thin user-facing wrapper around the
 //! [`crate::config::writer::merge_and_write`] primitive that adds:
 //! - human-friendly + JSON diff rendering,
 //! - secret-key redaction (path matches `token` / `secret` /
 //!   `password` substring → value rendered as `<redacted>`),
 //! - non-interactive / interactive confirm hook,
-//! - managed_keys list build that Unit 10 then stamps into
+//! - managed_keys list build that the wizard then stamps into
 //!   `_init_snapshot.json`.
 //!
 //! The actual atomic rename + 0600 mode + symlink/parent-mode refusal
-//! all live in Unit 2's primitive — this module never touches the
+//! all live in that primitive — this module never touches the
 //! filesystem itself.
 //!
 //! Redaction allowlist, diff rendering, and the [`RedactedDiffEntry`]
@@ -44,10 +44,10 @@ pub struct WriteResult {
 
 /// How the wrapper handles the diff preview. There is currently no
 /// blocking dialoguer prompt — the actual confirm prompt lives in
-/// Unit 10's interactive flow and is plumbed past this wrapper.
+/// the wizard's interactive flow and is plumbed past this wrapper.
 ///
 /// - `show_diff_preview = true` renders the diff to stderr before the
-///   write so a human can audit it. Unit 10's prompt is layered on
+///   write so a human can audit it. The wizard's prompt is layered on
 ///   top in interactive mode; `--recommended` / `--json` runs pass
 ///   `false`.
 /// - `verbose = true` always renders the diff to stderr (legacy
@@ -96,9 +96,9 @@ pub fn dry_run_diff(path: &Path, additions: serde_yaml::Value) -> Result<DryRunD
   })
 }
 
-/// Wizard-facing wrapper. Writes via Unit 2's primitive, applies
+/// Wizard-facing wrapper. Writes via the config-writer primitive, applies
 /// redaction, renders both forms of the diff, returns the
-/// [`WriteResult`] Unit 10 stitches into its summary.
+/// [`WriteResult`] the wizard stitches into its summary.
 pub fn write_with_diff(
   path: &Path,
   additions: serde_yaml::Value,
@@ -110,7 +110,7 @@ pub fn write_with_diff(
   if options.verbose {
     eprintln!("init config diff:\n{diff_human}");
   } else if options.show_diff_preview {
-    // Interactive caller (Unit 10) renders its own confirm prompt
+    // Interactive caller renders its own confirm prompt
     // around this — we just surface the diff so the user sees
     // what would be written.
     eprintln!("config diff (preview):\n{diff_human}");

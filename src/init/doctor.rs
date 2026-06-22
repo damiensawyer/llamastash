@@ -1,4 +1,4 @@
-//! `llamastash doctor` read-only diagnostic (R74 / R75).
+//! `llamastash doctor` read-only diagnostic.
 //!
 //! Re-runs hardware + binary detection, loads `_init_snapshot.json`,
 //! compares the two, emits 0-N findings. Every finding carries a
@@ -24,13 +24,13 @@ use crate::init::detection::{detect_hardware, HardwareSnapshot, OsFamily};
 use crate::init::snapshot::{self, InitSnapshot, InstallMethod};
 use crate::util::datetime::{current_yyyymmdd, days_between, parse_yyyymmdd};
 
-/// Memory-drift change threshold (R13): a pool-size change below the
+/// Memory-drift change threshold: a pool-size change below the
 /// larger of this fraction or [`DRIFT_MIN_DELTA_BYTES`] is noise and
 /// fires no finding (guards against Windows DXGI flapping).
 const DRIFT_MIN_FRACTION: f64 = 0.05;
 /// Absolute floor for the drift threshold — 512 MiB.
 const DRIFT_MIN_DELTA_BYTES: u64 = 512 * 1024 * 1024;
-/// GTT-hint band (R14): a GTT pool sized between these fractions of
+/// GTT-hint band: a GTT pool sized between these fractions of
 /// system RAM is the amdgpu kernel default (~half) and signals the user
 /// has not raised the ceiling. Outside the band → no hint.
 const GTT_HINT_RATIO_LO: f64 = 0.40;
@@ -136,7 +136,7 @@ pub struct Baseline {
   pub init_date: Option<String>,
 }
 
-/// Live hardware section of the doctor report (R12). Built from the
+/// Live hardware section of the doctor report. Built from the
 /// same [`HardwareSnapshot`] the init banner renders, with the R15
 /// label conventions (`MEM`/`MEM*`, `VRAM (shared)`) from day one.
 #[derive(Debug, Clone, Serialize)]
@@ -160,7 +160,7 @@ pub struct HardwareSection {
   /// Whether the GPU shares the system memory pool (Apple, AMD/Intel
   /// UMA APU).
   pub unified: bool,
-  /// How the unified-vs-discrete verdict was reached (R18). `None` on
+  /// How the unified-vs-discrete verdict was reached. `None` on
   /// Apple Metal (unified by construction) and non-classifying backends.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub uma_class_source: Option<ClassSource>,
@@ -169,10 +169,10 @@ pub struct HardwareSection {
   /// CPU-only / unknown hosts.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub gpu_pool_total_bytes: Option<u64>,
-  /// UMA composition (R15): the small BIOS-dedicated VRAM carve-out.
+  /// UMA composition: the small BIOS-dedicated VRAM carve-out.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub uma_carve_bytes: Option<u64>,
-  /// UMA composition (R15): the system-RAM-backed shared pool, rendered
+  /// UMA composition: the system-RAM-backed shared pool, rendered
   /// `VRAM (shared)` as a breakdown *of* `MEM*` (not a separate pool).
   #[serde(skip_serializing_if = "Option::is_none")]
   pub uma_shared_bytes: Option<u64>,
@@ -540,7 +540,7 @@ fn is_readable(path: &Path) -> bool {
   std::fs::File::open(path).is_ok()
 }
 
-/// Render the live hardware section (R12) with the R15 label
+/// Render the live hardware section with the R15 label
 /// conventions. `MEM`/`MEM*` mark discrete vs unified memory; the
 /// `VRAM (shared)` row is the UMA pool's system-RAM portion — a
 /// breakdown of `MEM*`, not a separate pool.

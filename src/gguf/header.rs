@@ -136,7 +136,7 @@ impl GgufValue {
 
 /// Per-tensor info entry (name + dimensions + ggml type tag). The byte
 /// offset into the tensor-data segment is parsed but intentionally not
-/// retained — Unit 3 only needs the structural shape for memory estimation.
+/// retained — only the structural shape is needed for memory estimation.
 #[derive(Debug, Clone)]
 pub struct TensorInfo {
   pub name: String,

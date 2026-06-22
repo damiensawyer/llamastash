@@ -1,5 +1,5 @@
 //! Post-launch actuals: what `--fit` actually chose, read once from the
-//! child's `/props` after it reaches Ready (R6).
+//! child's `/props` after it reaches Ready.
 //!
 //! Since placement is delegated to `--fit`, llamastash does not know the
 //! resolved context window (or layer split) until the child is up. We

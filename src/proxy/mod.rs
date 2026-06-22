@@ -3,14 +3,12 @@
 //! The proxy runs alongside the IPC Unix-socket server inside the
 //! daemon process, exposing a single loopback TCP listener that
 //! agent clients (OpenCode, Pi, anything OpenAI-shaped) can attach
-//! to. Unit 1 only stands up the listener; subsequent units layer
-//! `/v1/models`, body-model resolution, forwarding, auto-start +
-//! fallback, and the status surface on top.
+//! to. It stands up the listener, then layers `/v1/models`,
+//! body-model resolution, forwarding, auto-start + fallback, and the
+//! status surface on top.
 //!
-//! Plan: docs/plans/2026-05-21-001-feat-proxy-router-plan.md
-//!
-//! Scope reminder (plan §Scope Boundaries): loopback-only,
-//! same-UID, no auth, no TLS, no LAN binding, no MCP, no HTTP/2.
+//! Scope: loopback-only, same-UID, no auth, no TLS, no LAN binding,
+//! no MCP, no HTTP/2.
 
 pub(crate) mod auth;
 pub(crate) mod coalesce;

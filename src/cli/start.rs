@@ -442,7 +442,7 @@ fn build_payload(model_path: &str, mode: &str, p: &PartialParams, backend: Optio
     Value::String(PathBuf::from(model_path).display().to_string()),
   );
   obj.insert("mode".into(), Value::String(mode.to_string()));
-  // Per-model backend override (R17). Omitted when unset so the daemon
+  // Per-model backend override. Omitted when unset so the daemon
   // applies its default (`Auto` → identity rule).
   if let Some(b) = backend {
     obj.insert("backend".into(), Value::String(b.to_string()));

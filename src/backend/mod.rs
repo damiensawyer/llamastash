@@ -2,9 +2,9 @@
 //! on the **launch / supervise / identify** side, expressed as a
 //! contract so other inference engines can plug in.
 //!
-//! Phase 1 (this module + [`llama_cpp`]) shipped the contract with
-//! llama.cpp as the reference implementation and zero user-visible
-//! behavior change. This module is the backend-agnostic foundation: a
+//! This module + [`llama_cpp`] provide the contract with
+//! llama.cpp as the reference implementation. This module is the
+//! backend-agnostic foundation: a
 //! second engine plugs in by implementing [`Backend`], adding a variant to
 //! [`Backends`] (+ its match arms), and registering its
 //! [`identity`]/selection arms — no change to the supervisor, proxy, or
@@ -16,10 +16,10 @@
 //! identity.
 //!
 //! See `docs/plans/2026-06-08-001-refactor-backend-trait-abstraction-plan.md`
-//! (Phase 1) and the origin brainstorm
+//! and the origin brainstorm
 //! `docs/brainstorms/2026-06-08-multi-backend-abstraction-requirements.md`.
 //!
-//! # Two lifecycle shapes (R2)
+//! # Two lifecycle shapes
 //!
 //! The contract does not assume **one process per model**. Two shapes
 //! exist, one per [`Lifecycle`]:
@@ -35,7 +35,7 @@
 //!   plan is *executed*. Lemonade ([`lemonade`]) is the first
 //!   managed-multiplexer backend.
 //!
-//! # Generalized identity (R12)
+//! # Generalized identity
 //!
 //! [`Backend::identify`] returns the seam-level [`identity::ModelIdentity`]
 //! (GGUF or backend-registry), wrapping the unchanged GGUF
@@ -58,7 +58,7 @@ use crate::daemon::probe::ProbeOptions;
 use crate::launch::flag_aliases::{knob_specs, KnobField};
 use crate::launch::params::{BackendChoice, LaunchParams};
 
-/// How a backend manages the lifecycle of the models it runs (R2).
+/// How a backend manages the lifecycle of the models it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lifecycle {
   /// One supervised child process per model; llamastash owns the full
@@ -82,7 +82,7 @@ impl Lifecycle {
 
 /// How to tell that a launched model is ready to serve.
 ///
-/// Phase 1 has only the HTTP-poll shape (llama.cpp's `/health`). The
+/// Currently only the HTTP-poll shape (llama.cpp's `/health`). The
 /// poll semantics live in [`crate::daemon::probe`]; this declares the
 /// endpoint + the status that means "ready" so the probe is no longer
 /// hardwired to `/health`.
@@ -120,7 +120,7 @@ pub struct ProcessLaunchSpec {
 /// The result of translating the resolved knob IR into "how to start
 /// this model" for a given backend.
 ///
-/// The two arms mirror the two lifecycle shapes (R2): process-per-model
+/// The two arms mirror the two lifecycle shapes: process-per-model
 /// (llama.cpp) and managed-multiplexer. Adding the second arm
 /// is additive — it does not change [`Backend::prepare_launch`]'s
 /// signature, which stays synchronous and infallible (the async work
@@ -149,7 +149,7 @@ pub struct ManagerLaunchSpec {
 }
 
 /// A reference to a model the umbrella backend serves from its own
-/// registry. Kept minimal (just the registry name) for Phase 2's slice;
+/// registry. Kept minimal (just the registry name) for now;
 /// room to grow as the API surface is wired.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagerModelRef {
@@ -157,7 +157,7 @@ pub struct ManagerModelRef {
   pub name: String,
 }
 
-/// A hardware accelerator class a backend can run models on (R16).
+/// A hardware accelerator class a backend can run models on.
 ///
 /// Distinct from [`KnobCapability`] (which knob *fields* a backend honors):
 /// this is which *compute targets* it can use. Surfaced by `status` so a
@@ -186,7 +186,7 @@ impl Accelerator {
   }
 }
 
-/// The set of accelerators a backend supports on this host (R16).
+/// The set of accelerators a backend supports on this host.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AcceleratorSupport {
   set: BTreeSet<Accelerator>,
@@ -215,11 +215,11 @@ impl AcceleratorSupport {
   }
 }
 
-/// The set of knob IR fields a backend can honor (R6).
+/// The set of knob IR fields a backend can honor.
 ///
 /// llama.cpp supports every [`KnobField`]. Other backends declare a
 /// subset; fields outside the set are dropped from that backend's launch
-/// and (Phase 2) surfaced as "not supported by `<backend>`" in Settings.
+/// and surfaced as "not supported by `<backend>`" in Settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnobCapability {
   supported: BTreeSet<KnobField>,
@@ -253,7 +253,7 @@ impl KnobCapability {
     }
   }
 
-  /// Whether this backend honors `field`. Phase 2 backends that honor
+  /// Whether this backend honors `field`. A backend that honors
   /// only a subset of the IR will construct a narrower set here; the
   /// subset constructor lands with that first real consumer.
   pub fn supports(&self, field: KnobField) -> bool {
@@ -261,11 +261,11 @@ impl KnobCapability {
   }
 }
 
-/// One inference backend (R1). All behavior currently hardwired to
+/// One inference backend. All behavior currently hardwired to
 /// `llama-server` is expressed here so each backend owns its own
 /// translation from the neutral knob IR.
 ///
-/// Phase 1 has a single implementor, [`llama_cpp::LlamaCppBackend`].
+/// Currently a single implementor, [`llama_cpp::LlamaCppBackend`].
 /// Dispatch is via the [`Backends`] enum (zero-cost, exhaustive) rather
 /// than `dyn Backend` — the backend set is small and closed.
 ///
@@ -275,16 +275,16 @@ impl KnobCapability {
 /// *executed*, not when it is built.
 pub trait Backend {
   /// Stable backend identifier (`"llamacpp"`). Used by the registry and
-  /// any backend-aware surface (R3).
+  /// any backend-aware surface.
   fn id(&self) -> &'static str;
 
-  /// The lifecycle shape this backend uses (R2).
+  /// The lifecycle shape this backend uses.
   fn lifecycle(&self) -> Lifecycle;
 
-  /// Which knob IR fields this backend honors (R6).
+  /// Which knob IR fields this backend honors.
   fn capabilities(&self) -> &KnobCapability;
 
-  /// The accelerator classes this backend can run models on (R16).
+  /// The accelerator classes this backend can run models on.
   ///
   /// A *static, backend-intrinsic* floor — llama.cpp always runs CPU (GPU
   /// targets are build-/host-specific and surfaced separately via the live
@@ -295,17 +295,17 @@ pub trait Backend {
 
   /// Compute the stable identity for a model handled by this backend.
   ///
-  /// Returns the generalized [`ModelIdentity`] (R12): llama.cpp wraps the
+  /// Returns the generalized [`ModelIdentity`]: llama.cpp wraps the
   /// concrete `(path, BLAKE3)` GGUF identity in
   /// [`ModelIdentity::Gguf`]; a managed-registry backend returns
   /// [`ModelIdentity::Backend`]. The `(path, header_bytes)` inputs are
   /// the GGUF-discovery shape — registry backends ignore them for now and
-  /// derive identity from their API in Phase 2b (see the module-level
-  /// design gate and [`identity`]).
+  /// will derive identity from their API when such a backend lands (see
+  /// [`identity`]).
   fn identify(&self, path: &Path, header_bytes: &[u8]) -> ModelIdentity;
 
   /// Translate a fully-resolved [`LaunchParams`] into a [`LaunchPlan`]
-  /// (R5). Pure and infallible for llama.cpp — `compose` cannot fail.
+  /// Pure and infallible for llama.cpp — `compose` cannot fail.
   ///
   /// `binary` is the device-owning executable the orchestrator already
   /// selected; `probe` carries the size-scaled budget.
@@ -318,7 +318,7 @@ pub trait Backend {
   ) -> LaunchPlan;
 }
 
-/// Zero-cost, exhaustive dispatch over the available backends (R3).
+/// Zero-cost, exhaustive dispatch over the available backends.
 ///
 /// `dyn Backend` is deliberately avoided — the backend set is small and
 /// closed, so an enum gives static dispatch and forces every new backend
@@ -382,7 +382,7 @@ impl Backend for Backends {
   }
 }
 
-/// Map a model's [`ModelIdentity`] to the backend that runs it (R13).
+/// Map a model's [`ModelIdentity`] to the backend that runs it.
 ///
 /// This is the identity-keyed selection rule (the **auto** half of R17): a
 /// GGUF identity binds to the **direct** llama.cpp backend; a Lemonade
@@ -402,11 +402,11 @@ pub fn backend_for_identity(identity: &ModelIdentity) -> Backends {
   }
 }
 
-/// Resolve the backend for a launch, honoring a per-model override (R17).
+/// Resolve the backend for a launch, honoring a per-model override.
 ///
 /// Selection precedence: an explicit [`BackendChoice`] wins; otherwise
 /// [`BackendChoice::Auto`] defers to the [`backend_for_identity`] rule
-/// (R13). This is the single entry point the live launch path uses, so the
+/// This is the single entry point the live launch path uses, so the
 /// override and the auto rule can never diverge across surfaces.
 pub fn resolve_backend(identity: &ModelIdentity, choice: BackendChoice) -> Backends {
   match choice {
@@ -497,7 +497,7 @@ mod tests {
       "no concrete backend for an unknown registry identity → safe direct fallback"
     );
 
-    // An explicit override wins over the identity rule (R17): force Lemonade
+    // An explicit override wins over the identity rule: force Lemonade
     // even for a GGUF identity.
     assert_eq!(
       resolve_backend(&gguf, BackendChoice::Lemonade).id(),
@@ -533,7 +533,7 @@ mod tests {
     use crate::backend::identity::BackendModelId;
     use crate::gguf::identity::compute;
 
-    // GGUF always binds to the direct llama.cpp backend (R13).
+    // GGUF always binds to the direct llama.cpp backend.
     let gguf = ModelIdentity::Gguf(compute("/m/model.gguf", b"hdr"));
     assert_eq!(backend_for_identity(&gguf).id(), "llamacpp");
     assert_eq!(

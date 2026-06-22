@@ -551,7 +551,7 @@ pub(crate) fn build_options(
   opts.probe_timeout_secs = Some(config.probe_timeout_secs);
   opts.arch_defaults = config.arch_defaults.clone();
 
-  // Auto-fit launch options (R1/R7/R19): config layer first, then the
+  // Auto-fit launch options: config layer first, then the
   // `LLAMASTASH_*` env overrides. A bad env value is logged and ignored
   // so a typo never blocks daemon startup — the config / factory value
   // still applies.

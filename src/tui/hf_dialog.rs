@@ -1,4 +1,4 @@
-//! HuggingFace pull dialog (Unit 4 / R104–R109).
+//! HuggingFace pull dialog.
 //!
 //! Three-state modal overlay: Search → File picker → Confirm. State
 //! transitions are pure functions so the unit tests can exercise them
@@ -34,7 +34,7 @@ use crate::tui::app::App;
 use crate::tui::input_field::{InputField, InputOutcome};
 use crate::tui::keybindings::{Action as KeyAction, Focus};
 
-/// Three-state modal contract (R105).
+/// Three-state modal contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HfStage {
   Search,
@@ -52,7 +52,7 @@ pub enum PickerLoad {
   /// A `list_repo_files` task is in flight.
   Loading,
   /// Files arrived; the picker iterates over `files` (after the
-  /// shard-collapse pass from Unit 5).
+  /// shard-collapse pass).
   Ready,
   /// Listing failed; the user can back up to Search to retry.
   Failed(String),
@@ -82,9 +82,9 @@ pub enum HfDialogEvent {
 }
 
 /// One row in the File picker. Either a standalone GGUF file or a
-/// collapsed split-shard set (R112). Splits surface their sum of
+/// collapsed split-shard set. Splits surface their sum of
 /// sizes and the launch filename (shard 1) for the eventual pull
-/// dispatch (Unit 6 walks `shard_filenames` to enqueue every
+/// dispatch (the pull worker walks `shard_filenames` to enqueue every
 /// sibling).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerRow {
@@ -110,7 +110,7 @@ pub enum PickerRow {
     /// sibling lands.
     launch_filename: String,
     /// All shard filenames in the set, sorted by index. Carried
-    /// here so a future Unit 6 progress shim can show
+    /// here so a future progress shim can show
     /// `<shard>-NNNNN-of-MMMMM` granularity if needed.
     shard_filenames: Vec<String>,
   },
@@ -293,11 +293,11 @@ pub struct HfDialogState {
   /// a pasted `owner/repo` slug).
   pub picker_repo_id: Option<String>,
   pub picker_load: PickerLoad,
-  /// Collapsed picker rows — singles plus split-shard groups (R112).
+  /// Collapsed picker rows — singles plus split-shard groups.
   pub picker_rows: Vec<PickerRow>,
   pub picker_idx: usize,
   /// Row selected for Confirm. Carries the download filename + sum
-  /// of sizes; the caller hands this to `download_repo` (Unit 6).
+  /// of sizes; the caller hands this to `download_repo`.
   pub confirm_row: Option<PickerRow>,
   /// `true` when the FetchClient is offline so the search bar can
   /// render an "offline — paste a repo ID …" hint immediately.
@@ -399,7 +399,7 @@ impl HfDialogState {
     self.input.buffer()
   }
 
-  /// Cycle to the next sort key (R107). Resets pagination to page 1
+  /// Cycle to the next sort key. Resets pagination to page 1
   /// and bumps the seq so a stale search-by-old-sort response can't
   /// land.
   pub fn cycle_sort(&mut self) {
@@ -578,7 +578,7 @@ impl HfDialogState {
 
   /// Move from Search → FilePicker. Returns the repo id the caller
   /// should spawn `list_repo_files` against. Honours the
-  /// slug-shortcut (R106): if the query buffer parses as an
+  /// slug-shortcut: if the query buffer parses as an
   /// `owner/repo[:filename]` RepoSpec, that wins over the selected
   /// search-result row.
   pub fn submit_search(&mut self) -> Option<String> {
@@ -597,7 +597,7 @@ impl HfDialogState {
   }
 
   /// Apply a successful `list_repo_files` response. Filters to
-  /// `.gguf` files and collapses split-shard sets (R112) into one
+  /// `.gguf` files and collapses split-shard sets into one
   /// logical row per group.
   pub fn apply_repo_files(&mut self, repo_id: &str, mut files: Vec<HfRepoFile>) {
     // Drop if the dialog moved on to a different repo.
@@ -654,7 +654,7 @@ impl HfDialogState {
   }
 
   /// Consume the dialog's pending confirm selection (repo + row).
-  /// Caller forwards this to the download orchestrator (Unit 6);
+  /// Caller forwards this to the download orchestrator;
   /// closing the dialog is the caller's job.
   pub fn take_confirm_target(&self) -> Option<(String, PickerRow)> {
     let repo = self.picker_repo_id.clone()?;
@@ -685,7 +685,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   let Some(state) = app.hf_dialog.as_ref() else {
     return;
   };
-  let modal = centered_rect(86, 70, area);
+  let modal = crate::tui::layout::centered_rect(86, 70, area);
   frame.render_widget(Clear, modal);
   crate::tui::render::paint_theme_bg(frame, modal, palette);
   let title = match state.stage {
@@ -895,11 +895,14 @@ fn render_search_row(
     .unwrap_or_else(|| "—".to_string());
   Line::from(vec![
     Span::styled(prefix.to_string(), style),
-    Span::styled(format!("{:<36}  ", truncate(&r.repo_id, 36)), style),
+    Span::styled(
+      format!("{:<36}  ", crate::tui::fmt::truncate_end(&r.repo_id, 36)),
+      style,
+    ),
     Span::styled(format!("{params:>6}  "), style),
     Span::styled(format!("{size:>6}  "), style),
     Span::styled(
-      format!("{:<16}  ", truncate(&tag, 16)),
+      format!("{:<16}  ", crate::tui::fmt::truncate_end(&tag, 16)),
       palette.muted_style(),
     ),
     Span::styled(metric, palette.label_style()),
@@ -975,7 +978,7 @@ fn render_picker_body(
     }
     PickerLoad::Ready => {
       // Small one-line legend so the fit glyph column is
-      // self-describing (R113). Coloured spans mirror the per-row
+      // self-describing. Coloured spans mirror the per-row
       // styles below so the legend doubles as a visual key. Stays
       // muted-tinted around the glyphs so it doesn't compete with
       // the row data.
@@ -1057,7 +1060,10 @@ fn render_picker_body(
         };
         lines.push(Line::from(vec![
           Span::styled(prefix.to_string(), row_style),
-          Span::styled(format!("{:<58}  ", truncate(&label, 58)), row_style),
+          Span::styled(
+            format!("{:<58}  ", crate::tui::fmt::truncate_end(&label, 58)),
+            row_style,
+          ),
           Span::styled(format!("{size:>9}  "), palette.label_style()),
           Span::styled(fit_glyph.to_string(), fit_style),
         ]));
@@ -1147,35 +1153,6 @@ fn render_footer(
   };
   let line = Line::from(Span::styled(hints, palette.muted_style()));
   frame.render_widget(Paragraph::new(line).alignment(Alignment::Right), area);
-}
-
-fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
-  let v = Layout::default()
-    .direction(Direction::Vertical)
-    .constraints([
-      Constraint::Percentage((100 - pct_y) / 2),
-      Constraint::Percentage(pct_y),
-      Constraint::Percentage((100 - pct_y) / 2),
-    ])
-    .split(area);
-  Layout::default()
-    .direction(Direction::Horizontal)
-    .constraints([
-      Constraint::Percentage((100 - pct_x) / 2),
-      Constraint::Percentage(pct_x),
-      Constraint::Percentage((100 - pct_x) / 2),
-    ])
-    .split(v[1])[1]
-}
-
-/// Truncate with a single-char ellipsis when necessary.
-fn truncate(s: &str, max: usize) -> String {
-  if s.chars().count() <= max {
-    return s.to_string();
-  }
-  let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-  out.push('…');
-  out
 }
 
 /// Short K/M/B counter for download / like totals so the row stays
@@ -1733,12 +1710,5 @@ mod tests {
     assert_eq!(short_count(1500), "1.5K");
     assert_eq!(short_count(2_500_000), "2.5M");
     assert_eq!(short_count(3_500_000_000), "3.5B");
-  }
-
-  #[test]
-  fn truncate_inserts_ellipsis_for_long_strings() {
-    let out = truncate("supercalifragilisticexpialidocious", 10);
-    assert_eq!(out.chars().count(), 10);
-    assert!(out.ends_with('…'));
   }
 }

@@ -3,10 +3,10 @@
 //! Owns the `tempfile`-based atomic rename, mode 0600 on Unix, parent-
 //! dir-mode pre-flight check, and symlink refusal that mirror the
 //! `state.json` hardening pattern from
-//! [`crate::daemon::state_store::save`]. Unit 11 (the init wizard's
-//! diff preview + redaction) layers on top of this primitive.
+//! [`crate::daemon::state_store::save`]. The init wizard's diff preview +
+//! redaction layers on top of this primitive.
 //!
-//! Merge semantics (R72):
+//! Merge semantics:
 //!   - YAML-aware recursive merge: leaf-level user edits inside a
 //!     managed block (e.g. `arch_defaults.qwen2`) are preserved when
 //!     the wizard regenerates the block.
@@ -18,7 +18,7 @@
 //!     regenerable. A digest mismatch means the user hand-edited the
 //!     value → preserve as-is.
 //!
-//! The digest comparison lives in Unit 11's wrapper; this primitive
+//! The digest comparison lives in the wizard's wrapper; this primitive
 //! takes a finalised `Value` for the merged config and writes it.
 
 use std::path::{Path, PathBuf};
@@ -29,7 +29,7 @@ pub use crate::util::config_patch::{DiffEntry, DiffKind};
 
 /// Outcome of a successful merge-and-write. `diff` is the set of keys
 /// whose serialised value changed (added or modified); `written_bytes`
-/// is the size of the new file. Unit 11 renders `diff` to the user.
+/// is the size of the new file. The wizard renders `diff` to the user.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriteOutcome {
   pub diff: Vec<DiffEntry>,
@@ -71,7 +71,7 @@ pub fn merge(current: Value, additions: Value) -> Value {
 }
 
 /// Compute a structural diff between `before` and `after`. Returns one
-/// entry per leaf that was added or modified. Pure; used by Unit 11
+/// entry per leaf that was added or modified. Pure; used by the wizard
 /// to render the diff preview.
 pub fn diff(before: &Value, after: &Value) -> Vec<DiffEntry> {
   let mut out = Vec::new();

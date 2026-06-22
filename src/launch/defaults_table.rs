@@ -64,29 +64,12 @@ fn lookup_explicit(arch: &str, backend: GpuFlavor) -> Option<TypedKnobs> {
 }
 
 /// Layer `over` onto `under`, taking each `Some` from `over` first.
+/// Shares the one `.or()` layering primitive with [`TypedKnobs::overlay`].
 fn merge(over: Option<TypedKnobs>, under: TypedKnobs) -> TypedKnobs {
   let Some(over) = over else { return under };
-  TypedKnobs {
-    ctx: over.ctx.or(under.ctx),
-    reasoning: over.reasoning.or(under.reasoning),
-    n_gpu_layers: over.n_gpu_layers.or(under.n_gpu_layers),
-    n_cpu_moe: over.n_cpu_moe.or(under.n_cpu_moe),
-    threads: over.threads.or(under.threads),
-    cache_type_k: over.cache_type_k.or(under.cache_type_k),
-    cache_type_v: over.cache_type_v.or(under.cache_type_v),
-    flash_attn: over.flash_attn.or(under.flash_attn),
-    mlock: over.mlock.or(under.mlock),
-    no_mmap: over.no_mmap.or(under.no_mmap),
-    parallel: over.parallel.or(under.parallel),
-    batch_size: over.batch_size.or(under.batch_size),
-    ubatch_size: over.ubatch_size.or(under.ubatch_size),
-    rope_freq_scale: over.rope_freq_scale.or(under.rope_freq_scale),
-    keep: over.keep.or(under.keep),
-    device: over.device.or(under.device),
-    tensor_split: over.tensor_split.or(under.tensor_split),
-    main_gpu: over.main_gpu.or(under.main_gpu),
-    split_mode: over.split_mode.or(under.split_mode),
-  }
+  let mut out = under;
+  out.overlay(over);
+  out
 }
 
 /// Architectures the table explicitly covers. Cross-referenced

@@ -7,7 +7,7 @@
 //!   uniquely identifies the model (arch, tensors layout, quant tags).
 //! - Identity must survive a `mv` of the file. Path-only identity does not;
 //!   header-hash + canonical-path lets us detect a renamed file and fold
-//!   its last-params (Unit 5) onto the new path.
+//!   its last-params onto the new path.
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// Stable identifier for a single GGUF on disk.
 ///
-/// Serialised in `state.json` (Unit 5) as `{ "path": "...",
+/// Serialised in `state.json` as `{ "path": "...",
 /// "header_blake3": "<hex>" }` so manual inspection is friendly and
 /// the diff against a renamed model is human-readable.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

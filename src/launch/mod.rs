@@ -1,4 +1,4 @@
-//! Launch surface: everything the supervisor (Unit 5) needs to spawn
+//! Launch surface: everything the supervisor needs to spawn
 //! and parameterise a `llama-server` child.
 //!
 //! - [`binary`] — locate the `llama-server` executable on disk.
@@ -17,6 +17,7 @@ pub mod list_devices;
 pub mod mode;
 pub mod params;
 pub mod presets;
+pub mod resolve;
 
 pub use binary::{locate as locate_binary, LocateError, LocateInputs};
 pub use defaults_table::lookup as lookup_defaults;

@@ -1,4 +1,4 @@
-//! Default keybinding map for the TUI shell (Unit 6).
+//! Default keybinding map for the TUI shell.
 //!
 //! Bindings are scoped to a [`Focus`] so the help bar can show
 //! only what's relevant in the current focus. Keys are stored as
@@ -93,7 +93,7 @@ pub enum Focus {
   /// resistant fallback so a stray keypress doesn't confirm a
   /// destructive action.
   ConfirmPopup,
-  /// HuggingFace pull dialog (R104). The per-stage key router lives
+  /// HuggingFace pull dialog. The per-stage key router lives
   /// in `events.rs` because the dialog's `Search` / `FilePicker` /
   /// `Confirm` stages each shadow a subset of the global keymap
   /// (typing extends the query buffer; arrows move row cursors;
@@ -176,7 +176,7 @@ impl Focus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
   Quit,
-  /// Open the HuggingFace pull dialog (R104). Bound to `Shift+D` in
+  /// Open the HuggingFace pull dialog. Bound to `Shift+D` in
   /// [`Focus::List`] — mirrors the other Shift-letter quick-jumps
   /// (`M / L / C / R / E / S`). The dialog itself handles its
   /// per-stage keys.
@@ -1467,11 +1467,10 @@ mod tests {
 
   #[test]
   fn list_right_arrow_enters_right_pane_but_left_is_unbound() {
-    // 2026-05-21: the `→` shortcut from the Models list was removed
-    // — it read as "cycle value" everywhere else (Settings tab) and
-    // the asymmetric pane-jump confused users. Pane cycle is now
-    // reachable via Tab / Shift+Tab / `h` / `l` only. Left was
-    // already unbound; Right joins it.
+    // The `→` shortcut from the Models list is intentionally unbound:
+    // it read as "cycle value" everywhere else (Settings tab) and the
+    // asymmetric pane-jump confused users. Pane cycle is reachable via
+    // Tab / Shift+Tab / `h` / `l` only. Left and Right are both unbound.
     assert_eq!(
       action_for(Focus::List, KeyCode::Right, KeyModifiers::NONE),
       None,
@@ -1501,7 +1500,7 @@ mod tests {
   fn chat_input_enter_sends() {
     // Plain Enter — Ctrl+Enter relies on the kitty keyboard protocol
     // which most terminals don't implement, so we settle on the
-    // universal binding (R0).
+    // universal binding.
     assert_eq!(
       action_for(Focus::ChatInput, KeyCode::Enter, KeyModifiers::NONE),
       Some(Action::SendChat),
@@ -1602,7 +1601,7 @@ mod tests {
 
   #[test]
   fn chat_embed_input_up_down_resolve_to_scroll() {
-    // Issue #31: ↑/↓ in the chat/embed composer must resolve to
+    // ↑/↓ in the chat/embed composer must resolve to
     // MoveUp/MoveDown so the output viewport scrolls. They were
     // unbound in these focuses before, so nothing happened.
     for focus in [Focus::ChatInput, Focus::EmbedInput] {

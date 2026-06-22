@@ -3,7 +3,7 @@
 //! Two pure entry points:
 //! - [`detect_hardware`] aggregates `gpu::probe` + RAM/disk inspection
 //!   into a [`HardwareSnapshot`] the wizard renders in its persistent
-//!   header (R50) and stamps into `_init_snapshot` (R67).
+//!   header and stamps into `_init_snapshot`.
 //! - [`detect_binary`] wraps `launch::binary::locate` with the
 //!   common-location probes from R54: prior llamastash-managed install
 //!   dir, `/opt/homebrew/bin`, `/usr/local/bin`, the linuxbrew prefix
@@ -28,6 +28,28 @@ use crate::launch::binary::{locate, LocateInputs};
 /// `GB`, some `GiB`, with different decimal rules.)
 pub fn fmt_gib(bytes: u64) -> String {
   format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+}
+
+/// Canonical spelled-out multi-unit byte formatter: picks the largest
+/// binary unit that keeps the number readable and spells the suffix
+/// (`B` / `KiB` / `MiB` / `GiB`). One decimal at MiB/GiB, none at KiB,
+/// exact bytes under 1 KiB. Shared by `show` (on-disk size, per-shard
+/// rows) so a file-size surface and the `GiB`-only `fmt_gib` agree on
+/// precision at the GiB boundary.
+pub fn fmt_bytes(bytes: u64) -> String {
+  const KIB: f64 = 1024.0;
+  const MIB: f64 = KIB * 1024.0;
+  const GIB: f64 = MIB * 1024.0;
+  let b = bytes as f64;
+  if b >= GIB {
+    format!("{:.1} GiB", b / GIB)
+  } else if b >= MIB {
+    format!("{:.1} MiB", b / MIB)
+  } else if b >= KIB {
+    format!("{:.0} KiB", b / KIB)
+  } else {
+    format!("{bytes} B")
+  }
 }
 
 /// Canonical display name for a GPU backend label (the `gpu_backend`
@@ -74,7 +96,7 @@ pub fn gpu_summary_line(
 ///   devices that report a non-zero size, because the recommender's
 ///   single-GPU placement is the limiting case.
 /// - AppleMetal: the **raw** unified total. The historical `× 0.75`
-///   OS/app headroom moved to [`crate::launch::headroom`] (R16) — the
+///   OS/app headroom moved to [`crate::launch::headroom`] — the
 ///   one place the budget authority and refusal messages consult, so
 ///   every display + sizing surface sees raw totals and headroom is
 ///   applied once, by admission. The recommender keeps its own
@@ -95,7 +117,7 @@ pub fn aggregate_vram_bytes(info: &GpuInfo) -> Option<u64> {
     GpuInfo::Nvidia { devices } | GpuInfo::Amd { devices } => devices,
     GpuInfo::AppleMetal { total_memory_bytes } => {
       // Raw unified total — the 0.75 OS/app headroom now lives in
-      // `launch::headroom` and is applied by admission (R16).
+      // `launch::headroom` and is applied by admission.
       return Some(*total_memory_bytes);
     }
     GpuInfo::Multi { devices } => devices,
@@ -351,7 +373,7 @@ fn common_locations() -> Vec<PathBuf> {
   if let Some(home) = crate::util::paths::home_dir() {
     roots.push(home.join(".local/bin/llama-server"));
   }
-  // llamastash-managed install dir from Unit 8 — Vec keeps order stable
+  // llamastash-managed install dir — Vec keeps order stable
   // for tests.
   if let Some(data) = directories::BaseDirs::new().and_then(|b| {
     let p = b.data_dir().join("llamastash/llama-cpp");
@@ -359,7 +381,7 @@ fn common_locations() -> Vec<PathBuf> {
   }) {
     // The actual binary lives under `<data>/<version>/llama-server`;
     // we don't enumerate versions here, but expose the root so a
-    // higher-level probe (Unit 10) can pick the newest.
+    // higher-level probe can pick the newest.
     roots.push(data.join("llama-server"));
   }
   match (OsFamily::detect(), CpuArch::detect()) {
@@ -444,6 +466,26 @@ mod tests {
   use crate::gpu::GpuDevice;
 
   #[test]
+  fn fmt_bytes_rolls_through_units_at_threshold_boundaries() {
+    assert_eq!(fmt_bytes(0), "0 B");
+    assert_eq!(fmt_bytes(1023), "1023 B");
+    assert_eq!(fmt_bytes(1024), "1 KiB");
+    assert_eq!(fmt_bytes(1024 * 1024 - 1), "1024 KiB");
+    assert_eq!(fmt_bytes(1024 * 1024), "1.0 MiB");
+    assert_eq!(fmt_bytes(2 * 1024 * 1024), "2.0 MiB");
+    assert_eq!(fmt_bytes(1024 * 1024 * 1024), "1.0 GiB");
+    assert_eq!(fmt_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
+  }
+
+  #[test]
+  fn fmt_bytes_gib_precision_matches_fmt_gib() {
+    // Both round 1024³ B to one decimal GiB, so the file-size surface
+    // and the canonical memory surface never disagree on the boundary.
+    let n = 40_000_000_000u64;
+    assert_eq!(fmt_bytes(n), fmt_gib(n));
+  }
+
+  #[test]
   fn aggregate_vram_picks_minimum_across_nvidia_devices() {
     let info = GpuInfo::Nvidia {
       devices: vec![
@@ -473,7 +515,7 @@ mod tests {
 
   #[test]
   fn aggregate_vram_for_apple_metal_returns_raw_total() {
-    // The 0.75 OS/app headroom moved to `launch::headroom` (R16); the
+    // The 0.75 OS/app headroom moved to `launch::headroom`; the
     // aggregate now reports the raw unified total like every other
     // display + sizing surface.
     let total = 64 * 1_024 * 1_024 * 1_024;

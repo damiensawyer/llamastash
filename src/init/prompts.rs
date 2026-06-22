@@ -185,7 +185,7 @@ pub fn render_diff_preview(diff: &[crate::init::config_writer::RedactedDiffEntry
 /// implement `PartialEq` so this enum doesn't either — callers use
 /// pattern matching to branch.
 //
-// `large_enum_variant`: ModelEntry is ~272 bytes after Unit 1's
+// `large_enum_variant`: ModelEntry is ~272 bytes after the
 // schema additions; the next-largest variant is 24 bytes. Boxing
 // would force every call site to dereference for no measurable win
 // (pick_model is invoked once per init wizard run). Allow the size

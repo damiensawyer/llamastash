@@ -18,7 +18,7 @@ use crate::tui::status_icons::{glyph_for, SurfaceState};
 /// Decode the canonical model path out of a daemon row's nested
 /// `id.path` shape. Centralised so the five CLI subcommands that
 /// project status / list_models / favorites / last_params rows
-/// stop respelling the same two-level `get` (audit §1.1 #7).
+/// stop respelling the same two-level `get`.
 pub fn row_path(v: &Value) -> Option<&str> {
   v.get("id")
     .and_then(|id| id.get("path"))
@@ -126,7 +126,7 @@ pub(crate) fn display_size(row: &CatalogRow) -> String {
     .unwrap_or_else(|| "?".to_string())
 }
 
-/// Backend id that serves a catalog row, from its source label (R14):
+/// Backend id that serves a catalog row, from its source label:
 /// the Lemonade discovery source maps to `lemonade`; every local-file
 /// source (user / huggingface / ollama / lm-studio) to `llamacpp`.
 pub(crate) fn backend_for_source(source: &str) -> &'static str {
@@ -252,7 +252,7 @@ pub fn filter_rows(rows: &[CatalogRow], pattern: &str) -> Vec<CatalogRow> {
 /// for agents. RSS/CPU% are intentionally not surfaced here even when
 /// the per-PID sampler has primed them — they belong in a future
 /// `--detail` view rather than always-on columns.
-/// Render the `status.backends` array (R3/R16) into a concise section:
+/// Render the `status.backends` array into a concise section:
 /// per backend, its install state + the accelerators it can run on this
 /// host. Returns `None` when the field is absent (older daemon) or empty so
 /// the caller skips the section entirely.
@@ -369,7 +369,7 @@ pub fn status_human(snap: &StatusSnapshot) -> String {
     }
   }
 
-  // Backends section (R3/R16): installed state + accelerators per backend.
+  // Backends section: installed state + accelerators per backend.
   if let Some(block) = backends_human(&snap.backends, tty) {
     out.push_str(&block);
   }
@@ -386,9 +386,9 @@ pub fn status_human(snap: &StatusSnapshot) -> String {
         .pid
         .map(|p| p.to_string())
         .unwrap_or_else(|| "-".to_string());
-      // Resolved context window `--fit` chose (R6); "-" until the
+      // Resolved context window `--fit` chose; "-" until the
       // post-Ready `/props` fetch lands. A trailing `*` flags a
-      // memory-driven clamp to the floor (R19), explained beneath the
+      // memory-driven clamp to the floor, explained beneath the
       // table so the column width stays stable.
       let ctx = match r.resolved_ctx {
         Some(c) if r.ctx_clamped => format!("{c}*"),
@@ -456,7 +456,7 @@ pub fn status_human(snap: &StatusSnapshot) -> String {
       }
     }
     // Explain the `*` clamp marker for any row whose ctx fit had to
-    // squeeze to the floor (R19) — same long-form treatment as causes
+    // squeeze to the floor — same long-form treatment as causes
     // so the table columns stay stable.
     let clamped: Vec<&str> = snap
       .models
@@ -585,7 +585,7 @@ pub fn status_json(snap: &StatusSnapshot) -> Value {
         serde_json::json!(r.latest_rss_bytes),
       );
       obj.insert("latest_cpu_pct".into(), serde_json::json!(r.latest_cpu_pct));
-      // Fit-resolved context window (R6), null until the post-Ready
+      // Fit-resolved context window, null until the post-Ready
       // `/props` fetch lands.
       obj.insert("resolved_ctx".into(), serde_json::json!(r.resolved_ctx));
       Value::Object(obj)
@@ -624,7 +624,7 @@ pub fn status_json(snap: &StatusSnapshot) -> Value {
   });
   // Proxy block — surfaced byte-for-byte from the IPC `status`
   // response so agents that parse `status --json` see the same
-  // shape as raw IPC clients (R161). Pre-Unit-5 daemons emit no
+  // shape as raw IPC clients. Pre-Unit-5 daemons emit no
   // block; we mirror that by omitting the key entirely rather than
   // synthesising a placeholder.
   if !snap.proxy.is_null() {
@@ -632,7 +632,7 @@ pub fn status_json(snap: &StatusSnapshot) -> Value {
       obj.insert("proxy".into(), snap.proxy.clone());
     }
   }
-  // Backends block (R3/R16) — same byte-for-byte mirror posture as proxy:
+  // Backends block — same byte-for-byte mirror posture as proxy:
   // present verbatim when the daemon emits it, omitted against older daemons.
   if !snap.backends.is_null() {
     if let Some(obj) = body.as_object_mut() {

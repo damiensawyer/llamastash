@@ -38,10 +38,10 @@ pub fn init(verbose: bool) -> Result<PathBuf> {
 }
 
 /// Open the log file in append mode. On Unix, force mode `0600` so log
-/// contents (prompts, model paths, error context) aren't world-readable —
-/// see the Unit 1 review findings. The explicit `set_permissions` is needed
-/// because `OpenOptionsExt::mode` only applies on create; existing log files
-/// from older builds would otherwise keep their broader permissions.
+/// contents (prompts, model paths, error context) aren't world-readable.
+/// The explicit `set_permissions` is needed because `OpenOptionsExt::mode`
+/// only applies on create; existing log files from older builds would
+/// otherwise keep their broader permissions.
 fn open_log_file(path: &std::path::Path) -> std::io::Result<File> {
   let mut opts = File::options();
   opts.create(true).append(true);
@@ -74,8 +74,8 @@ fn resolve_level(verbose: bool, env: Option<&str>) -> LevelFilter {
 
 /// Install a panic hook that records the panic to the log file and surfaces a
 /// concise message on stderr. The terminal-restoration logic for the TUI
-/// path lives in `tui::events` (added in Unit 6); this hook is the
-/// always-installed baseline.
+/// path lives in `tui::events`; this hook is the always-installed
+/// baseline.
 pub fn install_panic_hook() {
   std::panic::set_hook(Box::new(|info| {
     log::error!("panic: {info}");

@@ -15,6 +15,8 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::TryRngCore;
 
+use crate::util::http_auth::constant_time_eq;
+
 /// Length of the raw token bytes before base64url encoding. 32 bytes
 /// of OS-randomness gives ~256 bits of entropy — well past the bar
 /// for a same-machine secret rotated per daemon start.
@@ -76,30 +78,6 @@ impl std::fmt::Debug for IpcToken {
   }
 }
 
-/// Extract the bearer token value from an `Authorization` header
-/// value, or `None` if the header is missing the `Bearer ` prefix /
-/// has trailing junk. Case-sensitive on the scheme per RFC 6750 §2.1
-/// (servers MAY be case-insensitive, but we don't need to be — every
-/// client we ship sends `Bearer ` verbatim).
-pub fn extract_bearer(header_value: &str) -> Option<&str> {
-  header_value.strip_prefix("Bearer ").map(str::trim)
-}
-
-/// Constant-time byte slice comparison. Length-aware early-exit is
-/// deliberate (the slot is the secret length, not the secret itself
-/// — leaking it via timing or a fast path is acceptable). Shared with
-/// the proxy's bearer key (`crate::proxy::auth::ProxyApiKey`).
-pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-  if a.len() != b.len() {
-    return false;
-  }
-  let mut diff: u8 = 0;
-  for (x, y) in a.iter().zip(b.iter()) {
-    diff |= x ^ y;
-  }
-  diff == 0
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -133,19 +111,6 @@ mod tests {
     let t = IpcToken::from_string("short".into());
     assert!(!t.verify("shorter"));
     assert!(!t.verify("much-longer-than-the-token"));
-  }
-
-  #[test]
-  fn extract_bearer_strips_prefix() {
-    assert_eq!(extract_bearer("Bearer abc"), Some("abc"));
-    assert_eq!(extract_bearer("Bearer  spaced  "), Some("spaced"));
-  }
-
-  #[test]
-  fn extract_bearer_rejects_non_bearer() {
-    assert_eq!(extract_bearer(""), None);
-    assert_eq!(extract_bearer("Basic abc"), None);
-    assert_eq!(extract_bearer("bearer abc"), None); // case-sensitive on scheme
   }
 
   #[test]

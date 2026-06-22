@@ -1,4 +1,4 @@
-//! Pre-spawn memory admission control + in-memory reservation ledger (R4).
+//! Pre-spawn memory admission control + in-memory reservation ledger.
 //!
 //! llamastash delegates *placement* to llama-server's `--fit` but keeps
 //! *budget authority*: before spawning a child it projects the launch's

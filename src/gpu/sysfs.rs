@@ -16,7 +16,7 @@
 //!   (optional).
 //! - `uevent` `PCI_SLOT_NAME` — PCI address for cross-backend dedup.
 //!
-//! Classification (R18): no driver-level "integrated" flag exists, so a
+//! Classification: no driver-level "integrated" flag exists, so a
 //! card is unified by the carve-out signature — see
 //! [`super::is_carve_signature`].
 

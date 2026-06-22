@@ -1,6 +1,6 @@
 //! Most-recently-used tracker keyed on [`ModelId`].
 //!
-//! Unit 4's fallback path needs to answer "which currently-running
+//! The fallback path needs to answer "which currently-running
 //! model did the user touch most recently?" when an auto-start
 //! fails. The proxy stamps `last_request_at` *as forwarding starts*
 //! (not on completion — long-running streams shouldn't delay the
@@ -25,7 +25,7 @@
 //!      `last_request_at` descending.
 //!   4. Pick the head. Empty list → caller emits 503.
 //!
-//! Plan: docs/plans/2026-05-21-001-feat-proxy-router-plan.md (Unit 4).
+//! Plan: docs/plans/2026-05-21-001-feat-proxy-router-plan.md.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -207,7 +207,7 @@ mod tests {
 
   #[test]
   fn unknown_arch_skips_family_prefer_falls_to_pure_mru() {
-    // R155: synthetic GGUF without arch metadata — pick any-MRU.
+    // synthetic GGUF without arch metadata — pick any-MRU.
     let cands = vec![
       cand("/m/old.gguf", 1, Some("llama"), Some(10)),
       cand("/m/new.gguf", 2, Some("qwen3"), Some(1)),

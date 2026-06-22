@@ -6,7 +6,7 @@
 //! "Key Technical Decisions" section: users who picked brew did so
 //! deliberately, and a silent rewrite would surprise them.
 //!
-//! Doctor's binary-digest-drift finding (Unit 13) carves out brew
+//! Doctor's binary-digest-drift finding carves out brew
 //! installs: routine `brew upgrade` legitimately changes the digest.
 
 use std::path::PathBuf;

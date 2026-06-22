@@ -1,4 +1,4 @@
-//! TUI shell (Unit 6).
+//! TUI shell.
 //!
 //! Module layout mirrors the plan's file list:
 //! - [`app`] — pure App state machine.
@@ -14,9 +14,11 @@ pub mod download_strip;
 pub mod events;
 pub mod filter;
 pub mod fmt;
+pub mod glyphs;
 pub mod help_bar;
 pub mod help_overlay;
 pub mod hf_dialog;
+pub mod hf_pull;
 pub mod hint_picker;
 pub mod host_stats_pane;
 pub mod info_pane;

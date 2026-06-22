@@ -1,4 +1,4 @@
-//! Best-effort GPU detection at daemon start (R44).
+//! Best-effort GPU detection at daemon start.
 //!
 //! v1 baseline strategy: shell out to vendor tools and parse their
 //! human/JSON output rather than linking native SDKs (NVML, ROCm,
@@ -36,7 +36,7 @@ pub mod sysfs;
 pub mod vulkan;
 
 /// Dedicated-VRAM ceiling below which an AMD card is classified as an
-/// integrated UMA APU by carve-out signature (R18). No discrete GPU
+/// integrated UMA APU by carve-out signature. No discrete GPU
 /// ships with under 1 GiB of dedicated VRAM, so a tiny `vram_total`
 /// paired with a large system-RAM-backed GTT pool is the APU marker.
 ///
@@ -57,7 +57,7 @@ pub fn is_carve_signature(vram_total: u64) -> bool {
   vram_total < CARVE_VRAM_CEILING_BYTES
 }
 
-/// Classify an AMD card from its VRAM / GTT sizes (R18) — the single
+/// Classify an AMD card from its VRAM / GTT sizes — the single
 /// source of truth shared by the sysfs probe and the rocm-smi fallback.
 /// Returns `(total_memory_bytes, used_memory_bytes, uma_shared_total,
 /// uma_shared_used, source)`. An integrated/UMA APU sums VRAM + GTT and
@@ -185,7 +185,7 @@ pub enum GpuInfo {
   Multi { devices: Vec<GpuDevice> },
 }
 
-/// How a device's unified-vs-discrete verdict was reached (R18).
+/// How a device's unified-vs-discrete verdict was reached.
 /// Surfaced in the `doctor` hardware section so a misclassification is
 /// inspectable rather than silent. The serialized snake_case value
 /// (`apple_unified` / `explicit_dxgi_uma` / `carve_signature` /
@@ -265,7 +265,7 @@ pub struct GpuDevice {
   /// Currently-allocated portion of `uma_shared_total_bytes`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub uma_shared_used_bytes: Option<u64>,
-  /// How this device's unified-vs-discrete verdict was reached (R18).
+  /// How this device's unified-vs-discrete verdict was reached.
   /// `None` on backends that don't classify (NVIDIA, Vulkan/unknown).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub classification_source: Option<ClassSource>,
@@ -312,7 +312,7 @@ impl GpuInfo {
   }
 
   /// The classification verdict + method for this host's GPU memory,
-  /// for the `doctor` hardware section + `status` GPU line (R18). Apple
+  /// for the `doctor` hardware section + `status` GPU line. Apple
   /// Metal is `AppleUnified` (unified by construction); AMD / DXGI
   /// devices carry an explicit [`ClassSource`]; a NVIDIA / AMD card with
   /// no unified marker reports `Discrete` (the verdict — a real GPU that
@@ -1154,7 +1154,7 @@ mod tests {
 
   #[test]
   fn cross_probe_duplicate_collapses_vulkan_vendor_device_via_lspci() {
-    // Regression (Strix Halo, PR #40): the native AMD probe tags the
+    // Regression (Strix Halo): the native AMD probe tags the
     // canonical PCI address, while the Vulkan probe reports only a
     // "0xVVVV:0xDDDD" vendor:device id. lspci maps that id to the same
     // address, so they must dedup — the per-part "0x" strip is what

@@ -39,7 +39,7 @@ const HOST_PANEL_WIDTH: u16 = 25;
 /// Lower bound on what `render()` will paint a full dashboard into.
 /// Matches the `--render-size` parser's minimum (60×20). Anything
 /// smaller renders the placeholder instead so a sub-minimum terminal
-/// doesn't silently clip every panel (audit §5 #9). 60 cells is the
+/// doesn't silently clip every panel. 60 cells is the
 /// "compact" floor — below 100 the right pane hides by default and
 /// the left list runs the marker column + a generous Name column
 /// (data columns drop by rank — see `list_pane::layout_columns`).
@@ -70,7 +70,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
   app.ensure_right_tab_reachable();
   // Prime the per-frame `rendered_rows` memo so the 12+ in-frame
   // calls (focused_path / focused_managed / right_pane / settings)
-  // amortise to a single build (audit §4.1 #1). Cleared at the
+  // amortise to a single build. Cleared at the
   // bottom so event-handler invocations between frames recompute.
   // `Palette` is `Copy`, so take a snapshot up front and free
   // the borrow on `app` for the `prime_rows_cache` / mutable cache
@@ -153,9 +153,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
   render_body(frame, chunks[idx], app, &palette);
 
   // Transient toast bar — paints on top of the body so copy / theme /
-  // refusal confirmations are actually visible. The toast field has
-  // existed since Unit 6 but the kdash refactor (commit 5005b4c)
-  // removed the bottom help-bar slot that used to display it; this
+  // refusal confirmations are actually visible. The kdash refactor
+  // (commit 5005b4c) removed the bottom help-bar slot that used to
+  // display the toast; this
   // restores a single-line floating bar above the bottom edge.
   // Drawn before the modal overlays so a confirm/help popup still
   // wins focus while it is open.
@@ -199,8 +199,12 @@ fn render_toast(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette)
     return;
   }
   let body: String = if msg.chars().count() > max_inner {
-    let mut truncated: String = msg.chars().take(max_inner.saturating_sub(1)).collect();
-    truncated.push('…');
+    let ellipsis = crate::tui::glyphs::active().ellipsis();
+    let mut truncated: String = msg
+      .chars()
+      .take(max_inner.saturating_sub(ellipsis.chars().count()))
+      .collect();
+    truncated.push_str(ellipsis);
     truncated
   } else {
     msg.to_string()
@@ -286,36 +290,109 @@ fn render_title_row(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Pale
 }
 
 fn render_title_left(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
-  let version = env!("CARGO_PKG_VERSION");
-  let (dot_color, daemon_label) = if app.daemon_connected {
-    (palette.success, "daemon")
-  } else {
-    (palette.warning, "daemon connecting…")
-  };
-  let theme_name = app.options.theme.short_name();
   // Text colour for content on the accent bar. Most themes route
   // this to `palette.bg`; mono pins it to Black because `palette.bg`
   // there is `Color::Reset` and would render as the terminal's
   // default fg (typically light on a dark terminal) over the White
   // accent bar — i.e. invisible.
   let on_accent = palette.on_accent;
-  let line = Line::from(vec![
+  let spans = title_left_spans(area.width, app, palette);
+  let para =
+    Paragraph::new(Line::from(spans)).style(Style::default().bg(palette.accent).fg(on_accent));
+  frame.render_widget(para, area);
+}
+
+/// Build the brand spans for the title bar's left slot, dropping
+/// trailing segments to fit `width` rather than letting the Paragraph
+/// hard-clip a glyph mid-word against the hint strip.
+///
+/// `LlamaStash` always stays. The optional trailing segments drop in
+/// priority order — theme first, then daemon, then version — and the
+/// kept set always leaves a 1-cell gap before `width` so the brand
+/// never sits flush against the hint slot. When even the bare name
+/// won't fit, the renderer falls back to the name alone and lets the
+/// Paragraph clip it (no width on earth is narrower than this path
+/// reaches in practice).
+fn title_left_spans(width: u16, app: &App, palette: &Palette) -> Vec<Span<'static>> {
+  use unicode_width::UnicodeWidthStr;
+
+  let version = env!("CARGO_PKG_VERSION");
+  let (dot_color, daemon_label) = if app.daemon_connected {
+    (palette.success, "daemon".to_string())
+  } else {
+    (
+      palette.warning,
+      format!(
+        "daemon connecting{}",
+        crate::tui::glyphs::active().ellipsis()
+      ),
+    )
+  };
+  let theme_name = app.options.theme.short_name();
+  let on_accent = palette.on_accent;
+
+  // Leading space + always-present brand name.
+  let lead: Vec<Span<'static>> = vec![
     Span::raw(" "),
     Span::styled(
       "LlamaStash",
       Style::default().fg(on_accent).add_modifier(Modifier::BOLD),
     ),
-    Span::styled(format!(" v{version} · "), Style::default().fg(on_accent)),
-    Span::styled("●", Style::default().fg(dot_color)),
+  ];
+  let lead_w = 1 + "LlamaStash".width();
+
+  // Trailing segments in render order, each tagged with the plain text
+  // it occupies (for width accounting). Each carries its own leading
+  // separator so a dropped segment never strands a dangling ` · `.
+  // Drop order is the reverse of this list: theme is dropped first,
+  // then daemon, then version.
+  let version_text = format!(" v{version}");
+  let version_w = version_text.width();
+  let version_seg = vec![Span::styled(version_text, Style::default().fg(on_accent))];
+
+  let glyphs = crate::tui::glyphs::active();
+  let sep = format!(" {} ", glyphs.middot());
+  let daemon_dot = glyphs.status_icon(crate::tui::status_icons::SurfaceState::Ready);
+  let theme_dot = glyphs.status_icon(crate::tui::status_icons::SurfaceState::Loading);
+  let daemon_seg = vec![
+    Span::styled(sep.clone(), Style::default().fg(on_accent)),
+    Span::styled(daemon_dot.to_string(), Style::default().fg(dot_color)),
     Span::raw(" "),
-    Span::styled(daemon_label, Style::default().fg(on_accent)),
-    Span::styled(" · ", Style::default().fg(on_accent)),
+    Span::styled(daemon_label.to_string(), Style::default().fg(on_accent)),
+  ];
+  let daemon_w = sep.width() + daemon_dot.to_string().width() + 1 + daemon_label.width();
+
+  let theme_seg = vec![
+    Span::styled(sep.clone(), Style::default().fg(on_accent)),
     // Half-filled circle glyph — visual cue for "theme" / light/dark.
-    Span::styled("◐ ", Style::default().fg(on_accent)),
-    Span::styled(theme_name, Style::default().fg(on_accent)),
-  ]);
-  let para = Paragraph::new(line).style(Style::default().bg(palette.accent).fg(on_accent));
-  frame.render_widget(para, area);
+    Span::styled(format!("{theme_dot} "), Style::default().fg(on_accent)),
+    Span::styled(theme_name.to_string(), Style::default().fg(on_accent)),
+  ];
+  let theme_w = sep.width() + theme_dot.to_string().width() + 1 + theme_name.width();
+
+  // Each segment carries its own leading separator, so daemon only
+  // reads right after version and theme after daemon. Nesting the
+  // fit checks enforces the priority-drop order (theme → daemon →
+  // version).
+  let budget = width as usize;
+  // Reserve a 1-cell gap before the hint slot so the rightmost kept
+  // segment never butts up against it.
+  let gap = 1usize;
+
+  let mut spans = lead;
+  let mut used = lead_w;
+  if used + version_w + gap <= budget {
+    spans.extend(version_seg);
+    used += version_w;
+    if used + daemon_w + gap <= budget {
+      spans.extend(daemon_seg);
+      used += daemon_w;
+      if used + theme_w + gap <= budget {
+        spans.extend(theme_seg);
+      }
+    }
+  }
+  spans
 }
 
 /// Render the three-panel info row.
@@ -564,7 +641,7 @@ fn build_models_hints(
     push_ranked(40, Some("↑/↓:nav".to_string()));
     return out;
   }
-  // Audit §F5 #23: only surface `Enter:launch` when the cursor
+  // only surface `Enter:launch` when the cursor
   // sits on a launchable row. `open_launch_picker` is silently a
   // no-op on header rows (`★ Favorites`, `↺ Recent`, folder
   // group headings), so showing the chip there would teach a
@@ -663,6 +740,7 @@ fn render_empty_state(
   let block = Block::default()
     .title(title_line)
     .borders(Borders::ALL)
+    .border_set(crate::tui::glyphs::active().border_set())
     .border_style(Style::default().fg(border_color));
   let inner = block.inner(area);
   frame.render_widget(block, area);
@@ -701,7 +779,7 @@ mod tests {
 
   #[test]
   fn sub_minimum_size_renders_too_small_placeholder() {
-    // Audit §5 #9: sub-`MIN_RENDER_*` terminals used to paint the
+    // sub-`MIN_RENDER_*` terminals used to paint the
     // full dashboard with clipped borders. The placeholder now
     // surfaces "too small" instead so the user understands why
     // the dashboard isn't drawing.
@@ -1144,5 +1222,74 @@ mod tests {
         "{s:?} must block delete"
       );
     }
+  }
+
+  fn spans_plain(spans: &[Span<'static>]) -> String {
+    spans.iter().map(|s| s.content.as_ref()).collect()
+  }
+
+  #[test]
+  fn title_left_drops_brand_segments_in_priority_order() {
+    use crate::theme::palette_for;
+    use unicode_width::UnicodeWidthStr;
+    let mut app = App::new(AppOptions::default());
+    // Connected → the short "daemon" label, so the segment widths are
+    // deterministic for the breakpoint assertions below.
+    app.daemon_connected = true;
+    let palette = palette_for(app.options.theme);
+
+    // Wide: every segment present.
+    let wide = spans_plain(&title_left_spans(120, &app, palette));
+    assert!(wide.contains("LlamaStash"));
+    assert!(wide.contains("v"), "version kept when wide: {wide:?}");
+    assert!(wide.contains("daemon"), "daemon kept when wide: {wide:?}");
+    assert!(wide.contains("macchiato"), "theme kept when wide: {wide:?}");
+
+    // At the 80-col floor the line still fits everything (the brand is
+    // short), so the regression we guard against is a mid-word clip —
+    // assert the rendered width leaves the reserved 1-cell gap.
+    let at80 = spans_plain(&title_left_spans(80, &app, palette));
+    assert!(
+      at80.width() < 80,
+      "80-col brand must leave a gap, got width {} for {at80:?}",
+      at80.width()
+    );
+
+    // Squeeze each segment out one at a time and confirm the drop
+    // order: theme first, then daemon, then version, never the name.
+    let theme_dropped = spans_plain(&title_left_spans(34, &app, palette));
+    assert!(theme_dropped.contains("daemon"));
+    assert!(
+      !theme_dropped.contains("macchiato"),
+      "theme drops first: {theme_dropped:?}"
+    );
+
+    let daemon_dropped = spans_plain(&title_left_spans(20, &app, palette));
+    assert!(
+      daemon_dropped.contains("v0"),
+      "version kept: {daemon_dropped:?}"
+    );
+    assert!(
+      !daemon_dropped.contains("daemon"),
+      "daemon drops second: {daemon_dropped:?}"
+    );
+
+    let only_name = spans_plain(&title_left_spans(12, &app, palette));
+    assert!(only_name.contains("LlamaStash"));
+    assert!(
+      !only_name.contains('v') || only_name.trim() == "LlamaStash",
+      "version drops last, name always stays: {only_name:?}"
+    );
+  }
+
+  #[test]
+  fn title_left_never_strands_a_trailing_separator() {
+    use crate::theme::palette_for;
+    let app = App::new(AppOptions::default());
+    let palette = palette_for(app.options.theme);
+    // At a width that keeps version but drops daemon/theme, the line
+    // must not end in a dangling ` · ` separator.
+    let s = spans_plain(&title_left_spans(20, &app, palette));
+    assert!(!s.trim_end().ends_with('·'), "no stranded separator: {s:?}");
   }
 }

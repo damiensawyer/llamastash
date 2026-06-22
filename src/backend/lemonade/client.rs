@@ -1,7 +1,7 @@
 //! Typed async client for the `lemond` HTTP API.
 //!
 //! Only the endpoints llamastash's managed-multiplexer orchestration needs
-//! (R10/R11), all on the loopback `lemond` the supervisor runs:
+//! all on the loopback `lemond` the supervisor runs:
 //!
 //! | Method | Path | Wrapper |
 //! |---|---|---|

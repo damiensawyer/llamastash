@@ -3,14 +3,29 @@
 //! Top-level args are `global = true` so every subcommand inherits them, and
 //! a missing subcommand routes to the TUI. The shape of each subcommand
 //! mirrors the agent-facing surface defined in
-//! `docs/plans/2026-05-13-001-feat-llamatui-v1-launcher-plan.md` (R35) —
+//! `docs/plans/2026-05-13-001-feat-llamatui-v1-launcher-plan.md` —
 //! handlers are stubbed until their respective implementation units land.
 
 use std::{ffi::OsString, net::IpAddr, path::PathBuf};
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{builder::Styles, ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 use crate::banner::BANNER;
+
+/// `--help` color scheme. Mirrors the CLI's semantic palette (green
+/// success / cyan accents) so styled help reads like the rest of the
+/// tool. clap only emits these escapes when its `ColorChoice` resolves
+/// to on — `ColorChoice::Auto` already honors `NO_COLOR` and a non-TTY
+/// stdout, and `main` flips it to `Never` under `--no-colors`, so piped
+/// help stays byte-stable plain text.
+fn help_styles() -> Styles {
+  use clap::builder::styling::{AnsiColor, Effects};
+  Styles::styled()
+    .header(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .usage(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .literal(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
+    .placeholder(AnsiColor::Cyan.on_default())
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -19,6 +34,7 @@ use crate::banner::BANNER;
   about = "Fast keyboard-driven local-LLM launcher: TUI + CLI for llama.cpp, with a pluggable backend seam",
   long_about = None,
   before_help = BANNER,
+  styles = help_styles(),
 )]
 pub struct Cli {
   /// Path to a YAML config file (overrides `LLAMASTASH_CONFIG`).
@@ -136,6 +152,26 @@ pub fn normalize_offline_env() {
       std::env::remove_var("LLAMASTASH_OFFLINE");
     }
   }
+}
+
+/// Parse argv with the `--help` color policy applied.
+///
+/// `--help` / `--version` are resolved *inside* clap, before any
+/// `colors::init` runs, so the color decision for styled help has to be
+/// wired here. Default `ColorChoice::Auto` already silences color when
+/// `NO_COLOR` is set or stdout isn't a TTY; passing `--no-colors`
+/// (anywhere in argv, since it's a global flag) flips clap to
+/// `ColorChoice::Never` so the third off-condition reaches help too.
+pub fn parse_cli() -> Result<Cli, clap::Error> {
+  use clap::{ColorChoice, CommandFactory, FromArgMatches};
+  let no_colors = std::env::args_os().any(|a| a == "--no-colors");
+  let choice = if no_colors {
+    ColorChoice::Never
+  } else {
+    ColorChoice::Auto
+  };
+  let matches = Cli::command().color(choice).try_get_matches()?;
+  Cli::from_arg_matches(&matches)
 }
 
 #[derive(Subcommand, Debug)]
@@ -354,7 +390,7 @@ pub struct StartArgs {
   /// inline flags above.
   #[arg(last = true, value_name = "ARG")]
   pub extra: Vec<OsString>,
-  /// Backend to run this model on (R17). `auto` (default) picks by model
+  /// Backend to run this model on. `auto` (default) picks by model
   /// identity; override with `llamacpp` (or another installed backend) to
   /// force one per launch.
   #[arg(long, value_enum)]
@@ -373,7 +409,7 @@ pub struct StartArgs {
   pub wait: bool,
 }
 
-/// CLI surface for the per-model backend override (R17). Wire labels match
+/// CLI surface for the per-model backend override. Wire labels match
 /// [`crate::launch::params::BackendChoice`] so `start --backend <id>`
 /// round-trips to the daemon unchanged. Additional backends add a variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -1046,7 +1082,20 @@ impl LaunchMode {
   }
 }
 
-/// `llamastash uat` arguments (Unit 3 / R4 / R5). Only compiled when
+/// Convert the clap value-enum into the `clap`-free domain enum at the
+/// CLI boundary. The conversion lives here (cli → launch) so `launch`
+/// never depends "up" on the CLI args layer.
+impl From<LaunchMode> for crate::launch::mode::LaunchMode {
+  fn from(m: LaunchMode) -> Self {
+    match m {
+      LaunchMode::Chat => crate::launch::mode::LaunchMode::Chat,
+      LaunchMode::Embedding => crate::launch::mode::LaunchMode::Embedding,
+      LaunchMode::Rerank => crate::launch::mode::LaunchMode::Rerank,
+    }
+  }
+}
+
+/// `llamastash uat` arguments. Only compiled when
 /// the `uat` Cargo feature is enabled — the release binary on
 /// crates.io and Homebrew bottles never carries this subcommand.
 ///
@@ -1079,8 +1128,8 @@ pub struct UatArgs {
   #[arg(long, value_enum, value_name = "MODE", default_value_t = UatMode::Warm)]
   pub mode: UatMode,
   /// Where to write the structured JSON report. `-` redirects to
-  /// stdout; mutually exclusive with the global `--quiet` (Unit 4
-  /// enforces at handle-time). When omitted, the report is emitted
+  /// stdout; mutually exclusive with the global `--quiet`
+  /// (enforced at handle-time). When omitted, the report is emitted
   /// to stdout in TTY-pretty form only.
   #[arg(long, value_name = "PATH")]
   pub report_out: Option<PathBuf>,
@@ -1144,6 +1193,29 @@ mod tests {
     assert!(cli.command.is_none());
     assert!(!cli.no_scan);
     assert!(!cli.verbose);
+  }
+
+  #[test]
+  fn help_carries_styles_and_plain_form_has_no_escapes() {
+    use clap::CommandFactory;
+    // The custom `Styles` are wired: the styled (ANSI) rendering of
+    // help carries escape sequences for the section headers / literals.
+    // `ColorChoice` decides whether clap *emits* this form at the
+    // stream boundary (proven byte-stable in the piped E2E check); here
+    // we prove the styling exists to be emitted at all.
+    let help = Cli::command().render_help();
+    let ansi = help.ansi().to_string();
+    assert!(
+      ansi.contains('\u{1b}'),
+      "styled help should carry ANSI escapes"
+    );
+    // The plain `Display` form (what clap writes under `Never` / a
+    // non-TTY stdout) has no escapes, so piped help stays byte-stable.
+    let plain = help.to_string();
+    assert!(
+      !plain.contains('\u{1b}'),
+      "plain help must have no ANSI escapes: {plain:?}"
+    );
   }
 
   #[test]
@@ -2288,7 +2360,7 @@ mod tests {
   #[cfg(not(feature = "uat"))]
   #[test]
   fn uat_subcommand_absent_without_feature() {
-    // Build invariant from Unit 3: no UAT entry point when the
+    // Build invariant: no UAT entry point when the
     // feature is off. clap rejects the subcommand at parse time.
     let result = Cli::try_parse_from(["llamastash", "uat", "--host-backend", "nvidia"]);
     assert!(

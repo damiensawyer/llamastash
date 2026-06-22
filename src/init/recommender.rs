@@ -1,4 +1,4 @@
-//! The starter-model recommender (R55 / R58 / R59 / R60).
+//! The starter-model recommender.
 //!
 //! Path-A dynamic ranker: pure Rust, candidate universe is the bundled
 //! (or remote-overridden) benchmark snapshot **intersected with the
@@ -73,7 +73,7 @@ pub struct Recommendation {
   pub estimated_peak_bytes: Option<u64>,
 }
 
-// `large_enum_variant`: ModelEntry is ~272 bytes after Unit 1's
+// `large_enum_variant`: ModelEntry is ~272 bytes after the
 // schema additions; OnDisk is 56, Escape is 0. Boxing the Curated
 // payload would force every Recommendation consumer to dereference
 // for no measurable win — top-N is 5-6 entries so the per-list
@@ -118,7 +118,7 @@ impl Default for RecommendOptions {
 
 /// On-disk model the wizard already discovered. Used as the `on_disk`
 /// argument so the recommender can rank existing files alongside
-/// snapshot picks (R60).
+/// snapshot picks.
 #[derive(Debug, Clone)]
 pub struct OnDiskModel {
   pub path: std::path::PathBuf,
@@ -386,7 +386,7 @@ fn fits(peak_bytes: u64, ceiling: u64, _hw: &HardwareSnapshot) -> bool {
 /// (`gpu_backend` string + `Option<u64>` VRAM + `u64` total RAM)
 /// directly so the HF pull dialog can render `✓/⚠/✗/—` icons next
 /// to each file row without building a `HardwareSnapshot` from
-/// scratch (R111).
+/// scratch.
 ///
 /// - **Fit** — peak ≤ 85% of the effective ceiling (comfortable
 ///   headroom).
@@ -487,7 +487,7 @@ impl FileFit {
   }
 }
 
-/// Composite weighted score (R55).
+/// Composite weighted score.
 pub fn composite_score(
   entry: &ModelEntry,
   snapshot: &BenchmarkSnapshot,
@@ -572,7 +572,7 @@ fn on_disk_score(
 
 /// One-line justification rendered next to the prompt. Anchored
 /// around "fits N GB · ~X t/s · YB ZK". The wizard's `?` toggle
-/// shows the full breakdown — that's Unit 10's job.
+/// shows the full breakdown.
 pub fn render_one_line(entry: &ModelEntry, peak_bytes: u64, hw: &HardwareSnapshot) -> String {
   let fit = format_gib(peak_bytes);
   let total = match hw.vram_bytes {
@@ -655,7 +655,7 @@ mod tests {
 
   #[test]
   fn vram_fit_returns_unknown_for_vulkan_backend() {
-    // R113: omit the indicator on `GpuInfo::Unknown` (Vulkan-only)
+    // omit the indicator on `GpuInfo::Unknown` (Vulkan-only)
     // rather than fabricate confidence.
     let fit = vram_fit_for_file(6 * GB, DEFAULT_CTX, "unknown", Some(24 * GB), 32 * GB, None);
     assert_eq!(fit, FileFit::Unknown);
@@ -749,7 +749,7 @@ mod tests {
         total_memory_bytes: bytes,
       },
       // Raw unified total — matches `aggregate_vram_bytes` after the
-      // 0.75 OS/app headroom moved to `launch::headroom` (R16).
+      // 0.75 OS/app headroom moved to `launch::headroom`.
       vram_bytes: Some(bytes),
       gpu_device_count: 1,
       ram_total_bytes: bytes,

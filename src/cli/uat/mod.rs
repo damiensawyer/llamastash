@@ -1,9 +1,8 @@
-//! Maintainer-only `llamastash uat` subcommand (Units 3 & 4).
+//! Maintainer-only `llamastash uat` subcommand.
 //!
 //! Only compiled when the `uat` Cargo feature is enabled; the release
-//! binary never carries this entry point. Unit 3 lands the scaffold;
-//! Unit 4 hangs the 5-step lifecycle + isolation guard + structured
-//! JSON report off `handle()`.
+//! binary never carries this entry point. `handle()` drives the 5-step
+//! lifecycle + isolation guard + structured JSON report.
 
 pub mod isolation;
 pub mod lifecycle;

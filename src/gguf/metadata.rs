@@ -6,7 +6,7 @@
 //! Lookup is **best-effort**: GGUFs in the wild are inconsistent about
 //! whether keys are present, what arch prefix they use, and what the
 //! intended mode is. We bias toward "return None / Unknown" rather than
-//! "fail the file" so that discovery (Unit 4) can still surface the row
+//! "fail the file" so that discovery can still surface the row
 //! with a partial/warning state.
 
 use crate::gguf::header::{GgufHeader, GgufValue, TensorInfo};
@@ -270,7 +270,7 @@ impl Quant {
 }
 
 /// What kind of inference surface this GGUF best matches. `Unknown` is the
-/// safe fallback — the launcher (Unit 6 / Unit 8) asks the user to pick.
+/// safe fallback — the launcher asks the user to pick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModeHint {
   Chat,
@@ -739,5 +739,139 @@ mod tests {
       .build();
     let m = parse(bytes);
     assert_eq!(m.quant, Quant::Q4_K);
+  }
+
+  #[test]
+  fn from_ggml_tag_maps_known_and_unknown_tags() {
+    use Quant::*;
+    // Spot-check representative tags across the table, including the
+    // boundary between K-quants, IQ-quants, and the integer/float types.
+    let known: &[(u32, Quant)] = &[
+      (0, F32),
+      (1, F16),
+      (2, Q4_0),
+      (8, Q8_0),
+      (12, Q4_K),
+      (14, Q6_K),
+      (16, IQ2_XXS),
+      (23, IQ4_XS),
+      (24, I8),
+      (28, F64),
+      (30, BF16),
+      (34, TQ1_0),
+      (35, TQ2_0),
+    ];
+    for (tag, expect) in known {
+      assert_eq!(Quant::from_ggml_tag(*tag), *expect, "tag {tag}");
+    }
+    // A tag outside the table falls through to Unknown carrying the raw tag.
+    assert_eq!(Quant::from_ggml_tag(999), Quant::Unknown(999));
+  }
+
+  #[test]
+  fn block_geometry_is_nonzero_for_every_variant() {
+    use Quant::*;
+    // Every quant must report a non-zero elements-per-block so the
+    // storage estimator never divides by zero. `Unknown` falls back to
+    // the conservative (1, 2) default the doc-comment promises.
+    let all = [
+      F32,
+      F16,
+      BF16,
+      Q4_0,
+      Q4_1,
+      Q5_0,
+      Q5_1,
+      Q8_0,
+      Q8_1,
+      Q2_K,
+      Q3_K,
+      Q4_K,
+      Q5_K,
+      Q6_K,
+      Q8_K,
+      IQ2_XXS,
+      IQ2_XS,
+      IQ2_S,
+      IQ3_XXS,
+      IQ3_S,
+      IQ1_S,
+      IQ1_M,
+      IQ4_NL,
+      IQ4_XS,
+      TQ1_0,
+      TQ2_0,
+      I8,
+      I16,
+      I32,
+      I64,
+      F64,
+      Unknown(7),
+    ];
+    for q in all {
+      let (epb, bpb) = q.block_geometry();
+      assert!(epb > 0, "elements-per-block must be > 0 for {}", q.label());
+      assert!(bpb > 0, "bytes-per-block must be > 0 for {}", q.label());
+    }
+    assert_eq!(Quant::Unknown(0).block_geometry(), (1, 2));
+  }
+
+  #[test]
+  fn tensor_storage_bytes_rounds_rows_up_to_whole_blocks() {
+    // Q4_K is 256 elements / 144 bytes per block. A [300, 4] tensor has
+    // 4 rows of width 300; each row needs ceil(300/256)=2 blocks, so
+    // 4 * 2 * 144 = 1152 bytes (NOT ceil(1200/256)*144, which would
+    // undercount the per-row padding).
+    let bytes = Quant::Q4_K.tensor_storage_bytes(&[300, 4]);
+    assert_eq!(bytes, 1152);
+    // Empty dims contribute zero (the `split_first` early-return).
+    assert_eq!(Quant::Q4_K.tensor_storage_bytes(&[]), 0);
+    // A single-dimension F32 tensor is just width * 4.
+    assert_eq!(Quant::F32.tensor_storage_bytes(&[10]), 40);
+  }
+
+  #[test]
+  fn parameter_count_reads_arch_prefixed_key() {
+    // No `general.parameter_count`, but `<arch>.parameter_count` is set —
+    // the arch-prefixed fallback must pick it up before the tensor sum.
+    let bytes = FixtureBuilder::new()
+      .with_arch("llama")
+      .with_kv("llama.parameter_count", GgufValue::U64(7_000_000_000))
+      .with_tensor("output.weight", &[10, 10], 1)
+      .build();
+    let m = parse(bytes);
+    assert_eq!(m.total_parameters, Some(7_000_000_000));
+  }
+
+  #[test]
+  fn embedding_mode_from_arch_embedding_length_without_output() {
+    // No output/lm_head/output_norm and no pooling/name signal, but the
+    // arch advertises `<arch>.embedding_length` — the encoder fallback
+    // classifies it as embedding.
+    let bytes = FixtureBuilder::new()
+      .with_arch("nomic")
+      .with_embedding_length(768)
+      .with_tensor("blk.0.attn_q.weight", &[768, 768], 1)
+      .build();
+    let m = parse(bytes);
+    assert_eq!(m.mode_hint, ModeHint::Embedding);
+  }
+
+  #[test]
+  fn reasoning_hint_ignores_non_string_token_entries() {
+    // A tokens array carrying a non-string entry must not panic or
+    // false-trigger — the scan skips it and reports no reasoning hint.
+    let bytes = FixtureBuilder::new()
+      .with_arch("llama")
+      .with_kv(
+        "tokenizer.ggml.tokens",
+        GgufValue::Array(vec![
+          GgufValue::U64(42),
+          GgufValue::String("<bos>".to_string()),
+        ]),
+      )
+      .build();
+    let m = parse(bytes);
+    assert!(!m.reasoning_hint);
   }
 }

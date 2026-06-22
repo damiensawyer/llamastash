@@ -1,4 +1,4 @@
-//! Daemon-side orchestration of discovery (Unit 4).
+//! Daemon-side orchestration of discovery.
 //!
 //! Spawns one long-running task per daemon that:
 //! 1. Runs the scanner once at startup, populating the [`ModelCatalog`].

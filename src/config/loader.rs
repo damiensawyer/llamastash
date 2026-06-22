@@ -10,6 +10,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::launch::flag_aliases::{knob_specs, KnobField};
 use crate::theme::{CustomThemeConfig, ThemeName};
 use crate::util::paths::user_config_file;
 
@@ -113,18 +114,18 @@ pub struct Config {
   /// never installs `lemond`; the user sets it up and points us at it.
   pub lemonade: LemonadeConfig,
   /// How a knob no layer supplied a value for is seeded at launch
-  /// (R1). `auto` (factory) delegates layer-less knobs to `--fit`;
+  /// `auto` (factory) delegates layer-less knobs to `--fit`;
   /// `inherited` leaves them unset (pre-Auto behavior). Env override:
   /// `LLAMASTASH_DEFAULT_LAUNCH_MODE=auto|inherited`.
   #[serde(default)]
   pub default_launch_mode: DefaultLaunchMode,
   /// `--fit-ctx` floor passed to fit-capable `llama-server` so the
-  /// context window never collapses below a usable size (R7). Factory
+  /// context window never collapses below a usable size. Factory
   /// [`DEFAULT_FIT_CTX_FLOOR`]; validated `1..=MAX_CTX_TOKENS`. Env
   /// override: `LLAMASTASH_FIT_CTX_FLOOR`.
   #[serde(default = "default_fit_ctx_floor")]
   pub fit_ctx_floor: u32,
-  /// Strict-fit mode (R19): when true, refuse (rather than degrade) a
+  /// Strict-fit mode: when true, refuse (rather than degrade) a
   /// launch that fit could not place as requested. Factory `false`.
   /// Env override: `LLAMASTASH_STRICT_FIT=1`.
   #[serde(default)]
@@ -138,6 +139,13 @@ pub struct Config {
   /// launches it applies to, regardless of this setting.
   #[serde(default = "default_true")]
   pub jinja: bool,
+  /// Render the TUI with the `7`-bit ASCII glyph fallback instead of
+  /// the default Unicode house style (geometric status dots, severity
+  /// triangles, box-drawing borders). For terminals / fonts that show
+  /// the Unicode set as tofu. Factory `false`. The `LLAMASTASH_ASCII=1`
+  /// env var overrides this and forces ASCII on regardless.
+  #[serde(default)]
+  pub ascii_glyphs: bool,
 }
 
 fn default_fit_ctx_floor() -> u32 {
@@ -553,32 +561,221 @@ pub struct TypedKnobs {
   pub split_mode: Option<KnobValue<String>>,
 }
 
+/// A mutable reference to one [`TypedKnobs`] slot, tagged by its storage
+/// kind. [`TypedKnobs::slot_mut`] is the single point where a
+/// [`KnobField`] fans out to the heterogeneous fields, so every per-knob
+/// writer routes through here and a new `KnobField` whose slot is left
+/// unwired fails to compile (the `match` has no wildcard).
+pub enum KnobSlotMut<'a> {
+  U32(&'a mut Option<KnobValue<u32>>),
+  F32(&'a mut Option<KnobValue<f32>>),
+  Bool(&'a mut Option<KnobValue<bool>>),
+  Str(&'a mut Option<KnobValue<String>>),
+}
+
+/// Shared read view of one knob slot; counterpart to [`KnobSlotMut`].
+#[derive(Clone, Copy)]
+pub enum KnobSlotRef<'a> {
+  U32(&'a Option<KnobValue<u32>>),
+  F32(&'a Option<KnobValue<f32>>),
+  Bool(&'a Option<KnobValue<bool>>),
+  Str(&'a Option<KnobValue<String>>),
+}
+
+impl<'a> KnobSlotRef<'a> {
+  /// Any value present (Set or Auto) — the inverse of "inherited".
+  pub fn is_some(self) -> bool {
+    match self {
+      Self::U32(s) => s.is_some(),
+      Self::F32(s) => s.is_some(),
+      Self::Bool(s) => s.is_some(),
+      Self::Str(s) => s.is_some(),
+    }
+  }
+
+  /// Slot explicitly delegated to `--fit`.
+  pub fn is_auto(self) -> bool {
+    match self {
+      Self::U32(s) => s.is_auto(),
+      Self::F32(s) => s.is_auto(),
+      Self::Bool(s) => s.is_auto(),
+      Self::Str(s) => s.is_auto(),
+    }
+  }
+
+  /// Concrete `Set` value when the slot is the matching kind, else
+  /// `None` (covers wrong-kind, Inherited, and Auto alike).
+  pub fn as_u32(self) -> Option<u32> {
+    match self {
+      Self::U32(s) => s.set_value().copied(),
+      _ => None,
+    }
+  }
+
+  pub fn as_f32(self) -> Option<f32> {
+    match self {
+      Self::F32(s) => s.set_value().copied(),
+      _ => None,
+    }
+  }
+
+  pub fn as_bool(self) -> Option<bool> {
+    match self {
+      Self::Bool(s) => s.set_value().copied(),
+      _ => None,
+    }
+  }
+
+  pub fn as_str(self) -> Option<&'a str> {
+    match self {
+      Self::Str(s) => s.set_value().map(String::as_str),
+      _ => None,
+    }
+  }
+}
+
+impl KnobSlotMut<'_> {
+  /// Pin the slot to [`KnobValue::Auto`].
+  pub fn set_auto(self) {
+    match self {
+      Self::U32(s) => *s = Some(KnobValue::Auto),
+      Self::F32(s) => *s = Some(KnobValue::Auto),
+      Self::Bool(s) => *s = Some(KnobValue::Auto),
+      Self::Str(s) => *s = Some(KnobValue::Auto),
+    }
+  }
+
+  /// Drop the slot back to Inherited (`None`).
+  pub fn clear(self) {
+    match self {
+      Self::U32(s) => *s = None,
+      Self::F32(s) => *s = None,
+      Self::Bool(s) => *s = None,
+      Self::Str(s) => *s = None,
+    }
+  }
+
+  /// Write a concrete value (`Some` → `Set`, `None` → Inherited) when
+  /// the slot is the matching kind; a no-op otherwise. The Auto state is
+  /// set via [`Self::set_auto`], never here.
+  pub fn set_u32(self, v: Option<u32>) {
+    if let Self::U32(s) = self {
+      *s = v.map(KnobValue::Set);
+    }
+  }
+
+  pub fn set_f32(self, v: Option<f32>) {
+    if let Self::F32(s) = self {
+      *s = v.map(KnobValue::Set);
+    }
+  }
+
+  pub fn set_bool(self, v: Option<bool>) {
+    if let Self::Bool(s) = self {
+      *s = v.map(KnobValue::Set);
+    }
+  }
+
+  pub fn set_str(self, v: Option<String>) {
+    if let Self::Str(s) = self {
+      *s = v.map(KnobValue::Set);
+    }
+  }
+}
+
 impl TypedKnobs {
+  /// Read view of the slot backing `field`. The sole `&self` fan-out
+  /// from `KnobField` to the heterogeneous fields.
+  pub fn slot(&self, field: KnobField) -> KnobSlotRef<'_> {
+    use KnobField as F;
+    match field {
+      F::Ctx => KnobSlotRef::U32(&self.ctx),
+      F::Reasoning => KnobSlotRef::Bool(&self.reasoning),
+      F::NGpuLayers => KnobSlotRef::U32(&self.n_gpu_layers),
+      F::NCpuMoe => KnobSlotRef::U32(&self.n_cpu_moe),
+      F::Threads => KnobSlotRef::U32(&self.threads),
+      F::CacheTypeK => KnobSlotRef::Str(&self.cache_type_k),
+      F::CacheTypeV => KnobSlotRef::Str(&self.cache_type_v),
+      F::FlashAttn => KnobSlotRef::Bool(&self.flash_attn),
+      F::Mlock => KnobSlotRef::Bool(&self.mlock),
+      F::NoMmap => KnobSlotRef::Bool(&self.no_mmap),
+      F::Parallel => KnobSlotRef::U32(&self.parallel),
+      F::BatchSize => KnobSlotRef::U32(&self.batch_size),
+      F::UbatchSize => KnobSlotRef::U32(&self.ubatch_size),
+      F::RopeFreqScale => KnobSlotRef::F32(&self.rope_freq_scale),
+      F::Keep => KnobSlotRef::U32(&self.keep),
+      F::Device => KnobSlotRef::Str(&self.device),
+      F::TensorSplit => KnobSlotRef::Str(&self.tensor_split),
+      F::MainGpu => KnobSlotRef::U32(&self.main_gpu),
+      F::SplitMode => KnobSlotRef::Str(&self.split_mode),
+    }
+  }
+
+  /// Mutable view of the slot backing `field`. The sole `&mut self`
+  /// fan-out from `KnobField` to the heterogeneous fields.
+  pub fn slot_mut(&mut self, field: KnobField) -> KnobSlotMut<'_> {
+    use KnobField as F;
+    match field {
+      F::Ctx => KnobSlotMut::U32(&mut self.ctx),
+      F::Reasoning => KnobSlotMut::Bool(&mut self.reasoning),
+      F::NGpuLayers => KnobSlotMut::U32(&mut self.n_gpu_layers),
+      F::NCpuMoe => KnobSlotMut::U32(&mut self.n_cpu_moe),
+      F::Threads => KnobSlotMut::U32(&mut self.threads),
+      F::CacheTypeK => KnobSlotMut::Str(&mut self.cache_type_k),
+      F::CacheTypeV => KnobSlotMut::Str(&mut self.cache_type_v),
+      F::FlashAttn => KnobSlotMut::Bool(&mut self.flash_attn),
+      F::Mlock => KnobSlotMut::Bool(&mut self.mlock),
+      F::NoMmap => KnobSlotMut::Bool(&mut self.no_mmap),
+      F::Parallel => KnobSlotMut::U32(&mut self.parallel),
+      F::BatchSize => KnobSlotMut::U32(&mut self.batch_size),
+      F::UbatchSize => KnobSlotMut::U32(&mut self.ubatch_size),
+      F::RopeFreqScale => KnobSlotMut::F32(&mut self.rope_freq_scale),
+      F::Keep => KnobSlotMut::U32(&mut self.keep),
+      F::Device => KnobSlotMut::Str(&mut self.device),
+      F::TensorSplit => KnobSlotMut::Str(&mut self.tensor_split),
+      F::MainGpu => KnobSlotMut::U32(&mut self.main_gpu),
+      F::SplitMode => KnobSlotMut::Str(&mut self.split_mode),
+    }
+  }
+
   /// Layer `over` on top of `self`: every `Some` field in `over` wins,
   /// untouched fields keep `self`'s value. Used to apply per-invocation
   /// CLI overrides onto a preset baseline without wiping the preset's
-  /// other knobs. Mirrors the `.or()` layering in
-  /// `crate::launch::defaults_table`.
-  pub fn overlay(&mut self, over: TypedKnobs) {
-    self.ctx = over.ctx.or(self.ctx);
-    self.reasoning = over.reasoning.or(self.reasoning);
-    self.n_gpu_layers = over.n_gpu_layers.or(self.n_gpu_layers);
-    self.n_cpu_moe = over.n_cpu_moe.or(self.n_cpu_moe);
-    self.threads = over.threads.or(self.threads);
-    self.cache_type_k = over.cache_type_k.or(self.cache_type_k.take());
-    self.cache_type_v = over.cache_type_v.or(self.cache_type_v.take());
-    self.flash_attn = over.flash_attn.or(self.flash_attn);
-    self.mlock = over.mlock.or(self.mlock);
-    self.no_mmap = over.no_mmap.or(self.no_mmap);
-    self.parallel = over.parallel.or(self.parallel);
-    self.batch_size = over.batch_size.or(self.batch_size);
-    self.ubatch_size = over.ubatch_size.or(self.ubatch_size);
-    self.rope_freq_scale = over.rope_freq_scale.or(self.rope_freq_scale);
-    self.keep = over.keep.or(self.keep);
-    self.device = over.device.or(self.device.take());
-    self.tensor_split = over.tensor_split.or(self.tensor_split.take());
-    self.main_gpu = over.main_gpu.or(self.main_gpu);
-    self.split_mode = over.split_mode.or(self.split_mode.take());
+  /// other knobs. The same `.or()` layering `crate::launch::defaults_table`
+  /// builds on.
+  pub fn overlay(&mut self, mut over: TypedKnobs) {
+    for field in knob_specs().iter().map(|s| s.field) {
+      overlay_slot(self.slot_mut(field), over.slot_mut(field));
+    }
+  }
+}
+
+/// `over` wins when present; otherwise `dst` keeps its value. Both slots
+/// address the same `KnobField`, so the kinds always match.
+fn overlay_slot(dst: KnobSlotMut<'_>, over: KnobSlotMut<'_>) {
+  use KnobSlotMut::*;
+  match (dst, over) {
+    (U32(d), U32(o)) => {
+      if o.is_some() {
+        *d = o.take();
+      }
+    }
+    (F32(d), F32(o)) => {
+      if o.is_some() {
+        *d = o.take();
+      }
+    }
+    (Bool(d), Bool(o)) => {
+      if o.is_some() {
+        *d = o.take();
+      }
+    }
+    (Str(d), Str(o)) => {
+      if o.is_some() {
+        *d = o.take();
+      }
+    }
+    _ => unreachable!("a KnobField maps to exactly one slot kind"),
   }
 }
 
@@ -619,6 +816,7 @@ impl Default for Config {
       fit_ctx_floor: DEFAULT_FIT_CTX_FLOOR,
       strict_fit: false,
       jinja: true,
+      ascii_glyphs: false,
     }
   }
 }
@@ -824,6 +1022,55 @@ mod tests {
   };
 
   use super::*;
+
+  #[test]
+  fn field_name_matches_the_serde_keys_exactly() {
+    // The Settings label and any field-name display read `field_name()`;
+    // persistence reads the serde key. They must be the same string set,
+    // both directions — a renamed serde field or a stale `field_name()`
+    // arm fails here rather than silently mislabelling a saved knob.
+    use std::collections::BTreeSet;
+    let value = serde_json::to_value(TypedKnobs::default()).unwrap();
+    let serde_keys: BTreeSet<&str> = value
+      .as_object()
+      .unwrap()
+      .keys()
+      .map(String::as_str)
+      .collect();
+    let field_names: BTreeSet<&str> = knob_specs().iter().map(|s| s.field.field_name()).collect();
+    assert_eq!(
+      field_names, serde_keys,
+      "KnobField::field_name() must match the TypedKnobs serde keys exactly"
+    );
+  }
+
+  #[test]
+  fn overlay_takes_each_present_field_from_over_else_keeps_self() {
+    // Representative (over, under) pair across every slot kind, including
+    // a String knob (the take-vs-copy hazard the slot accessor unifies).
+    let mut base = TypedKnobs {
+      ctx: Some(KnobValue::Set(2048)),  // both set → over wins
+      threads: Some(KnobValue::Set(4)), // only base set → survives
+      cache_type_k: Some(KnobValue::Set("q4_0".into())), // both set → over wins
+      device: Some(KnobValue::Set("CUDA0".into())), // only base set → survives
+      flash_attn: Some(KnobValue::Set(false)), // both set → over wins
+      ..TypedKnobs::default()
+    };
+    let over = TypedKnobs {
+      ctx: Some(KnobValue::Set(8192)),
+      cache_type_k: Some(KnobValue::Set("q8_0".into())),
+      flash_attn: Some(KnobValue::Set(true)),
+      n_gpu_layers: Some(KnobValue::Auto), // only over set → applied
+      ..TypedKnobs::default()
+    };
+    base.overlay(over);
+    assert_eq!(base.ctx, Some(KnobValue::Set(8192)));
+    assert_eq!(base.threads, Some(KnobValue::Set(4)));
+    assert_eq!(base.cache_type_k, Some(KnobValue::Set("q8_0".into())));
+    assert_eq!(base.device, Some(KnobValue::Set("CUDA0".into())));
+    assert_eq!(base.flash_attn, Some(KnobValue::Set(true)));
+    assert_eq!(base.n_gpu_layers, Some(KnobValue::Auto));
+  }
 
   #[test]
   fn knob_value_set_serialises_as_bare_scalar() {

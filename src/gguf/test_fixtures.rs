@@ -3,10 +3,9 @@
 //! the surface is testing-only — it isn't part of llamastash's public API.
 //!
 //! The builder emits a structurally valid GGUF v3 prefix (magic, version,
-//! counts, KV list, tensor info). It does **not** emit tensor data — Unit 3
-//! only consumes the header, and any consumer that wants real tensor bytes
-//! lives in a later unit (the supervisor in Unit 5 doesn't read tensor data
-//! either, it just launches `llama-server` against the file path).
+//! counts, KV list, tensor info). It does **not** emit tensor data — the
+//! parser only consumes the header, and the supervisor doesn't read tensor
+//! data either, it just launches `llama-server` against the file path.
 
 use crate::gguf::header::GgufValue;
 

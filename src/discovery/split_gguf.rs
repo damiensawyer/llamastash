@@ -4,7 +4,7 @@
 //! conversion tools emit it as a sequence of shards named
 //! `<base>-NNNNN-of-MMMMM.gguf`. To `llama-server`, the shard set is
 //! launched by pointing it at shard 1; the loader follows the
-//! `-of-MMMMM` suffix to find siblings. Discovery (Unit 4) collapses
+//! `-of-MMMMM` suffix to find siblings. Discovery collapses
 //! the shard set into a single user-visible row so the TUI shows one
 //! model entry rather than five lines of `*-00001-of-00005.gguf` …
 //! `*-00005-of-00005.gguf`.

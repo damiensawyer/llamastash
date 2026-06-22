@@ -1007,7 +1007,7 @@ mod tests {
 
   // Windows-only zip extraction tests live inside `cfg(windows)`
   // because the `zip` crate isn't compiled on other platforms (per
-  // the Cargo.toml gate). The Windows CI lane (Unit 10) exercises
+  // the Cargo.toml gate). The Windows CI lane exercises
   // them; locally on Linux they're a no-op.
   #[cfg(windows)]
   mod windows_zip {

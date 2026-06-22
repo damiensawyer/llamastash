@@ -153,14 +153,14 @@ pub struct ManagedSpawn {
   /// How this launch entered the supervisor. Defaults to `Manual`
   /// (safe — never evicted) for callers that don't care.
   pub origin: LaunchOrigin,
-  /// Strict-fit ctx-clamp readiness gate (R19), populated by the caller
+  /// Strict-fit ctx-clamp readiness gate, populated by the caller
   /// only for fit-governed launches. `None` leaves the readiness path
   /// untouched (pinned ctx, missing trained-window metadata, Lemonade
   /// rows). See [`FitGate`].
   pub fit_gate: Option<FitGate>,
 }
 
-/// Resolved inputs for the strict-fit ctx-clamp readiness gate (R19).
+/// Resolved inputs for the strict-fit ctx-clamp readiness gate.
 /// The caller builds this only for fit-governed launches (ctx delegated
 /// to `--fit` and a known trained window); the supervisor's probe task
 /// consumes it on the Loading → Ready transition.
@@ -461,7 +461,7 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
   // pass that re-incorporates the orphan as a managed supervisor.
   cmd.env("LLAMASTASH_LAUNCHED", "1");
   // Process-group setup + spawn go through [`ProcessControl`] so
-  // Unit 6's Windows backend can swap in `CREATE_NEW_PROCESS_GROUP`
+  // a future Windows backend can swap in `CREATE_NEW_PROCESS_GROUP`
   // without touching this call site.
   let pc = crate::util::process_control::platform_default();
   let spawned = pc
@@ -565,7 +565,7 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
   let (ready_path, ready_status) = match &input.plan.readiness {
     Readiness::HttpPoll { path, ready_status } => (path.clone(), *ready_status),
   };
-  // Strict-fit ctx-clamp gate (R19): the caller populates this only for
+  // Strict-fit ctx-clamp gate: the caller populates this only for
   // fit-governed launches; `None` leaves the readiness path unchanged.
   let fit_gate = input.fit_gate;
   spawn_supervised("probe", async move {
@@ -761,8 +761,8 @@ async fn signal_child_with_guard(model: &ManagedModel, flavour: SignalFlavour) {
   let Some(pid) = child.id() else { return };
   // `setsid()` ran in `pre_exec` so the child is its own PGID
   // leader. Signalling `ProcessGroup(pid)` reaches every process
-  // it forked — addressing audit §2.1 #3 (a SIGTERM to just the
-  // immediate child left grandchildren running).
+  // it forked — a SIGTERM to just the immediate child would leave
+  // grandchildren running.
   //
   // We hold the child mutex across the trait call so the kernel
   // can't reap-then-recycle the PGID between our `try_wait` check

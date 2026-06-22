@@ -13,12 +13,12 @@
 //! section. Three points anchor every field choice:
 //! - `managed_keys` records the dotted path *and* a `blake3` digest
 //!   of the value the wizard wrote. On re-run a digest mismatch tells
-//!   us the user edited the value by hand → preserve it (R72).
+//!   us the user edited the value by hand → preserve it.
 //! - `llama_server_digest` is the binary's sha256, recorded so
 //!   `doctor` can flag drift on GH-Releases-installed binaries (brew
-//!   installs are carved out per the doctor finding #2 design).
+//!   installs are carved out by design).
 //! - `remote_fetch_failures` is the silent-fallback counter the
-//!   `RemoteSnapshotUnreachable` doctor finding consumes (Unit 13).
+//!   `RemoteSnapshotUnreachable` doctor finding consumes.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -32,8 +32,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum InstallMethod {
   /// Downloaded from `github.com/ggml-org/llama.cpp/releases` and
-  /// verified against the per-asset `digest` field
-  /// (see Unit 1 spike `2026-05-19-llama-cpp-releases-asset-contract.md`).
+  /// verified against the per-asset `digest` field.
   GhReleases,
   /// `brew install llama.cpp` — bottle. macOS arm64 ships
   /// Metal-enabled; Linux bottles are CPU-only.
@@ -44,7 +43,7 @@ pub enum InstallMethod {
   CustomPath,
 }
 
-/// One entry in `managed_keys` (R67). Records the dotted path the
+/// One entry in `managed_keys`. Records the dotted path the
 /// wizard wrote into `config.yaml`, the digest of the value it
 /// wrote, and the wall-clock timestamp. On re-run the wizard
 /// compares the on-disk value's digest against `value_digest`:
@@ -103,7 +102,7 @@ fn current_schema_version() -> u32 {
 pub struct InitSnapshot {
   /// `gpu::probe` vendor at last detection — `"nvidia"`, `"amd"`,
   /// `"apple_metal"`, `"cpu_only"`, etc. Used by doctor's
-  /// `HardwareDrift` finding (Unit 13).
+  /// `HardwareDrift` finding.
   #[serde(default)]
   pub gpu_vendor: Option<String>,
   /// Aggregated VRAM in GiB at last detection. Aggregation rule from
@@ -116,7 +115,7 @@ pub struct InitSnapshot {
   pub gpu_device_count: Option<u32>,
   /// GPU memory pool ceiling in bytes at the last baseline stamp — the
   /// raw aggregated total (for a UMA APU this is carve-out + GTT). The
-  /// doctor `MemoryDrift` finding (R13) compares the freshly-detected
+  /// doctor `MemoryDrift` finding compares the freshly-detected
   /// ceiling against this; doctor re-stamps it after the finding fires
   /// (one-shot) and stamps it silently the first time it is absent
   /// (pre-upgrade snapshot). `None` on CPU-only hosts.

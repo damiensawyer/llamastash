@@ -1,8 +1,8 @@
-//! Smoke launch (R70 / R71 / R79) + TUI handoff.
+//! Smoke launch + TUI handoff.
 //!
-//! v2 ships two layered checks:
-//! - **Phase 1 — pure-function dry-run**: estimate peak memory at the
-//!   chosen ctx (using Unit 6's `estimate_peak_bytes`) and compare
+//! Two layered checks:
+//! - **Pure-function dry-run**: estimate peak memory at the
+//!   chosen ctx (using `estimate_peak_bytes`) and compare
 //!   against the effective ceiling for the host. Surfaces a tight-fit
 //!   warning when peak is within 10% of the safety ceiling.
 //! - **`--version` probe**: spawn the installed binary with `env_clear()`
@@ -10,15 +10,15 @@
 //!   and `HF_TOKEN` can't leak into the child. A non-zero exit fails
 //!   smoke with `INIT_SMOKE_FAILED = 74`.
 //!
-//! Phase 2 (daemon-mediated `/health` + `/v1/chat/completions` probe)
+//! A daemon-mediated `/health` + `/v1/chat/completions` probe
 //! is intentionally deferred: it requires daemon stop+restart
 //! plumbing that lives across `src/daemon/mod.rs` and `src/cli/daemon.rs`,
-//! and the failure-mode tree is large enough that v2 ships the
-//! detection-only path while v2.1 lands the full probe. Phase 1 +
+//! and the failure-mode tree is large enough that we ship the
+//! detection-only path for now. The dry-run +
 //! `--version` covers the common-case "I installed the wrong variant"
 //! / "I downloaded a corrupt binary" failures; the missing piece is
-//! the genuine OOM-at-load case which Unit 6's filter already aims
-//! to prevent.
+//! the genuine OOM-at-load case which the recommender's filter already
+//! aims to prevent.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -42,11 +42,11 @@ pub struct SmokeReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SmokeWarning {
-  /// Phase 1: estimated peak is within 10% of the safety ceiling.
+  /// Estimated peak is within 10% of the safety ceiling.
   /// Wizard prompts for confirm under interactive mode; auto-accepts
   /// under `--recommended`.
   VramTight { peak_bytes: u64, ceiling_bytes: u64 },
-  /// Phase 1: no GPU detected; user is running CPU only. Surface
+  /// No GPU detected; user is running CPU only. Surface
   /// so the handoff message can suggest a smaller model if the user
   /// picked something heavy.
   CpuOnly,
@@ -66,7 +66,7 @@ pub enum SmokeFailure {
   PhaseOneOom { peak_bytes: u64, ceiling_bytes: u64 },
 }
 
-/// Phase 1 dry-run. Pure function — no I/O, no spawn.
+/// Dry-run. Pure function — no I/O, no spawn.
 pub fn phase_one(
   hardware: &HardwareSnapshot,
   weights_bytes: u64,
@@ -219,7 +219,7 @@ pub fn run_phase_one_and_version(
 
 /// Render the handoff line the wizard prints after a successful run.
 /// Interactive runs render this then ask "Launch TUI now? [Y/n]" (UX
-/// handled in Unit 10's `print_handoff`); non-interactive runs just
+/// handled in the wizard's `print_handoff`); non-interactive runs just
 /// print it as the last line.
 pub fn render_handoff_line() -> String {
   "Run `llamastash` to enter the TUI, or `llamastash list` to see discovered models.".to_string()

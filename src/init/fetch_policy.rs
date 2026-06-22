@@ -19,7 +19,7 @@
 
 use std::collections::BTreeSet;
 
-/// Default allowlist hosts. Curated from Unit 1 spike outputs:
+/// Default allowlist hosts. Curated from spike findings:
 /// - `api.github.com` for the llama.cpp Releases REST API.
 /// - `github.com` for browser-download asset URLs (302-redirected to
 ///   the next entry).
@@ -53,7 +53,7 @@ pub const MAX_REDIRECTS: usize = 3;
 /// cap explicitly. 1 GiB is enough for any one llama.cpp asset
 /// (heaviest is the Windows CUDA + HIP zip at ~320 MB); HF model
 /// downloads override this cap with a per-shard value derived from
-/// the disk-space precheck (R64).
+/// the disk-space precheck.
 pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// The fetch contract's URL scheme requirement.

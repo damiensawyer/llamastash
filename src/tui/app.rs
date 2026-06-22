@@ -90,12 +90,12 @@ pub struct ManagedRow {
   /// `None` until the daemon's per-launch sampler primes.
   pub cpu_pct: Option<f32>,
   /// Context window `--fit` actually resolved, read from the child's
-  /// `/props` after Ready (R6). `None` until that fetch lands (or when
+  /// `/props` after Ready. `None` until that fetch lands (or when
   /// the build omits it). The running-launch settings view shows this
   /// real number instead of the dispatched `auto` sentinel.
   pub resolved_ctx: Option<u32>,
   /// True when `--fit` had to clamp the context window down to the floor
-  /// under memory pressure (R19). The running view tags the resolved ctx
+  /// under memory pressure. The running view tags the resolved ctx
   /// with a "clamped" note so the user knows it was squeezed.
   pub ctx_clamped: bool,
   /// The knobs this launch was actually dispatched with (the live
@@ -143,7 +143,7 @@ pub struct DaemonInfo {
   /// the IPC channel is. `None` when the daemon hasn't surfaced the
   /// field (pre-Phase-A binaries don't).
   pub ipc_url: Option<String>,
-  /// Latest snapshot of the OpenAI-compat proxy listener (Unit 5).
+  /// Latest snapshot of the OpenAI-compat proxy listener.
   /// `None` when talking to a pre-Unit-5 daemon that omits the
   /// field — info_pane renders the proxy row as `proxy   —` in that case.
   pub proxy: Option<ProxyInfo>,
@@ -164,7 +164,7 @@ pub struct BackendBinary {
 }
 
 /// Wire shape of the proxy listener block surfaced via the IPC
-/// `status` response (R161). Parsed from the daemon's JSON and held
+/// `status` response. Parsed from the daemon's JSON and held
 /// on `DaemonInfo` so [`crate::tui::info_pane`] can render a one-line
 /// summary in the Daemon panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,17 +353,17 @@ pub struct App {
   /// and kill-daemon so a fat-finger doesn't drop a running model
   /// or the whole supervisor.
   pub confirm_dialog: Option<ConfirmAction>,
-  /// HuggingFace pull dialog (R104). `Some(_)` whenever the modal
+  /// HuggingFace pull dialog. `Some(_)` whenever the modal
   /// is open; the input pump routes through `Focus::HfDialog` to the
   /// per-stage key handler.
   pub hf_dialog: Option<crate::tui::hf_dialog::HfDialogState>,
-  /// Pinned download status strip (R115). Always present; the
+  /// Pinned download status strip. Always present; the
   /// renderer reserves a 1-line slot above the body only when
   /// `download_strip.is_active()` is true.
   pub download_strip: crate::tui::download_strip::DownloadStripState,
   /// Per-frame memo of `rendered_rows()`. Primed at the top of
-  /// `render::render` and cleared at the bottom — see audit §4.1
-  /// #1 (the biggest single perf finding). The same `Vec<ListRow>`
+  /// `render::render` and cleared at the bottom — the biggest single
+  /// per-frame perf win. The same `Vec<ListRow>`
   /// used to be rebuilt 5+ times per frame via `focused_path`,
   /// `focused_managed`, `focused_name`, and the right-pane render
   /// helpers. None outside a frame so event handlers always see
@@ -371,7 +371,7 @@ pub struct App {
   pub(crate) rows_cache: Option<Vec<ListRow>>,
   /// Per-frame memo of `available_right_tabs()`. Three calls per
   /// frame used to walk `models` linearly + allocate a fresh
-  /// `Vec<RightTab>` each time (audit §F4.1 #2). Same lifetime
+  /// `Vec<RightTab>` each time. Same lifetime
   /// rules as `rows_cache`.
   pub(crate) right_tabs_cache: Option<Vec<RightTab>>,
   /// Hit-test rectangles refreshed every frame by the renderer.
@@ -412,9 +412,20 @@ pub struct StartModelArgs {
   pub extras: Vec<String>,
   pub mode: Option<crate::launch::mode::LaunchMode>,
   pub prefer_port: Option<u16>,
-  /// Per-model backend choice from the Launch picker (R17). `Auto` runs
+  /// Per-model backend choice from the Launch picker. `Auto` runs
   /// the identity rule on the daemon side.
   pub backend: crate::launch::params::BackendChoice,
+}
+
+/// How alarming a confirm prompt is, so the overlay can tone its
+/// border/title accordingly. `Destructive` (red) is reserved for
+/// prompts that lose work or data — stopping/killing a process,
+/// deleting a file, cancelling a download. `Neutral` (accent/warning)
+/// is for reversible or additive prompts where red would cry wolf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmSeverity {
+  Destructive,
+  Neutral,
 }
 
 /// Action awaiting user confirmation in the modal popup. Captured
@@ -459,6 +470,23 @@ pub enum ConfirmAction {
     /// `WriterCmd::StartModel`.
     args: Box<StartModelArgs>,
   },
+}
+
+impl ConfirmAction {
+  /// Severity tier for the confirm overlay's border/title tone. Only
+  /// the work-losing prompts read red; an additive duplicate-launch
+  /// prompt stays neutral so red keeps meaning "you're about to lose
+  /// something".
+  pub fn severity(&self) -> ConfirmSeverity {
+    match self {
+      ConfirmAction::StopModel { .. }
+      | ConfirmAction::KillDaemon
+      | ConfirmAction::RestartDaemon
+      | ConfirmAction::DeleteModel { .. }
+      | ConfirmAction::CancelDownload { .. } => ConfirmSeverity::Destructive,
+      ConfirmAction::LaunchDuplicate { .. } => ConfirmSeverity::Neutral,
+    }
+  }
 }
 
 impl App {
@@ -550,7 +578,7 @@ impl App {
 
   /// Close the HuggingFace pull dialog and snap focus back to the
   /// Models list. Background download tasks the dialog spawned
-  /// (Unit 6) keep ticking under the pinned strip — closing the
+  ///  keep ticking under the pinned strip — closing the
   /// dialog does not cancel them.
   pub fn close_hf_dialog(&mut self) {
     self.hf_dialog = None;
@@ -561,7 +589,7 @@ impl App {
   /// duration of one frame so the 12+ in-frame `rendered_rows()`
   /// calls and 3+ in-frame `available_right_tabs()` calls amortise
   /// to a single build each. Paired with
-  /// [`Self::clear_frame_caches`]. See audit §4.1 #1 and §F4.1 #2.
+  /// [`Self::clear_frame_caches`].
   pub(crate) fn prime_frame_caches(&mut self) {
     self.rows_cache = Some(self.rendered_rows_uncached());
     self.right_tabs_cache = Some(self.available_right_tabs_uncached());
@@ -1093,7 +1121,7 @@ impl App {
 
   /// Rows for external `llama-server` processes the daemon detected
   /// outside its supervisor. Surfaced read-only (stop is the only
-  /// action allowed) — used by Unit 7's right pane to show "this
+  /// action allowed) — used by the right pane to show "this
   /// model is unmanaged" hints.
   pub fn external_rows(&self) -> &[ManagedRow] {
     &self.external
@@ -1356,7 +1384,7 @@ impl App {
     if let Some(p) = &path {
       if let Some(last) = self.last_params.get(p) {
         state.prefer_port = last.port;
-        // R20: returning user inherits the typed-knob deltas they
+        // returning user inherits the typed-knob deltas they
         // last shipped. The daemon persists only user-supplied
         // deltas (not the fully resolved set) so seeding straight
         // into `user_knobs` keeps the picker's source labels
@@ -1420,7 +1448,7 @@ impl App {
   }
 
   /// Open the launch picker for the focused model. Seeds from
-  /// persisted `last_params` (R20) when the daemon has reported any
+  /// persisted `last_params` when the daemon has reported any
   /// for the focused path, so a returning user lands on the params
   /// they last shipped. No-op when the cursor is on a header.
   ///

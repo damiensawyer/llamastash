@@ -10,7 +10,7 @@
 //! When the model reports `reasoning` is on, `<think>...</think>`
 //! blocks collapse to a `⏵ reasoning (N tokens)` glyph in the
 //! viewport so the user can still see the final answer without
-//! scrolling past chain-of-thought spam (R32).
+//! scrolling past chain-of-thought spam.
 
 use std::cell::Cell;
 

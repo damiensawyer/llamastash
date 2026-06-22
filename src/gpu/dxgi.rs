@@ -143,7 +143,7 @@ pub fn probe_devices() -> Option<Vec<GpuDevice>> {
       // weights. Fold them into one total (mirrors the Linux rocm-smi
       // VRAM+GTT path) and mark the shared portion so init / the host
       // pane flag it as unified. The D3D12 `UMA` flag is the explicit,
-      // authoritative classification signal (R18).
+      // authoritative classification signal.
       (
         dedicated.saturating_add(shared),
         Some(shared),

@@ -4,7 +4,7 @@
 //! 1. **Re-adopt** entries from `state.json::running` whose PID is
 //!    still alive, whose recorded port answers, and whose
 //!    `/v1/models` reports the same model file the supervisor
-//!    launched (R42). Three-factor confirmation guards against
+//!    launched. Three-factor confirmation guards against
 //!    PID-reuse: the kernel may have handed our recorded PID to an
 //!    unrelated process by the time we restart.
 //! 2. **Surface external** `llama-server` processes (started
@@ -234,7 +234,7 @@ fn pid_alive(pid: i32) -> bool {
     return false;
   }
   // Defer to the cross-platform liveness check so the Windows
-  // backend (Unit 6) lights up here without a second migration.
+  // backend lights up here without a second migration.
   crate::util::process_control::platform_default().is_alive(pid as u32)
 }
 
@@ -252,7 +252,7 @@ async fn models_endpoint_matches(port: u16, expected: &Path, timeout: Duration) 
 /// GET `/v1/models` via `reqwest` — the same client the right-pane
 /// chat tab uses, so the orphan probe doesn't carry its own HTTP/1.1
 /// framing. Capped at 32 KiB so a misbehaving peer can't balloon our
-/// memory (audit §2.2). Returns `(status, body)` or an io error.
+/// memory. Returns `(status, body)` or an io error.
 async fn fetch_models_body(port: u16, timeout: Duration) -> std::io::Result<(u16, Vec<u8>)> {
   let client = reqwest::Client::builder()
     .timeout(timeout)

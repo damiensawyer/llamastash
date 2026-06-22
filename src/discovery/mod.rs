@@ -5,11 +5,11 @@
 //! Module layout mirrors the responsibilities in the v1 plan:
 //! - [`scanner`] — walk one or more roots and emit `DiscoveredModel`s.
 //! - [`split_gguf`] — collapse `*-NNNNN-of-MMMMM.gguf` sets into one
-//!   user-visible entry (R5).
+//!   user-visible entry.
 //!
 //! Cache-aware enumerators (HuggingFace, Ollama, LM Studio), the
-//! filesystem watcher, and the HuggingFace pull worker land in later
-//! commits within Unit 4.
+//! filesystem watcher, and the HuggingFace pull worker live in the
+//! sibling modules.
 
 pub mod catalog;
 pub mod known_caches;
@@ -35,8 +35,8 @@ use crate::gguf::metadata::ModelMetadata;
 ///
 /// `metadata` is `None` when the GGUF header parse failed (truncated,
 /// bad magic, unsupported version, …); discovery still surfaces the
-/// row with a warning glyph rather than dropping the file (origin:
-/// Unit 4 edge case "empty file with `.gguf` extension").
+/// row with a warning glyph rather than dropping the file (edge case:
+/// "empty file with `.gguf` extension").
 #[derive(Debug, Clone)]
 pub struct DiscoveredModel {
   /// Canonical absolute path to the launchable file. For split-shard
@@ -135,7 +135,7 @@ impl ModelSource {
     }
   }
 
-  /// The id of the backend that serves models from this source (R13/R14).
+  /// The id of the backend that serves models from this source.
   ///
   /// Disk sources (user / HF / Ollama / LM Studio) are all local GGUF files
   /// served by the direct llama.cpp backend; the Lemonade source is served
@@ -148,5 +148,63 @@ impl ModelSource {
       | ModelSource::Ollama
       | ModelSource::LmStudio => "llamacpp",
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn multimodal_glyphs_track_advertised_modalities() {
+    // Glyphs come out in LEGEND order: vision first, audio second.
+    let vision = Multimodal {
+      vision: true,
+      audio: false,
+    };
+    assert_eq!(vision.glyphs(), vec![Multimodal::LEGEND[0].0]);
+
+    let audio = Multimodal {
+      vision: false,
+      audio: true,
+    };
+    assert_eq!(audio.glyphs(), vec![Multimodal::LEGEND[1].0]);
+
+    let omni = Multimodal {
+      vision: true,
+      audio: true,
+    };
+    assert_eq!(
+      omni.glyphs(),
+      vec![Multimodal::LEGEND[0].0, Multimodal::LEGEND[1].0]
+    );
+
+    let none = Multimodal {
+      vision: false,
+      audio: false,
+    };
+    assert!(none.glyphs().is_empty());
+  }
+
+  #[test]
+  fn model_source_label_and_backend_id_are_stable() {
+    // Labels are the stable wire/display strings the TUI groups by.
+    assert_eq!(ModelSource::UserPath.label(), "user");
+    assert_eq!(ModelSource::HuggingFace.label(), "huggingface");
+    assert_eq!(ModelSource::Ollama.label(), "ollama");
+    assert_eq!(ModelSource::LmStudio.label(), "lm-studio");
+    assert_eq!(ModelSource::Lemonade.label(), "lemonade");
+
+    // Disk sources resolve to the direct llama.cpp backend; only the
+    // Lemonade source routes to the managed multiplexer.
+    for src in [
+      ModelSource::UserPath,
+      ModelSource::HuggingFace,
+      ModelSource::Ollama,
+      ModelSource::LmStudio,
+    ] {
+      assert_eq!(src.backend_id(), "llamacpp", "{src:?}");
+    }
+    assert_eq!(ModelSource::Lemonade.backend_id(), "lemonade");
   }
 }

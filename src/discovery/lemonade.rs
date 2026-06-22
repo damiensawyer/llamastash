@@ -1,4 +1,4 @@
-//! Lemonade discovery source (R11) — **list-only**.
+//! Lemonade discovery source — **list-only**.
 //!
 //! Reads the model list from a running `lemond` umbrella's `/api/v1/models`
 //! and projects each entry into a Lemonade-tagged [`DiscoveredModel`].
@@ -143,7 +143,7 @@ mod tests {
       rows[0].path,
       PathBuf::from("lemonade://Qwen2.5-0.5B-Instruct")
     );
-    // The backend tag derives from the source (R13/R14).
+    // The backend tag derives from the source.
     assert_eq!(rows[0].source.backend_id(), "lemonade");
     // No labels → an LLM → chat hint.
     assert_eq!(rows[0].metadata.as_ref().unwrap().mode_hint, ModeHint::Chat);

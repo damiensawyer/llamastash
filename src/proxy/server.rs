@@ -1,19 +1,17 @@
-// Echo-verification (R156 / R157 contract — Unit 1 gating task):
+// Echo-verification:
 //
-// Pass-through forwarding in Unit 3 relies on the upstream
-// `llama-server` echoing `request.body.model` back in
-// `response.body.model`. The inline tests below post a JSON request
-// carrying `"model":"sentinel-x42"` to `fake_llama_server` and
-// assert the echo on the response body. The fake fixture mirrors
-// the real `llama-server` behavior in this respect — see
+// Pass-through forwarding relies on the upstream `llama-server`
+// echoing `request.body.model` back in `response.body.model`. The
+// inline tests below post a JSON request carrying
+// `"model":"sentinel-x42"` to `fake_llama_server` and assert the
+// echo on the response body. The fake fixture mirrors the real
+// `llama-server` behavior in this respect — see
 // `tests/fixtures/fake_llama_server.rs` (`/v1/chat/completions`).
 //
-// If the assertion ever breaks, the falsifying outcome is
-// documented in the plan's Risks & Dependencies row "`llama-server`
-// rewrites `body.model` in its response instead of echoing": Unit 3
-// would have to JSON-parse / rewrite each SSE frame on fallback
-// instead of byte-piping. See
-// docs/plans/2026-05-21-001-feat-proxy-router-plan.md.
+// If the assertion ever breaks — `llama-server` rewriting
+// `body.model` in its response instead of echoing — forwarding would
+// have to JSON-parse / rewrite each SSE frame on fallback instead of
+// byte-piping.
 
 //! TCP accept loop + per-connection hyper service.
 //!
@@ -21,8 +19,8 @@
 //! `tokio::select!` between `listener.accept()` and the daemon's
 //! [`ShutdownToken`], with a bounded drain phase on shutdown.
 //! Unlike the IPC control plane we don't bearer-authenticate —
-//! per the plan's scope ("loopback only; OpenAI-compat shape"), the
-//! proxy is reachable by every same-host process by design.
+//! loopback-only by default, the proxy is reachable by every
+//! same-host process by design.
 
 use std::{
   net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -47,9 +45,8 @@ use crate::daemon::shutdown::ShutdownToken;
 /// by one SIGINT.
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Externally visible proxy listener state. Unit 5 wires this into
-/// the IPC `status` response and the CLI / TUI surfaces; Unit 1
-/// only writes the cell.
+/// Externally visible proxy listener state. The IPC `status` response
+/// and the CLI / TUI surfaces read this cell; the proxy task writes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProxyStatus {
   /// `proxy.enabled: false` in config; no listener was attempted.
@@ -82,8 +79,8 @@ pub enum ProxyStatus {
 }
 
 /// Cheap-to-clone handle to the proxy's current status. The proxy
-/// task writes to it on every transition; Unit 5's IPC `status`
-/// handler reads from it.
+/// task writes to it on every transition; the IPC `status` handler
+/// reads from it.
 pub type StatusCell = Arc<RwLock<ProxyStatus>>;
 
 /// Construct a fresh cell seeded with `Disabled`. The daemon
@@ -418,7 +415,7 @@ pub fn loopback_addr(port: u16) -> SocketAddr {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::ipc::methods::MethodContext;
+  use crate::daemon::context::MethodContext;
   use std::time::Duration;
 
   #[test]
@@ -678,12 +675,9 @@ mod tests {
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn chat_completions_without_model_field_returns_400() {
-    // Unit 3 wires the four `/v1/...` arms to the resolver. A
-    // body without `model` short-circuits at the
+    // A body without `model` short-circuits at the
     // `RouteDecision::ModelRequired` arm — 400
-    // `invalid_request` / `code: model_required`. Pre-Unit-3
-    // this same route returned 501; the assertion swap documents
-    // the contract handoff.
+    // `invalid_request` / `code: model_required`.
     let (addr, shutdown, _status, handle) = spawn_proxy_on_ephemeral_port().await;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");

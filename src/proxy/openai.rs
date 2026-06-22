@@ -9,13 +9,9 @@
 //!   the proxy uses for every non-2xx body so clients see a
 //!   recognisable payload.
 //!
-//! Unit 2 introduces the listing shapes; Unit 3 extends [`ErrorObject`]
-//! with `code` / `param` slots and adds a `matches` field for the
-//! `model_not_found` / `ambiguous_model` cases (clients use it to
-//! retry with a tighter reference).
-//!
-//! Plan: docs/plans/2026-05-21-001-feat-proxy-router-plan.md (Units
-//! 2 + 3).
+//! [`ErrorObject`] also carries `code` / `param` slots and a `matches`
+//! field for the `model_not_found` / `ambiguous_model` cases (clients
+//! use it to retry with a tighter reference).
 
 use serde::{Deserialize, Serialize};
 
@@ -46,7 +42,7 @@ pub struct ModelObject {
 
 impl ModelObject {
   /// Construct a `ModelObject` for a discovered model. `id` is the
-  /// caller's responsibility (Unit 2 derives it from `display_label`
+  /// caller's responsibility (derived from `display_label`
   /// → `path.file_stem()`); this constructor just stamps the three
   /// fixed fields so callers stay short.
   pub fn new(id: String) -> Self {
@@ -86,8 +82,7 @@ pub struct ErrorResponse {
 
 /// One OpenAI-shaped error. `type` is mandatory; the rest mirror
 /// the public OpenAI shape for `code` / `param` / `message`.
-/// Unit 2 only uses `r#type` + `message`; Unit 3 leans on `code`
-/// for the `model_required` case and on `matches` for the
+/// `code` carries the `model_required` case and `matches` carries the
 /// `model_not_found` / `ambiguous_model` disambiguation surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorObject {
@@ -108,7 +103,7 @@ pub struct ErrorObject {
   /// Candidate model names returned alongside `model_not_found` /
   /// `ambiguous_model` errors so the client can refine its request.
   /// Always omitted on the wire when empty — keeping the absent
-  /// case JSON-shaped the same as Unit 2's bare errors.
+  /// case JSON-shaped the same as a bare error.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub matches: Option<Vec<String>>,
   /// Currently-Ready model names reported alongside `launch_failed`

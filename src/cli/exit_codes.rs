@@ -1,4 +1,4 @@
-//! Exit-code table shared by every non-interactive subcommand (R35).
+//! Exit-code table shared by every non-interactive subcommand.
 //!
 //! Codes are part of the public CLI contract: agent scripts pin
 //! against them to branch on failure class without having to parse
@@ -26,9 +26,10 @@ pub const LAUNCH_FAILED: i32 = 67;
 /// MODEL_NOT_FOUND so scripts can branch on "tried to stop, daemon
 /// declined" vs. "didn't find that model in the first place".
 pub const STOP_FAILED: i32 = 68;
-/// Reserved for `pull` (R46). Lands in v2 alongside the in-app HF
-/// pull worker. Documented here so the table stays gap-free.
-#[allow(dead_code)]
+/// Standalone `llamastash pull <repo>` failed — bad repo spec, fetch
+/// client init, or download error. Distinct from `INIT_DOWNLOAD_FAILED`
+/// so a wizard-internal download failure stays separable from a bare
+/// `pull`.
 pub const PULL_FAILED: i32 = 69;
 /// `llama-server` binary not on `$PATH`, no `--llama-server` flag,
 /// and `LLAMASTASH_LLAMA_SERVER` unset.

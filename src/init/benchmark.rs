@@ -1,12 +1,12 @@
 //! Benchmark snapshot — the curated model corpus + per-arch recommender
-//! weights the init wizard's recommender ranks against (R56).
+//! weights the init wizard's recommender ranks against.
 //!
 //! Two tiers travel together:
 //! - **Bundled**: `data/benchmark-snapshot.json` is `include_str!`-ed
 //!   into the binary so a fresh `cargo install` works offline.
-//! - **Remote**: a daily-CI-built JSON file (Unit 7) lives at the
+//! - **Remote**: a daily-CI-built JSON file lives at the
 //!   rolling release tag `snapshot-latest`. `load_remote` fetches it
-//!   through Unit 4's `FetchClient`, verifies the integrity contract
+//!   through the `FetchClient`, verifies the integrity contract
 //!   (monotonic `bundle_date` + `min_version` ≤ build), and prefers
 //!   it over the bundled tier on success.
 //!
@@ -32,25 +32,22 @@ use crate::init::fetch::{FetchClient, FetchError};
 pub const BUNDLED_PATH: &str = "../../data/benchmark-snapshot.json";
 
 /// Bundled snapshot bytes — fixed at build time by `include_str!`.
-/// 2 MiB build-time cap is enforced by [`bundled_size_budget`]. The
-/// ceiling was raised from the original 500 KiB in Unit 6 of plan
-/// 2026-05-20-001 to make room for the ~100-row live-discovery
-/// catalog (Qwen3.6 / Gemma 4 / DeepSeek V3.2 / GLM-5 / Llama 4 /
-/// Phi-4 / MoE flagships) without trimming task tiers.
+/// 2 MiB build-time cap is enforced by the const-assert below. The
+/// ceiling allows the ~100-row live-discovery catalog (Qwen3.6 /
+/// Gemma 4 / DeepSeek V3.2 / GLM-5 / Llama 4 / Phi-4 / MoE flagships)
+/// without trimming task tiers.
 const BUNDLED_RAW: &str = include_str!("../../data/benchmark-snapshot.json");
 
 /// Build-time size budget for the bundled snapshot. A future regen
-/// that blows past this fails the build via the assertion in
-/// [`bundled_size_budget`] rather than silently bloating the binary.
-/// 2 MiB ≈ 0.05% of the release binary — comfortable headroom for the
-/// 100-row catalog cap (`SNAPSHOT_MODEL_LIMIT` in the regen script).
+/// that blows past this fails the build via the const-assert below
+/// rather than silently bloating the binary. 2 MiB ≈ 0.05% of the
+/// release binary — comfortable headroom for the 100-row catalog cap
+/// (`SNAPSHOT_MODEL_LIMIT` in the regen script).
 const BUNDLED_SIZE_BUDGET_BYTES: usize = 2 * 1024 * 1024;
 
-/// Compile-time-evaluable size check. Calling it from
-/// `load_bundled_or_panic` would surface a runtime panic; the
-/// `const_assert!` form fires at build time.
-#[allow(dead_code)]
-const _BUNDLED_SIZE_CHECK: () = {
+// Anonymous const so the budget overrun fails the build instead of
+// surfacing as a runtime panic from `load_bundled_or_panic`.
+const _: () = {
   if BUNDLED_RAW.len() > BUNDLED_SIZE_BUDGET_BYTES {
     panic!(
       "bundled benchmark snapshot exceeds the 2 MiB build-time \
@@ -60,8 +57,7 @@ const _BUNDLED_SIZE_CHECK: () = {
   }
 };
 
-/// Runtime accessor for the size budget. Used by unit tests so the
-/// constant isn't dead code in the eyes of `clippy`.
+/// Test-only accessor for the size budget constant.
 pub fn bundled_size_budget() -> usize {
   BUNDLED_SIZE_BUDGET_BYTES
 }
@@ -89,9 +85,9 @@ pub struct BenchmarkSnapshot {
   #[serde(default)]
   pub remote_url: Option<String>,
   /// Tunables the recommender consumes. Sourced from the snapshot so
-  /// the CI workflow (Unit 7) can re-tune without a binary release.
+  /// the CI workflow can re-tune without a binary release.
   pub recommender_weights: RecommenderWeights,
-  /// The curated model catalog. Unit 6's recommender ranks against
+  /// The curated model catalog. The recommender ranks against
   /// this list intersected with the on-disk catalog.
   pub models: Vec<ModelEntry>,
 }
@@ -110,7 +106,7 @@ pub struct RecommenderWeights {
 }
 
 /// One model in the curated catalog. Fields mirror what the
-/// recommender (Unit 6) reads + what `doctor` shows alongside picks.
+/// recommender reads + what `doctor` shows alongside picks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEntry {
   pub id: String,
@@ -144,7 +140,7 @@ pub struct ModelEntry {
   pub source_hf_id: String,
   /// Active parameters per token, for MoE models (e.g. 3_000_000_000
   /// for Qwen3-Next-80B-A3B). `None` on dense models. Read by the
-  /// MoE-aware estimator (Unit 2 of plan 2026-05-20-001).
+  /// MoE-aware peak-memory estimator.
   #[serde(default)]
   pub params_active: Option<u64>,
   /// True for MoE architectures (Mixtral, DeepSeek V3, Qwen3-Next, …).
@@ -186,10 +182,9 @@ pub enum LoadRemoteError {
   SchemaTooNew { got: u32, max: u32 },
 }
 
-/// Max remote-snapshot body size. Tracks the bundle budget (2 MiB
-/// after Unit 6 of plan 2026-05-20-001) plus a 64 KiB tolerance for
-/// formatting drift; a CI run that drifts past must raise both
-/// numbers deliberately.
+/// Max remote-snapshot body size. Tracks the bundle budget (2 MiB)
+/// plus a 64 KiB tolerance for formatting drift; a CI run that drifts
+/// past must raise both numbers deliberately.
 pub const REMOTE_MAX_BYTES: u64 = (BUNDLED_SIZE_BUDGET_BYTES as u64) + 64 * 1024;
 
 /// Schema versions this build understands. Reading a snapshot whose
@@ -230,7 +225,7 @@ pub async fn load_remote(
   Ok(Some(candidate))
 }
 
-/// Pure-function verifier used by `load_remote` and by Unit 5's tests.
+/// Pure-function verifier used by `load_remote` and its tests.
 pub fn verify_remote(
   candidate: &BenchmarkSnapshot,
   bundled: &BenchmarkSnapshot,

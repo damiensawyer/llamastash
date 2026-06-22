@@ -254,6 +254,25 @@ mod tests {
   }
 
   #[test]
+  fn explicit_path_pointing_at_a_directory_is_missing_not_executable() {
+    // A path that canonicalizes successfully but resolves to a directory
+    // (not a regular file) takes the `Ok(_)` non-file arm → reported as
+    // ExplicitPathMissing rather than misclassified as not-executable.
+    let dir = temp_dir("path-is-dir");
+    let err = locate(LocateInputs {
+      cli_flag: Some(dir.clone()),
+      env_var: None,
+      config_path: None,
+    })
+    .expect_err("a directory is not a launchable binary");
+    match err {
+      LocateError::ExplicitPathMissing(p) => assert_eq!(p, dir),
+      other => panic!("expected ExplicitPathMissing for a directory, got {other:?}"),
+    }
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
   fn no_sources_returns_not_found_when_path_lacks_binary() {
     // We don't manipulate $PATH (would affect other parallel tests),
     // so this only fails-soft: if `llama-server` happens to be on

@@ -1,7 +1,7 @@
 //! Error variants surfaced by the GGUF parser, identity, and estimator.
 //!
 //! Kept as a small explicit enum rather than `anyhow::Error` because callers
-//! in the daemon (Unit 5 supervisor, Unit 4 scanner) need to distinguish
+//! in the daemon (the supervisor, the scanner) need to distinguish
 //! "this file is not a GGUF" from "the file is truncated" from "I/O failure"
 //! when deciding whether to drop a file from the list or surface a warning.
 

@@ -1,6 +1,6 @@
-//! `llamastash pull <hf-repo>` — graduated MVP for the v2-R65 HF pull
-//! primitive. Thin shim into `init::download::run`; Unit 9 fills in
-//! the multi-shard download body.
+//! `llamastash pull <hf-repo>` — MVP for the HF pull primitive. Thin
+//! shim into `init::download::run`, which owns the multi-shard
+//! download body.
 
 use crate::cli::cli_args::{Cli, PullArgs};
 use crate::cli::exit_codes::CliResult;

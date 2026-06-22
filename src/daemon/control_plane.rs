@@ -10,9 +10,9 @@
 //!    at startup so clients can attach. See [`super::auth`] for the
 //!    token shape and [`super::runtime_file`] for the on-disk handoff.
 //! 2. **Routes.** Only three: `POST /rpc` (the JSON-RPC dispatcher),
-//!    `GET /logs/tail` (Server-Sent Events; landed in Unit 3 of the
-//!    Windows+HTTP-IPC plan), `GET /health` (unauthenticated liveness
-//!    probe used by the daemon-attach handshake).
+//!    `GET /logs/tail` (Server-Sent Events), `GET /health`
+//!    (unauthenticated liveness probe used by the daemon-attach
+//!    handshake).
 
 use std::{
   net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -31,12 +31,14 @@ use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use tokio::{net::TcpListener, task::JoinHandle, time::Instant};
 
-use super::auth::{extract_bearer, IpcToken};
+use super::auth::IpcToken;
+use crate::daemon::context::MethodContext;
 use crate::daemon::shutdown::ShutdownToken;
-use crate::ipc::methods::{dispatch_request, MethodContext};
+use crate::ipc::methods::dispatch_request;
 use crate::ipc::protocol::{
   ErrorCode, ErrorObject, Request as RpcRequest, Response as RpcResponse,
 };
+use crate::util::http_auth::extract_bearer;
 
 /// Default control-plane port. Sits in the high-4xxxx range —
 /// above IANA's well-known + registered band (1–49151) but below the
@@ -268,8 +270,8 @@ async fn route(
 }
 
 /// `/health` returns a tiny JSON payload with no secrets. Used by the
-/// CLI's daemon-attach handshake (Phase 1 step 1 of the plan: probe
-/// before retrying with a bearer header).
+/// CLI's daemon-attach handshake: probe before retrying with a bearer
+/// header.
 fn health_response() -> Response<Full<Bytes>> {
   let body = serde_json::json!({"status": "ok"}).to_string();
   Response::builder()

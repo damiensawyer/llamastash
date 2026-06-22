@@ -5,9 +5,9 @@
 
 #![warn(rust_2018_idioms)]
 #![deny(clippy::shadow_unrelated)]
-// Crate-wide `dead_code` allow removed at Unit 9 release prep — every
-// scaffold module is now consumed. If you add a new module that hasn't
-// landed all of its consumers yet, narrow the allow to that item
+// No crate-wide `dead_code` allow — every scaffold module is now
+// consumed. If you add a new module that hasn't landed all of its
+// consumers yet, narrow the allow to that item
 // (`#[allow(dead_code)] fn …`) rather than re-blanketing the crate.
 
 pub mod backend;

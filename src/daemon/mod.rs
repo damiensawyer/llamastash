@@ -9,9 +9,11 @@
 
 pub mod actuals;
 pub mod auth;
+pub mod context;
 pub mod control_plane;
 pub mod discovery_task;
 pub mod host_metrics;
+pub mod launch_service;
 pub mod lockfile;
 pub mod orphans;
 pub mod ports;
@@ -43,9 +45,9 @@ use self::{
   state_store::{load as load_state, RunningSnapshot},
 };
 use crate::config::loader::{LemonadeConfig, PortRange, ProxyConfig};
+use crate::daemon::context::{LaunchEnv, MethodContext, PersistedState};
 use crate::daemon::probe::ProbeOptions;
 use crate::discovery::ModelCatalog;
-use crate::ipc::methods::{LaunchEnv, MethodContext, PersistedState};
 use crate::proxy::{self, server::ProxyStatus};
 
 /// Options for starting the daemon. `state_dir` holds the PID
@@ -73,8 +75,8 @@ pub struct DaemonOptions {
   /// single-backend builds. Backend is inferred from each binary's
   /// device names — never declared in config.
   pub extra_binaries: Vec<PathBuf>,
-  /// Listening-port range Unit 5's allocator probes. Defaults to
-  /// the plan's `41100..=41300`.
+  /// Listening-port range the launch allocator probes. Defaults to
+  /// `41100..=41300`.
   pub port_range: PortRange,
   /// Discovery roots and scan tunables. An empty `scan_roots` list
   /// leaves the catalog empty until the user adds paths via the TUI
@@ -129,13 +131,13 @@ pub struct DaemonOptions {
   /// this only needs to ride through the detached re-exec so the foreground
   /// child skips the same gate the parent already waived.
   pub force: bool,
-  /// Knob seeding mode (R1) from `Config.default_launch_mode`
+  /// Knob seeding mode from `Config.default_launch_mode`
   /// (+ `LLAMASTASH_DEFAULT_LAUNCH_MODE`). Threaded into `LaunchEnv`.
   pub default_launch_mode: crate::config::DefaultLaunchMode,
-  /// `--fit-ctx` floor (R7) from `Config.fit_ctx_floor`
+  /// `--fit-ctx` floor from `Config.fit_ctx_floor`
   /// (+ `LLAMASTASH_FIT_CTX_FLOOR`), validated `1..=MAX_CTX_TOKENS`.
   pub fit_ctx_floor: u32,
-  /// Strict-fit mode (R19) from `Config.strict_fit`
+  /// Strict-fit mode from `Config.strict_fit`
   /// (+ `LLAMASTASH_STRICT_FIT`).
   pub strict_fit: bool,
   /// Pass `--jinja` to `llama-server` by default from `Config.jinja`
@@ -359,8 +361,8 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   let persisted = PersistedState::new(state_after_sweep, Some(opts.state_dir.clone()));
   // Construct the proxy status cell *before* the context so the IPC
   // `status` handler and the proxy listener task share the same
-  // handle. Unit 5 surfaces the cell via `status.proxy`; Unit 1
-  // already locked the seeded variant (`Disabled`) so a daemon with
+  // handle. The cell surfaces via `status.proxy`; it is seeded with
+  // the `Disabled` variant so a daemon with
   // `proxy.enabled: false` reads as disabled even before §8b runs.
   let proxy_status_cell = proxy::server::new_status_cell();
   let mut ctx = MethodContext::with_catalog(token.clone(), catalog)
@@ -544,7 +546,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // non-fatal — the proxy is a convenience surface; the daemon's
   // primary contract (IPC + supervisor) survives a port collision.
   // The status cell holds the outcome (Disabled / Listening /
-  // PortInUse / Unbound); Unit 5's IPC `status` handler reads it
+  // PortInUse / Unbound); the IPC `status` handler reads it
   // via the clone attached to `ctx` above (§8).
   if opts.proxy.enabled {
     let host = opts.proxy.effective_host();
@@ -1163,12 +1165,6 @@ pub(crate) fn existing_daemon_pid(state_dir: &Path) -> Option<i32> {
   let raw = std::fs::read_to_string(&pidfile).ok()?;
   raw.trim().parse::<i32>().ok().filter(|p| *p > 0)
 }
-
-// Re-export the symbols downstream callers reach for.
-#[allow(unused_imports)]
-pub use lockfile::AcquireOutcome as LockfileOutcome;
-#[allow(unused_imports)]
-pub use lockfile::Lockfile as DaemonLockfile;
 
 /// Default drain timeout exposed for callers (tests, CLI status command).
 pub const SHUTDOWN_DRAIN_TIMEOUT: Duration = control_plane::DRAIN_TIMEOUT;

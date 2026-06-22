@@ -1,11 +1,11 @@
-//! Pinned single-line download status strip (Unit 6 / R115–R117).
+//! Pinned single-line download status strip.
 //!
 //! Sits between the info row and the body of the dashboard. Renders
 //! one active pull at a time with `<friendly name> <pct%>
 //! <bytes/total> · <throughput>` — additional pulls queue FIFO and
-//! promote when the active one finishes (R115). Errors render as
+//! promote when the active one finishes. Errors render as
 //! a one-line message for a few seconds then dequeue the next
-//! pending pull (R117).
+//! pending pull.
 //!
 //! State lives on `App::download_strip`, not on `HfDialogState`, so
 //! the strip survives the dialog opening / closing while a pull
@@ -23,7 +23,7 @@ use crate::theme::Palette;
 use crate::tui::hf_dialog::PickerRow;
 
 /// How long an `Error` message lingers on the strip before the
-/// next queued pull is promoted (R117). 5 seconds matches the
+/// next queued pull is promoted. 5 seconds matches the
 /// brainstorm's "one-line error in the strip; full diagnostics
 /// flow to logs" guidance.
 pub const ERROR_LINGER: Duration = Duration::from_secs(5);
@@ -46,7 +46,7 @@ pub enum CancelOutcome {
 }
 
 /// A pull queued from the dialog's Confirm action. `friendly_name`
-/// is what the strip shows mid-flight (R115); `repo_id` + `row`
+/// is what the strip shows mid-flight; `repo_id` + `row`
 /// drive the actual `download_repo` call.
 #[derive(Debug, Clone)]
 pub struct QueuedPull {
@@ -90,7 +90,7 @@ pub enum DownloadEvent {
   Error { repo_id: String, message: String },
   /// The file is already in the HF cache. The dialog toasts +
   /// selects the matching catalog row; the strip skips the active
-  /// state and drains the next queued pull immediately (R116).
+  /// state and drains the next queued pull immediately.
   AlreadyCached {
     repo_id: String,
     cached_path: std::path::PathBuf,

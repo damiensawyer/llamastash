@@ -1,5 +1,5 @@
 //! Cross-platform clipboard write helper used by the TUI's yank
-//! commands (R30).
+//! commands.
 //!
 //! Strategy, per the plan:
 //! 1. Native first — `arboard` ships X11/XWayland by default and a

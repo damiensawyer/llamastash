@@ -158,7 +158,7 @@ pub fn daemon_pidfile() -> Option<PathBuf> {
   state_dir().map(|d| d.join("daemon.pid"))
 }
 
-/// Convenience: init-wizard snapshot file path (R67). Sibling of
+/// Convenience: init-wizard snapshot file path. Sibling of
 /// `state.json` under the state dir; written and consumed only by the
 /// init wizard and `llamastash doctor` — the daemon ignores it.
 pub fn init_snapshot_file() -> Option<PathBuf> {

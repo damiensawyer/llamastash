@@ -8,7 +8,7 @@
 //! - minimal `User-Agent` = `llamastash/<CARGO_PKG_VERSION>`,
 //! - no opportunistic `Authorization` header. `GITHUB_TOKEN` /
 //!   `GH_TOKEN` env vars are never read; callers add bearer auth
-//!   explicitly (e.g. Unit 9 for `HF_TOKEN`).
+//!   explicitly (e.g. for `HF_TOKEN`).
 //!
 //! `FetchClient::offline()` returns a stub that fails every call with
 //! `FetchError::Offline`; the wizard's step-resolver consumes that to
@@ -61,7 +61,7 @@ impl From<UrlRefusal> for FetchError {
 /// Build-time inputs for [`FetchClient::new`]. Defaults mirror the
 /// v2 fetch contract; the wizard / snapshot fetcher / GH Releases
 /// installer all construct one of these and inject the result into
-/// `hf-hub` for HF traffic (Unit 9).
+/// `hf-hub` for HF traffic.
 #[derive(Debug, Clone)]
 pub struct FetchClientConfig {
   pub allowlist: HostAllowlist,
@@ -69,11 +69,11 @@ pub struct FetchClientConfig {
   /// rate-limited or wedged endpoint without dragging the wizard.
   pub connect_timeout: Duration,
   /// Total wall-clock per request, including streamed body read.
-  /// Long enough for a few-hundred-megabyte download; Unit 9 sets a
-  /// per-call cap when it knows the expected shard size.
+  /// Long enough for a few-hundred-megabyte download; the HF download
+  /// path sets a per-call cap when it knows the expected shard size.
   pub request_timeout: Duration,
   /// User-Agent header value. Defaults to `llamastash/<version>`;
-  /// Unit 9 may attach a discriminator suffix.
+  /// callers may attach a discriminator suffix.
   pub user_agent: String,
 }
 
@@ -148,9 +148,8 @@ impl FetchClient {
     matches!(self.inner, Mode::Offline)
   }
 
-  /// Expose the underlying `reqwest::Client` so Unit 9 can inject it
-  /// into `hf-hub::HFClientBuilder::client()` (the with-client method
-  /// confirmed in the Unit 1 hf-hub-client-injection spike).
+  /// Expose the underlying `reqwest::Client` so the HF download path
+  /// can inject it into `hf-hub::HFClientBuilder::client()`.
   /// Returns `None` for offline clients; the wizard's HF download
   /// step short-circuits in that case before reaching the injection
   /// point.

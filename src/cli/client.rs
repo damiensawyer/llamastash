@@ -1,5 +1,5 @@
 //! Daemon connection helper shared by every non-interactive
-//! subcommand (Unit 8).
+//! subcommand.
 //!
 //! The CLI's promise is "if the daemon isn't already running, start
 //! it for me — unless `--no-spawn` is set." That keeps casual

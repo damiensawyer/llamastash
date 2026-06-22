@@ -2,7 +2,7 @@
 //!
 //! llama.cpp spawns one supervised child *per model*. Lemonade is different:
 //! one long-lived `lemond` umbrella serves every model behind its API
-//! (R10). This module owns the umbrella's lifecycle — ensuring exactly one
+//! This module owns the umbrella's lifecycle — ensuring exactly one
 //! `lemond` is supervised and ready before any per-model work is delegated
 //! to it.
 //!

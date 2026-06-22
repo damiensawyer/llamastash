@@ -79,6 +79,8 @@ probe_timeout_secs: 120 # Per-launch health-probe deadline.
 
 mouse_focus: false # Opt into mouse capture for click-to-focus / click-to-tab. Default off keeps native terminal text selection.
 
+ascii_glyphs: false # Render the TUI with the 7-bit ASCII glyph fallback (status dots, severity markers, box borders) for fonts that show the Unicode set as tofu. `LLAMASTASH_ASCII=1` wins over this.
+
 proxy: # OpenAI-compat proxy router. See §"Proxy
   enabled: true # (OpenAI-compatible listener)" below for
   ollama_compat:
@@ -192,6 +194,7 @@ The "nav focuses" alias means `List` + `RightPane`; "input focuses" means `ChatI
 | `LLAMASTASH_DEFAULT_LAUNCH_MODE`    | Seed mode for knobs no layer supplied: `auto` (default — delegate to `--fit`) or `inherited` (leave unset, llama-server's own default). Overrides `default_launch_mode` in config. Invalid values are logged and ignored.                                                                                                                                                                                                                       |
 | `LLAMASTASH_FIT_CTX_FLOOR`          | `--fit-ctx` floor in tokens passed to fit-capable `llama-server` (overrides `fit_ctx_floor`). Validated `1..=1048576`; a non-numeric or out-of-range value is logged and the factory `16384` is used.                                                                                                                                                                                                                                          |
 | `LLAMASTASH_STRICT_FIT`             | Set to `"1"` to refuse (rather than degrade) a launch `--fit` could not place as requested. OR-ed with the `strict_fit` config field.                                                                                                                                                                                                                                                                                                          |
+| `LLAMASTASH_ASCII`                  | Render the TUI with the 7-bit ASCII glyph fallback instead of the default Unicode house style (status dots, severity markers, gauge bars, box borders, the logo banner). Truthy values `1` / `true` / `yes` enable it; this **wins over** the `ascii_glyphs` config field. For terminals / fonts that show the Unicode set as tofu. Keyboard-symbol hint labels (`↑ ↓ ⏎ ⇧ ↹`) stay Unicode — they're present in every monospace terminal font.   |
 | `HF_HOME`                           | Honored by `init::download::hf_cache_dir()` per HuggingFace convention; controls where pulled GGUFs land                                                                                                                                                                                                                                                                                                                                        |
 | `NO_COLOR`                          | Any non-empty value disables ANSI styling on every human-readable output (per [no-color.org](https://no-color.org/)). An empty value (`NO_COLOR=`) does **not** disable.                                                                                                                                                                                                                                                                        |
 | `LLAMASTASH_BENCH_DISABLE_DEFAULTS` | **Maintainer / bench-internal.** When set to `"1"`, the launch-knob resolver skips presets, last-used, yaml-arch, and compiled-in arch defaults — only knobs the caller explicitly supplied land on the wire. Used by `scripts/bench/` to make `llamastash start` produce byte-identical argv to raw `llama-server` for fair Suite-A overhead comparison. **Do not set in normal use** — it disables the auto-tuning the launcher exists to do. |
@@ -240,7 +243,7 @@ These work on every subcommand (clap marks them `global`):
 -v, --verbose              Debug logging.
 ```
 
-The colored-output policy OR-es three off-conditions: `--no-colors`, `NO_COLOR` env (non-empty), or non-TTY stdout. Any one silences colors. `--json` output is byte-stable regardless — pin agents against `--json`, not against the human form.
+The colored-output policy OR-es three off-conditions: `--no-colors`, `NO_COLOR` env (non-empty), or non-TTY stdout. Any one silences colors. `--json` output is byte-stable regardless — pin agents against `--json`, not against the human form. `--help` follows the same policy: it shows styled section headers and flags on a TTY and stays plain bytes when piped, `NO_COLOR` is set, or `--no-colors` is passed.
 
 Report-style commands (`list`, `status`, `presets list`, `favorites list`, `last-params`, `daemon status`) render padded + colored tables on a TTY and plain tab-separated rows when piped. The padded form is purely a human affordance; the TSV path stays byte-stable so existing `awk -F\t` / `column -t` pipelines keep working unchanged. Action-style commands (`daemon start/stop`, `start`, `stop`) keep their single-line shape but pick up value-color highlights on launch-id / port / pid / state when colors are enabled.
 
@@ -910,9 +913,9 @@ inheritance is visible at the row level.
 | `←` / `→`                                                 | Settings tab: cycle the focused row's value through its preset list (no-op on other tabs) |
 | `Esc` / `Shift+M`                                         | Return focus to the Models list                                                           |
 | `Shift+L` / `Shift+C` / `Shift+S` / `Shift+E` / `Shift+R` | Jump to Logs / Chat / Settings tab. `L` and `C/E/R` are gated on a running model.         |
-| `s`                                                       | Toggle Logs auto-scroll                                                                   |
+| `s`                                                       | Toggle Logs auto-scroll (toasts `auto-scroll on` / `off`)                                 |
 | `c` (or `y`)                                              | Logs tab: copy the full log buffer to clipboard                                           |
-| `r`                                                       | Chat tab: toggle `<think>` block collapse (reasoning trace)                               |
+| `r`                                                       | Chat tab: toggle `<think>` block collapse (toasts `reasoning shown` / `collapsed`)        |
 | `Ctrl+S`                                                  | Stop the focused running launch (confirmation popup)                                      |
 | `e`                                                       | Enter edit mode on the active tab's input field                                           |
 
@@ -946,8 +949,9 @@ inheritance is visible at the row level.
 ## Toasts
 
 Transient status messages (yank confirmations, "nothing to stop" hints,
-no-op cycle attempts, theme changes) surface as a short toast string in
-the bottom-right of the active panel. Toasts:
+no-op cycle attempts, theme changes, and toggle-state changes such as
+`auto-scroll on/off` or `reasoning shown/collapsed`) surface as a short
+toast string in the bottom-right of the active panel. Toasts:
 
 - auto-clear after ~3 seconds (`TOAST_TTL` in `src/tui/app.rs`);
 - stack one-at-a-time — a newer toast replaces the previous one

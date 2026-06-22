@@ -1,4 +1,4 @@
-//! Generalized model identity at the backend seam (R12).
+//! Generalized model identity at the backend seam.
 //!
 //! [`crate::gguf::identity::ModelId`] is `(canonical path, BLAKE3 of header)`
 //! — it assumes a **local GGUF file**. A managed-multiplexer backend names
@@ -33,7 +33,7 @@ pub struct BackendModelId {
   pub name: String,
 }
 
-/// A model's identity, generalized across backend lifecycle shapes (R12).
+/// A model's identity, generalized across backend lifecycle shapes.
 ///
 /// Serialized `#[serde(untagged)]` so the [`Gguf`](ModelIdentity::Gguf)
 /// variant is wire-identical to today's bare `ModelId`
@@ -42,7 +42,7 @@ pub struct BackendModelId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ModelIdentity {
-  /// A local GGUF file (llama.cpp). Wraps the unchanged Phase 1 identity.
+  /// A local GGUF file (llama.cpp). Wraps the existing `ModelId` identity.
   /// Declared first so an ambiguous-free legacy `{path, header_blake3}`
   /// object matches here during untagged deserialization.
   Gguf(ModelId),
@@ -115,8 +115,8 @@ mod tests {
 
   #[test]
   fn legacy_state_json_row_deserializes_into_gguf() {
-    // A pre-Phase-2 state.json row (bare ModelId object). Must land in the
-    // Gguf variant unchanged — the backward-compat guarantee for Phase 2b.
+    // A bare ModelId state.json row. Must land in the Gguf variant
+    // unchanged — the backward-compat guarantee when a second backend lands.
     let legacy = serde_json::json!({
       "path": "/models/qwen.gguf",
       "header_blake3": "a".repeat(64),

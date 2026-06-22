@@ -1,6 +1,6 @@
 //! llama.cpp reference implementation of the [`Backend`] contract.
 //!
-//! Phase 1's sole backend. Every method **delegates** to the existing
+//! Currently the sole backend. Every method **delegates** to the existing
 //! launch surface rather than reimplementing it, so the wire behavior is
 //! provably unchanged:
 //!

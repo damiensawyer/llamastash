@@ -1,11 +1,11 @@
-//! `llamastash init` orchestration (R48 / R49 / R50 / R72 / R76 / R77).
+//! `llamastash init` orchestration.
 //!
 //! Six-step flow:
 //!   1. detect (hardware + binary) — always runs.
 //!   2. install — `--only` / `--skip` gated.
 //!   3. model recommend + download — `--only` / `--skip` gated.
 //!   4. config write — `--only` / `--skip` gated.
-//!   5. smoke launch — `--only` / `--skip` gated (Unit 12 owns the body).
+//!   5. smoke launch — `--only` / `--skip` gated.
 //!   6. handoff — always runs.
 //!
 //! `--recommended` (or the hidden `--yes` alias) short-circuits every
@@ -104,7 +104,7 @@ pub const INIT_JSON_SCHEMA_VERSION: u32 = 1;
 /// contract.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct InitSummary {
-  /// Schema version. Currently `1` (R77). Agents should compare
+  /// Schema version. Currently `1`. Agents should compare
   /// against `INIT_JSON_SCHEMA_VERSION` they were built against.
   pub schema_version: u32,
   /// Document-level safe-to-log classification. See struct doc.
@@ -265,7 +265,7 @@ pub async fn run(args: InitArgs, cli: &Cli, config: &Config) -> CliResult {
   // step 3 (models) has no offline fallback, and a mid-step abort with
   // `INIT_DOWNLOAD_FAILED` would mis-classify the failure for agent
   // consumers (which is "init aborted before substantive work", not
-  // "network op failed during the run"). Plan Unit 10 test scenario.
+  // "network op failed during the run").
   if args.offline && plan.models && !plan.server && !plan.config {
     return Err(CliExit::new(
       INIT_ABORTED,
@@ -433,7 +433,7 @@ pub async fn run(args: InitArgs, cli: &Cli, config: &Config) -> CliResult {
     log::warn!("init: failed to persist init_snapshot.json: {e}");
   }
 
-  // Step 6: smoke launch (Unit 12). Phase 1 + --version probe runs
+  // Step 6: smoke launch. The dry-run + --version probe runs
   // whenever both an install and a downloaded model are present;
   // otherwise we emit an honest "skipped" note.
   let smoke = run_smoke_step(
@@ -454,7 +454,7 @@ pub async fn run(args: InitArgs, cli: &Cli, config: &Config) -> CliResult {
   summary.steps_ran.push("handoff");
   print_handoff(&summary, args.json);
 
-  // R78: smoke failures map to INIT_SMOKE_FAILED (74) so agents can
+  // smoke failures map to INIT_SMOKE_FAILED (74) so agents can
   // branch on the exit code without parsing the JSON. The earlier
   // steps (install / download / config) already succeeded if we
   // reached this point — re-running smoke alone is the right
@@ -982,8 +982,8 @@ impl crate::init::download::DownloadProgress for WizardDownloadProgress {
   fn on_file_started(&self, filename: &str, size: u64, index: usize, total: usize) {
     let label = format!("Downloading {}/{} `{filename}`", index + 1, total);
     let sp = prompts::StepProgress::start(label.clone());
-    *self.spinner.lock().unwrap() = Some(sp);
-    *self.file_progress.lock().unwrap() = Some(WizardFileProgress {
+    *self.spinner.lock().unwrap_or_else(|e| e.into_inner()) = Some(sp);
+    *self.file_progress.lock().unwrap_or_else(|e| e.into_inner()) = Some(WizardFileProgress {
       label,
       file_size: size,
       bytes_in_file: 0,
@@ -993,15 +993,20 @@ impl crate::init::download::DownloadProgress for WizardDownloadProgress {
   }
 
   fn on_file_finished(&self, filename: &str, index: usize, total: usize) {
-    *self.file_progress.lock().unwrap() = None;
-    if let Some(sp) = self.spinner.lock().unwrap().take() {
+    *self.file_progress.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    if let Some(sp) = self
+      .spinner
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .take()
+    {
       sp.success(format!("Downloaded {}/{} `{filename}`", index + 1, total));
     }
   }
 
   fn on_bytes_progress(&self, _filename: &str, bytes_in_file: u64) {
     let msg = {
-      let mut pg = self.file_progress.lock().unwrap();
+      let mut pg = self.file_progress.lock().unwrap_or_else(|e| e.into_inner());
       let Some(state) = pg.as_mut() else { return };
       let now = std::time::Instant::now();
       let elapsed = now
@@ -1019,7 +1024,12 @@ impl crate::init::download::DownloadProgress for WizardDownloadProgress {
       let speed = crate::tui::fmt::format_bytes(state.throughput_bps as u64);
       format!("{} · {pair} · {pct}% · {speed}/s", state.label)
     };
-    if let Some(sp) = self.spinner.lock().unwrap().as_ref() {
+    if let Some(sp) = self
+      .spinner
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .as_ref()
+    {
       sp.update(msg);
     }
   }
@@ -1028,11 +1038,21 @@ impl crate::init::download::DownloadProgress for WizardDownloadProgress {
     // Reset EMA timing so the throughput measurement restarts cleanly
     // from the resumed byte offset — the old instant_bps spike would
     // otherwise skew the first post-retry reading.
-    if let Some(state) = self.file_progress.lock().unwrap().as_mut() {
+    if let Some(state) = self
+      .file_progress
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .as_mut()
+    {
       state.throughput_bps = 0.0;
       state.last_at = std::time::Instant::now();
     }
-    if let Some(sp) = self.spinner.lock().unwrap().as_ref() {
+    if let Some(sp) = self
+      .spinner
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .as_ref()
+    {
       sp.update(format!(
         "Connection error — retrying ({attempt}/{})…",
         crate::init::download::MAX_DOWNLOAD_ATTEMPTS - 1
@@ -1436,7 +1456,7 @@ fn persist_init_snapshot(
   // Update the remote-snapshot failure counter: reset to 0 on a
   // verified fresh fetch, increment on a verified failure, leave
   // alone when no attempt was made (offline mode / models step
-  // skipped). doctor's `RemoteSnapshotUnreachable` (R74) reads
+  // skipped). doctor's `RemoteSnapshotUnreachable` reads
   // this counter once it crosses its threshold.
   match summary.remote_snapshot_attempt {
     Some(true) => snap.remote_fetch_failures = 0,

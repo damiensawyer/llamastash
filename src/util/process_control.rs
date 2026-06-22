@@ -1,10 +1,10 @@
 //! Cross-platform process-supervision primitives.
 //!
-//! Phase B of the Windows+HTTP-IPC plan extracts the platform-specific
-//! parts of process supervision (process-group setup, signal delivery,
-//! liveness probing) behind a [`ProcessControl`] trait. The Unix
-//! backend wraps `setsid()` + `kill(-pgid, SIG)`; Unit 6 of the plan
-//! plugs in a Windows backend backed by Job Objects.
+//! The platform-specific parts of process supervision (process-group
+//! setup, signal delivery, liveness probing) sit behind a
+//! [`ProcessControl`] trait. The Unix backend wraps `setsid()` +
+//! `kill(-pgid, SIG)`; a future Windows backend plugs in here backed by
+//! Job Objects.
 //!
 //! Two distinct call shapes converge here:
 //!
@@ -56,10 +56,10 @@ impl SignalTarget {
 /// `tokio::process::Child` plus any platform-specific state the
 /// signaling path needs.
 ///
-/// Unit 6 will widen this struct with a `cfg(windows)` JobObject
-/// handle; today on Unix the struct is a transparent wrapper over
-/// `Child`. The indirection exists so adding Windows state in Phase
-/// C doesn't churn every supervisor call site.
+/// A future Windows backend will widen this struct with a
+/// `cfg(windows)` JobObject handle; today on Unix the struct is a
+/// transparent wrapper over `Child`. The indirection exists so adding
+/// Windows state doesn't churn every supervisor call site.
 pub struct SpawnedChild {
   /// The child process. The supervisor takes `.child` by value to
   /// install it under its own `Mutex<Option<Child>>` — there's no
@@ -239,7 +239,7 @@ fn kill_target(target: SignalTarget, sig: libc::c_int) {
 }
 
 // ---------------------------------------------------------------------
-// Windows backend (Unit 6 of the Windows+HTTP-IPC plan)
+// Windows backend
 // ---------------------------------------------------------------------
 
 /// Windows implementation. One Job Object per supervised spawn, with

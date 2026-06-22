@@ -2,7 +2,7 @@
 //!
 //! `lemond` is a long-lived umbrella process exposing an OpenAI-compatible
 //! HTTP API; llamastash supervises the one process and delegates per-model
-//! start / list to its API (R10). This module holds the typed API
+//! start / list to its API. This module holds the typed API
 //! [`client`], the [`Backend`](crate::backend::Backend) implementation
 //! ([`backend`]), and the umbrella lifecycle ([`orchestrate`]).
 

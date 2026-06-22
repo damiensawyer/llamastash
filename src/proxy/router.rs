@@ -36,14 +36,14 @@ use super::ollama_compat::{
   TagsResponse, VersionResponse, FAR_FUTURE_EXPIRY, UNKNOWN_MTIME,
 };
 use super::openai::{ErrorObject, ErrorResponse, ModelList, ModelObject};
-use super::route::{self, BodyError as RouteBodyError, RouteDecision};
+use super::route::{self, RouteDecision};
 use super::state::ProxyState;
-use crate::cli::resolve::{resolve_model_with_candidates, CatalogRow, ResolveError};
 use crate::daemon::supervisor::ManagedState;
 use crate::discovery::DiscoveredModel;
 use crate::gguf::metadata::{ModeHint, ModelMetadata};
+use crate::launch::resolve::{resolve_model_with_candidates, CatalogRow, ResolveError};
 
-/// The error type our `BoxBody` carries. Unit 3 streams upstream
+/// The error type our `BoxBody` carries. Forwarding streams upstream
 /// `reqwest::Response::bytes_stream()` chunks through `StreamBody`,
 /// so the body alias must accept *some* error type at frame time.
 /// Boxed dyn errors are the most flexible choice — non-streaming
@@ -158,29 +158,14 @@ fn text_response(status: StatusCode, body: &'static str) -> Response<BoxBody<Byt
     .expect("static text response must build")
 }
 
-/// Unit 3 pipeline: buffer the body under the 2 MiB cap, extract
+/// Forwarding pipeline: buffer the body under the 2 MiB cap, extract
 /// `body.model`, run the resolver, pick a Ready supervisor, forward.
 async fn forward_request(state: Arc<ProxyState>, req: Request<Incoming>) -> ProxyResponse {
   let (method, uri, headers, body) = forward::deconstruct(req);
 
   let parsed = match route::buffer_and_extract(body).await {
     Ok(p) => p,
-    Err(RouteBodyError::TooLarge) => {
-      return error_response(
-        StatusCode::PAYLOAD_TOO_LARGE,
-        "payload_too_large",
-        &format!(
-          "request body exceeds the {} MiB limit",
-          route::BODY_LIMIT_BYTES / (1024 * 1024)
-        ),
-      );
-    }
-    Err(RouteBodyError::Malformed { message }) => {
-      return error_response(StatusCode::BAD_REQUEST, "invalid_request", &message);
-    }
-    Err(RouteBodyError::Read { message }) => {
-      return error_response(StatusCode::BAD_REQUEST, "invalid_request", &message);
-    }
+    Err(e) => return route::body_error_response(e),
   };
 
   let decision = route::decide(&state, parsed.model).await;
@@ -340,11 +325,11 @@ async fn list_models(state: Arc<ProxyState>) -> ProxyResponse {
 /// model identifier appears in every surface.
 ///
 /// Note: `CatalogRow::name()` falls back to `path.file_name()`
-/// (basename *with* extension) rather than the file stem. The plan
-/// explicitly calls for the stem here so the OpenAI `id` reads
-/// cleanly (`qwen2.5-coder` rather than `qwen2.5-coder.gguf`). The
-/// resolver's substring matching (used in Unit 3) is tolerant to
-/// either form, so this divergence is intentional and bounded.
+/// (basename *with* extension) rather than the file stem. We use the
+/// stem here so the OpenAI `id` reads cleanly (`qwen2.5-coder` rather
+/// than `qwen2.5-coder.gguf`). The resolver's substring matching is
+/// tolerant to either form, so this divergence is intentional and
+/// bounded.
 fn model_id_for(m: &DiscoveredModel) -> String {
   if let Some(label) = &m.display_label {
     return label.clone();
@@ -386,16 +371,16 @@ fn ollama_version() -> ProxyResponse {
 async fn ollama_ps(state: Arc<ProxyState>) -> ProxyResponse {
   let sup_snap = state.ctx.supervisors.snapshot().await;
   let cat_snap = state.ctx.catalog.snapshot().await;
-  // Index the catalog by canonical path so each Ready supervisor can
-  // look up its metadata without re-walking the catalog. Same shape as
-  // route::collect_fallback_candidates.
-  let mut by_path: std::collections::HashMap<String, &DiscoveredModel> =
-    std::collections::HashMap::with_capacity(cat_snap.len());
-  for m in cat_snap.iter() {
-    by_path.insert(m.path.to_string_lossy().into_owned(), m);
-  }
+  let by_path = route::index_catalog_by_path(&cat_snap);
+  let umbrella_id = crate::backend::lemonade::umbrella_launch_id();
   let mut models: Vec<PsModel> = Vec::new();
-  for (_launch_id, sup) in sup_snap.into_iter() {
+  for (launch_id, sup) in sup_snap.into_iter() {
+    // The Lemonade umbrella is a multiplexer process, not a servable
+    // model — exclude it from /api/ps just as the fallback and /ui
+    // walkers do.
+    if launch_id == umbrella_id {
+      continue;
+    }
     if !matches!(sup.state().await, ManagedState::Ready) {
       continue;
     }
@@ -443,19 +428,7 @@ async fn ollama_show(state: Arc<ProxyState>, req: Request<Incoming>) -> ProxyRes
   let (_method, _uri, _headers, body) = forward::deconstruct(req);
   let parsed = match route::buffer_and_extract(body).await {
     Ok(p) => p,
-    Err(RouteBodyError::TooLarge) => {
-      return error_response(
-        StatusCode::PAYLOAD_TOO_LARGE,
-        "payload_too_large",
-        &format!(
-          "request body exceeds the {} MiB limit",
-          route::BODY_LIMIT_BYTES / (1024 * 1024)
-        ),
-      );
-    }
-    Err(RouteBodyError::Malformed { message }) | Err(RouteBodyError::Read { message }) => {
-      return error_response(StatusCode::BAD_REQUEST, "invalid_request", &message);
-    }
+    Err(e) => return route::body_error_response(e),
   };
   // Re-parse the body bytes into the Ollama-shape ShowRequest. The
   // proxy's `JustModel` peek picked out `body.model`; for /api/show we
@@ -495,7 +468,7 @@ async fn ollama_show(state: Arc<ProxyState>, req: Request<Incoming>) -> ProxyRes
   let snap = state.ctx.catalog.snapshot().await;
   let rows: Vec<CatalogRow> = snap
     .iter()
-    .map(catalog_row_for_resolver)
+    .map(route::catalog_row_from_discovered)
     .collect::<Vec<_>>();
   match resolve_model_with_candidates(&rows, &reference) {
     Ok(resolved) => {
@@ -589,58 +562,6 @@ fn ollama_tag_from_discovered(m: &DiscoveredModel) -> TagModel {
     size,
     digest,
     details: ollama_details_from_metadata(m.metadata.as_ref()),
-  }
-}
-
-/// Project a [`DiscoveredModel`] onto the `CatalogRow` shape the
-/// resolver expects. Inline equivalent of
-/// `proxy::route::catalog_row_from_discovered`; kept private here so
-/// the show handler doesn't depend on the route module's internals.
-fn catalog_row_for_resolver(m: &DiscoveredModel) -> CatalogRow {
-  let path = m.path.to_string_lossy().into_owned();
-  let parent = m.parent.to_string_lossy().into_owned();
-  let arch = m.metadata.as_ref().and_then(|md| md.arch.clone());
-  let quant = m.metadata.as_ref().map(|md| md.quant.label().to_string());
-  let native_ctx = m.metadata.as_ref().and_then(|md| md.native_ctx);
-  let parameter_label = m
-    .metadata
-    .as_ref()
-    .and_then(|md| md.parameter_label.clone());
-  let weights_bytes = m.metadata.as_ref().and_then(|md| md.weights_bytes);
-  let has_chat_template = m
-    .metadata
-    .as_ref()
-    .map(|md| md.chat_template.is_some())
-    .unwrap_or(false);
-  let has_reasoning_hint = m
-    .metadata
-    .as_ref()
-    .map(|md| md.reasoning_hint)
-    .unwrap_or(false);
-  let tokenizer_kind = m.metadata.as_ref().and_then(|md| md.tokenizer_kind.clone());
-  let total_parameters = m.metadata.as_ref().and_then(|md| md.total_parameters);
-  CatalogRow {
-    path,
-    model_id: None,
-    parent,
-    source: m.source.label().to_string(),
-    arch,
-    quant,
-    native_ctx,
-    mode_hint: None,
-    parameter_label,
-    weights_bytes,
-    display_label: m.display_label.clone(),
-    parse_error: m.parse_error.clone(),
-    split_siblings: m
-      .split_siblings
-      .iter()
-      .map(|p| p.to_string_lossy().into_owned())
-      .collect(),
-    has_chat_template,
-    has_reasoning_hint,
-    tokenizer_kind,
-    total_parameters,
   }
 }
 
@@ -757,8 +678,8 @@ fn unauthorized_body() -> Vec<u8> {
 }
 
 /// Build an OpenAI-shaped error response from a `(status, type,
-/// message)` triple. Centralised so the 404 / Unit 3
-/// `model_not_running` arms all emit the same
+/// message)` triple. Centralised so the 404 / `model_not_running`
+/// arms all emit the same
 /// `{"error":{"type":..., "message":...}}` envelope.
 pub(crate) fn error_response(status: StatusCode, r#type: &str, message: &str) -> ProxyResponse {
   let body = ErrorResponse {
@@ -805,7 +726,10 @@ where
   Ok(json_response(status, bytes))
 }
 
-fn json_response(status: StatusCode, body: Vec<u8>) -> Response<BoxBody<Bytes, BodyError>> {
+pub(crate) fn json_response(
+  status: StatusCode,
+  body: Vec<u8>,
+) -> Response<BoxBody<Bytes, BodyError>> {
   let body = full_body(Bytes::from(body));
   Response::builder()
     .status(status)
@@ -821,4 +745,65 @@ fn json_response(status: StatusCode, body: Vec<u8>) -> Response<BoxBody<Bytes, B
 /// body alias.
 fn full_body(bytes: Bytes) -> BoxBody<Bytes, BodyError> {
   Full::new(bytes).map_err(|never| match never {}).boxed()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::discovery::{DiscoveredModel, ModelSource};
+  use crate::gguf::metadata::{ModeHint, ModelMetadata, Quant};
+
+  fn discovered_with_mode(mode: ModeHint) -> DiscoveredModel {
+    DiscoveredModel {
+      path: std::path::PathBuf::from("/tmp/fake.gguf"),
+      parent: std::path::PathBuf::from("/tmp"),
+      source: ModelSource::HuggingFace,
+      display_label: None,
+      multimodal: None,
+      parse_error: None,
+      split_siblings: vec![],
+      metadata: Some(ModelMetadata {
+        arch: Some("llama".into()),
+        quant: Quant::Q4_K,
+        native_ctx: Some(4096),
+        parameter_label: Some("7B".into()),
+        weights_bytes: Some(100),
+        chat_template: None,
+        tokenizer_kind: Some("llama".into()),
+        total_parameters: Some(7_000_000_000),
+        reasoning_hint: false,
+        mode_hint: mode,
+      }),
+    }
+  }
+
+  #[test]
+  fn capabilities_for_maps_each_mode_hint() {
+    // Ollama-shape capabilities derived from the GGUF mode hint. Chat →
+    // completion, embedding/rerank pass through verbatim.
+    assert_eq!(
+      capabilities_for(Some(&discovered_with_mode(ModeHint::Chat))),
+      vec!["completion"]
+    );
+    assert_eq!(
+      capabilities_for(Some(&discovered_with_mode(ModeHint::Embedding))),
+      vec!["embedding"]
+    );
+    assert_eq!(
+      capabilities_for(Some(&discovered_with_mode(ModeHint::Rerank))),
+      vec!["rerank"]
+    );
+  }
+
+  #[test]
+  fn capabilities_for_is_empty_without_hint() {
+    // Unknown mode and a `None` discovery row (or one with no metadata)
+    // both produce an empty capability list — the catalog has no signal.
+    assert!(capabilities_for(Some(&discovered_with_mode(ModeHint::Unknown))).is_empty());
+    assert!(capabilities_for(None).is_empty());
+
+    let mut no_meta = discovered_with_mode(ModeHint::Chat);
+    no_meta.metadata = None;
+    assert!(capabilities_for(Some(&no_meta)).is_empty());
+  }
 }
