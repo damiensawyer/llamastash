@@ -27,4 +27,4 @@
 │                                                                            ││                                        │
 │                                                                            ││                                        │
 │                                                                            ││                                        │
-└ ◌ launching · ◐ loading · ● ready · ▲ error · ○ stopped · ⇪ external ──────┘└ s:auto-scroll · c:copy · ↑↓:scroll ────┘
+└ ◌ launching · ◐ loading · ● ready · ▲ error · ○ stopped · ⇪ external ──────┘└ s:auto-scroll · c:copy ────────────────┘
