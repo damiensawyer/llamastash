@@ -295,6 +295,10 @@ fn seeded_hf_search_app() -> App {
 fn seeded_hf_files_app() -> App {
   let mut app = seeded_dashboard_app();
   let mut state = HfDialogState::open(false, HardwareFitContext::default());
+  // The query that drilled into this repo persists (resting, not
+  // editing) — otherwise the search line shows the empty-edit
+  // placeholder, which misreads as an active search.
+  state.input = InputField::with_text("qwen");
   state.stage = HfStage::FilePicker;
   state.picker_repo_id = Some("Qwen/Qwen3-7B-GGUF".into());
   state.picker_load = PickerLoad::Ready;
@@ -316,6 +320,8 @@ fn seeded_hf_files_app() -> App {
 fn seeded_hf_confirm_app() -> App {
   let mut app = seeded_dashboard_app();
   let mut state = HfDialogState::open(false, HardwareFitContext::default());
+  // Carry the resting query through, same as the File picker fixture.
+  state.input = InputField::with_text("qwen");
   state.stage = HfStage::Confirm;
   state.picker_repo_id = Some("Qwen/Qwen3-7B-GGUF".into());
   state.confirm_row = Some(PickerRow::Single {
