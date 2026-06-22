@@ -875,6 +875,11 @@ mod tests {
   }
 
   #[test]
+  // Poisoning a Mutex requires unwinding through the guard's Drop. Under
+  // `panic=abort` (the nightly coverage lane) the worker panic aborts the
+  // process instead, and the poison-recovery path this guards is itself
+  // unreachable. Skip rather than abort the run.
+  #[cfg_attr(panic = "abort", ignore = "mutex poisoning needs unwinding")]
   fn poisoned_strip_progress_lock_degrades_instead_of_panicking() {
     use crate::init::download::DownloadProgress;
     use crate::tui::events::Event;
