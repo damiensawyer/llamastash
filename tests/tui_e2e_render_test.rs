@@ -17,11 +17,17 @@ use std::path::PathBuf;
 use llamastash::daemon::host_metrics::HostMetricsSnapshot;
 use llamastash::discovery::{DiscoveredModel, ModelSource};
 use llamastash::gguf::metadata::{ModeHint, ModelMetadata, Quant};
+use llamastash::init::hf_api::{HfGgufMeta, HfSearchResult};
 use llamastash::theme::ThemeName;
 use llamastash::tui::app::{App, AppOptions, DaemonInfo, ManagedRow};
-use llamastash::tui::keybindings::KeyMap;
+use llamastash::tui::hf_dialog::{
+  HardwareFitContext, HfDialogState, HfStage, PickerLoad, PickerRow,
+};
+use llamastash::tui::input_field::InputField;
+use llamastash::tui::keybindings::{Focus, KeyMap};
 use llamastash::tui::render::render;
 use llamastash::tui::status_icons::SurfaceState;
+use llamastash::tui::tabs::RightTab;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -152,22 +158,15 @@ fn render_to_lines(app: &mut App) -> Vec<String> {
 // keep the test stable across version bumps and hint-strip tweaks.
 const SKIP_ROWS: &[usize] = &[0];
 
-// The golden fixture is captured on Linux and pins the PC-style key
-// glyphs (`Ctrl+s`, `↹`, `⇧↹`). On macOS the renderer emits the native
-// Apple glyphs (`⌃s`, `⇥`, `⇧⇥`) with different display widths, so the
-// title chips reflow and the trailing `─` padding diverges. The
-// structural `dashboard_render_carries_key_landmarks` test runs on
-// every platform and covers the invariants the golden was guarding;
-// only this character-exact compare is platform-specific.
-#[cfg_attr(target_os = "macos", ignore = "fixture uses Linux key glyphs")]
-#[test]
-fn dashboard_golden_render_matches_fixture() {
-  let mut app = seeded_dashboard_app();
-  let lines = render_to_lines(&mut app);
-  let rendered = lines.join("\n") + "\n";
-
+/// Render `app`, then compare it line-by-line against the golden at
+/// `rel_path` (or rewrite the fixture when `UPDATE_GOLDEN=1`). Row 0
+/// (`SKIP_ROWS`) is excluded — it carries the live `CARGO_PKG_VERSION`
+/// and the platform-specific key glyphs, both of which churn
+/// independently of the structural layout these goldens defend.
+fn assert_golden(app: &mut App, rel_path: &str) {
+  let rendered = render_to_lines(app).join("\n") + "\n";
   let manifest = env!("CARGO_MANIFEST_DIR");
-  let fixture_path = std::path::Path::new(manifest).join(GOLDEN_PATH);
+  let fixture_path = std::path::Path::new(manifest).join(rel_path);
 
   if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
     if let Some(parent) = fixture_path.parent() {
@@ -192,7 +191,7 @@ fn dashboard_golden_render_matches_fixture() {
   assert_eq!(
     actual_lines.len(),
     expected_lines.len(),
-    "row count diverged: actual={} expected={}\n--- actual ---\n{}\n--- expected ---\n{}",
+    "row count diverged for {rel_path}: actual={} expected={}\n--- actual ---\n{}\n--- expected ---\n{}",
     actual_lines.len(),
     expected_lines.len(),
     rendered,
@@ -204,9 +203,154 @@ fn dashboard_golden_render_matches_fixture() {
     }
     assert_eq!(
       a, e,
-      "row {i} diverged\n  actual:   {a:?}\n  expected: {e:?}\nFull frame:\n{rendered}"
+      "row {i} diverged in {rel_path}\n  actual:   {a:?}\n  expected: {e:?}\nFull frame:\n{rendered}"
     );
   }
+}
+
+// Every golden below is captured on Linux and pins the PC-style key
+// glyphs (`Ctrl+s`, `↹`, `⇧↹`, `⏎`). On macOS the renderer emits the
+// native Apple glyphs with different display widths, so chips reflow
+// and trailing `─` padding diverges. The structural sibling tests run
+// on every platform; only the character-exact compares are skipped on
+// macOS.
+#[cfg_attr(target_os = "macos", ignore = "fixture uses Linux key glyphs")]
+#[test]
+fn dashboard_golden_render_matches_fixture() {
+  assert_golden(&mut seeded_dashboard_app(), GOLDEN_PATH);
+}
+
+#[cfg_attr(target_os = "macos", ignore = "fixture uses Linux key glyphs")]
+#[test]
+fn hf_search_golden_render_matches_fixture() {
+  assert_golden(&mut seeded_hf_search_app(), "tests/golden/hf-search.txt");
+}
+
+#[cfg_attr(target_os = "macos", ignore = "fixture uses Linux key glyphs")]
+#[test]
+fn hf_files_golden_render_matches_fixture() {
+  assert_golden(&mut seeded_hf_files_app(), "tests/golden/hf-files.txt");
+}
+
+#[cfg_attr(target_os = "macos", ignore = "fixture uses Linux key glyphs")]
+#[test]
+fn hf_confirm_golden_render_matches_fixture() {
+  assert_golden(&mut seeded_hf_confirm_app(), "tests/golden/hf-confirm.txt");
+}
+
+#[cfg_attr(target_os = "macos", ignore = "fixture uses Linux key glyphs")]
+#[test]
+fn logs_view_golden_render_matches_fixture() {
+  assert_golden(&mut seeded_logs_view_app(), "tests/golden/logs-view.txt");
+}
+
+#[cfg_attr(target_os = "macos", ignore = "fixture uses Linux key glyphs")]
+#[test]
+fn chat_view_golden_render_matches_fixture() {
+  assert_golden(&mut seeded_chat_view_app(), "tests/golden/chat-view.txt");
+}
+
+/// A search result with deterministic counts/sizes so the rendered
+/// `downloads` / `params` / `size` columns are stable.
+fn fake_hf_result(repo_id: &str, downloads: u64, file_size: u64, params: u64) -> HfSearchResult {
+  HfSearchResult {
+    repo_id: repo_id.into(),
+    downloads: Some(downloads),
+    likes: Some(128),
+    last_modified: Some("2026-04-18T12:00:00Z".into()),
+    pipeline_tag: Some("text-generation".into()),
+    tags: vec!["gguf".into()],
+    gguf: Some(HfGgufMeta {
+      total: Some(params),
+      total_file_size: Some(file_size),
+    }),
+  }
+}
+
+/// Dashboard + HF dialog parked on the Search stage with a query and
+/// two result rows.
+fn seeded_hf_search_app() -> App {
+  let mut app = seeded_dashboard_app();
+  let mut state = HfDialogState::open(false, HardwareFitContext::default());
+  state.input = InputField::with_text("qwen");
+  state.results = vec![
+    fake_hf_result(
+      "Qwen/Qwen3-7B-GGUF",
+      1_234_567,
+      5_732_991_008,
+      7_600_000_000,
+    ),
+    fake_hf_result(
+      "bartowski/Qwen3-4B-GGUF",
+      987_654,
+      2_900_000_000,
+      4_000_000_000,
+    ),
+  ];
+  app.hf_dialog = Some(state);
+  app
+}
+
+/// HF dialog on the File picker stage with two collapsed quant rows.
+fn seeded_hf_files_app() -> App {
+  let mut app = seeded_dashboard_app();
+  let mut state = HfDialogState::open(false, HardwareFitContext::default());
+  state.stage = HfStage::FilePicker;
+  state.picker_repo_id = Some("Qwen/Qwen3-7B-GGUF".into());
+  state.picker_load = PickerLoad::Ready;
+  state.picker_rows = vec![
+    PickerRow::Single {
+      filename: "qwen3-7b-q4_k_m.gguf".into(),
+      size_bytes: Some(4_500_000_000),
+    },
+    PickerRow::Single {
+      filename: "qwen3-7b-q8_0.gguf".into(),
+      size_bytes: Some(8_000_000_000),
+    },
+  ];
+  app.hf_dialog = Some(state);
+  app
+}
+
+/// HF dialog on the Confirm stage with a chosen file.
+fn seeded_hf_confirm_app() -> App {
+  let mut app = seeded_dashboard_app();
+  let mut state = HfDialogState::open(false, HardwareFitContext::default());
+  state.stage = HfStage::Confirm;
+  state.picker_repo_id = Some("Qwen/Qwen3-7B-GGUF".into());
+  state.confirm_row = Some(PickerRow::Single {
+    filename: "qwen3-7b-q4_k_m.gguf".into(),
+    size_bytes: Some(4_500_000_000),
+  });
+  app.hf_dialog = Some(state);
+  app
+}
+
+/// Dashboard with the right pane focused on the Logs tab of the
+/// running launch, with a few log lines.
+fn seeded_logs_view_app() -> App {
+  let mut app = seeded_dashboard_app();
+  app.focus = Focus::RightPane;
+  app.right_tab = RightTab::Logs;
+  app.logs_state.lines = vec![
+    "llama_model_loader: loaded meta data with 26 key-value pairs".into(),
+    "load_tensors: offloading 28 repeating layers to GPU".into(),
+    "main: server listening on 127.0.0.1:41100".into(),
+    "srv  update_slots: all slots are idle".into(),
+  ];
+  app
+}
+
+/// Dashboard with the right pane focused on the Chat tab, with a
+/// prompt and a response.
+fn seeded_chat_view_app() -> App {
+  let mut app = seeded_dashboard_app();
+  app.focus = Focus::RightPane;
+  app.right_tab = RightTab::Chat;
+  app.chat.prompt = InputField::with_text("Explain GGUF in one sentence");
+  app.chat.response =
+    "GGUF is a single-file container for quantized model weights plus metadata.".into();
+  app
 }
 
 #[test]

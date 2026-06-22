@@ -13,18 +13,18 @@
 │★ Favorites                                                                 ││                                        │
 │ ★ mistral-7b                                llama    Q4_K    8.0k    4.0G  ││ ID:L1  :41100  ● ready  4.2G RAM · 312 │
 │────────────────────────────────────────────────────────────────────────────││ ────────────────────────────────────── │
-│m/x                                                                         ││ Running launch                         │
-│ ★ mistral-7b                                llama    Q4_K    8.0k    4.0G  ││   launch          L1                   │
-│m/y                                                                         ││   ── Context                           │
-│   phi-3                                     phi      Q4_K    8.0k    3.9G  ││   ctx             inherited            │
-│                                                                            ││   reasoning       inherited            │
-│                                                                            ││   ── GPU / CPU offload                 │
-│                                                                            ││   n_gpu_layers    inherited            │
-│                                                                            ││   n_cpu_moe       inherited            │
-│                                                                            ││   ── Attention & KV cache              │
-│                                                                            ││   flash_attn      inherited            │
-│                                                                            ││   cache_type_k    inherited            │
-│                                                                            ││   cache_type_v    inherited            │
-│                                                                            ││   ── Throughput                        │
-│                                                                            ││   threads         inherited            │
-└ ◌ launching · ◐ loading · ● ready · ▲ error · ○ stopped · ⇪ external ──────┘└ e:edit for launch · s:stop · p:path ───┘
+│m/x                                                                         ││ ┌ Prompt ────────────────────────────┐ │
+│ ★ mistral-7b                                llama    Q4_K    8.0k    4.0G  ││ │Explain GGUF in one sentence        │ │
+│m/y                                                                         ││ └────────────────────────────────────┘ │
+│   phi-3                                     phi      Q4_K    8.0k    3.9G  ││ GGUF is a single-file container for    │
+│                                                                            ││ quantized model weights plus metadata. │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+└ ◌ launching · ◐ loading · ● ready · ▲ error · ○ stopped · ⇪ external ──────┘└ e:edit · r:think · ↑↓:scroll ──────────┘
