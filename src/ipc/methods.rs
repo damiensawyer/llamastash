@@ -659,7 +659,7 @@ async fn model_key_and_effective(
     ),
   };
   let store = ctx.presets.snapshot().await;
-  let eff = effective_presets(&path_str, arch.as_deref(), &store, &rows);
+  let eff = effective_presets(&key, &path_str, arch.as_deref(), &store, &rows);
   (key, eff)
 }
 
@@ -839,11 +839,12 @@ pub(crate) fn preset_hint(
   rows: &[CatalogRow],
   store: &std::collections::BTreeMap<String, crate::config::ConfigPresetBlock>,
 ) -> (u32, Option<String>) {
-  let arch = rows
-    .iter()
-    .find(|r| r.path == model_path)
-    .and_then(|r| r.arch.clone());
-  let eff = effective_presets(model_path, arch.as_deref(), store, rows);
+  let row = rows.iter().find(|r| r.path == model_path);
+  let name = row
+    .map(|r| r.name())
+    .unwrap_or_else(|| path_basename(std::path::Path::new(model_path)));
+  let arch = row.and_then(|r| r.arch.clone());
+  let eff = effective_presets(&name, model_path, arch.as_deref(), store, rows);
   (eff.presets.len() as u32, eff.default)
 }
 

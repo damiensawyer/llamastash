@@ -191,9 +191,18 @@ pub struct EffectivePresets {
 
 /// Resolve a model's effective preset set from the config store: the union
 /// of its per-model entries and its arch entries, with per-model winning
-/// on a name collision. `model_path` is the canonical path; `model_arch`
-/// the GGUF `general.architecture` (compared case-insensitively).
+/// on a name collision. `model_name` is the model's display name (basename
+/// for a local GGUF — the key CLI/TUI saves write under); `model_path` the
+/// canonical path; `model_arch` the GGUF `general.architecture` (compared
+/// case-insensitively).
+///
+/// Per-model keys match this model's own name/path **directly**, so a model
+/// that isn't currently in the catalog (e.g. started by raw path) still
+/// resolves its own presets. The catalog is consulted only for the arch
+/// layer — to keep a key that is actually some discovered model's name from
+/// being read as a shared arch id.
 pub fn effective_presets(
+  model_name: &str,
   model_path: &str,
   model_arch: Option<&str>,
   store: &BTreeMap<String, ConfigPresetBlock>,
@@ -205,18 +214,20 @@ pub fn effective_presets(
   let mut arch_default = None;
   let mut model_default = None;
 
-  // Arch layer first (lower precedence).
+  // Arch layer first (lower precedence): a key equal to this model's arch
+  // that doesn't name any discovered model.
   if let Some(arch) = model_arch {
     for (key, block) in store {
-      if classify_preset_key(key, catalog) == KeyClass::Arch && key.eq_ignore_ascii_case(arch) {
+      if key.eq_ignore_ascii_case(arch) && classify_preset_key(key, catalog) == KeyClass::Arch {
         merge_block(&mut merged, block, model_path);
         arch_default = arch_default.or_else(|| block.default.clone());
       }
     }
   }
-  // Per-model layer (higher precedence) — overwrites colliding names.
+  // Per-model layer (higher precedence) — a key naming this model by its
+  // display name or canonical path. Overwrites colliding names.
   for (key, block) in store {
-    if matches!(classify_preset_key(key, catalog), KeyClass::Model { path } if path == model_path) {
+    if key.eq_ignore_ascii_case(model_name) || key == model_path {
       merge_block(&mut merged, block, model_path);
       model_default = model_default.or_else(|| block.default.clone());
     }
@@ -435,7 +446,13 @@ mod tests {
         Some("only-arch"),
       ),
     );
-    let eff = effective_presets("/m/coder.gguf", Some("qwen2"), &store, &catalog);
+    let eff = effective_presets(
+      "coder.gguf",
+      "/m/coder.gguf",
+      Some("qwen2"),
+      &store,
+      &catalog,
+    );
     let names: Vec<_> = eff.presets.iter().map(|p| p.name.clone()).collect();
     assert_eq!(
       names,
@@ -454,7 +471,13 @@ mod tests {
     let mut store = BTreeMap::new();
     store.insert("coder.gguf".into(), block(&[("m1", body_ctx(1))], None));
     store.insert("qwen2".into(), block(&[("a1", body_ctx(2))], Some("a1")));
-    let eff = effective_presets("/m/coder.gguf", Some("qwen2"), &store, &catalog);
+    let eff = effective_presets(
+      "coder.gguf",
+      "/m/coder.gguf",
+      Some("qwen2"),
+      &store,
+      &catalog,
+    );
     assert_eq!(eff.default.as_deref(), Some("a1"));
   }
 
@@ -466,11 +489,51 @@ mod tests {
       "coder.gguf".into(),
       block(&[("m1", body_ctx(1))], Some("ghost")),
     );
-    let eff = effective_presets("/m/coder.gguf", Some("qwen2"), &store, &catalog);
+    let eff = effective_presets(
+      "coder.gguf",
+      "/m/coder.gguf",
+      Some("qwen2"),
+      &store,
+      &catalog,
+    );
     assert_eq!(
       eff.default, None,
       "a default naming a missing entry is ignored"
     );
+  }
+
+  #[test]
+  fn effective_presets_resolves_per_model_key_with_empty_catalog() {
+    // A model not in the catalog (e.g. started by raw path, before
+    // discovery) must still resolve its own per-model presets — the
+    // per-model match is on the model's own name/path, not the catalog.
+    let mut store = BTreeMap::new();
+    store.insert(
+      "coder.gguf".to_string(),
+      block(&[("p", body_ctx(42))], Some("p")),
+    );
+    let eff = effective_presets("coder.gguf", "/m/coder.gguf", Some("qwen2"), &store, &[]);
+    assert_eq!(eff.presets.len(), 1);
+    assert_eq!(eff.presets.get("p").unwrap().params.ctx, Some(42));
+    assert_eq!(eff.default.as_deref(), Some("p"));
+  }
+
+  #[test]
+  fn effective_presets_matches_per_model_key_by_full_path() {
+    let catalog = vec![catalog_row("/m/coder.gguf", "qwen2")];
+    let mut store = BTreeMap::new();
+    store.insert(
+      "/m/coder.gguf".to_string(),
+      block(&[("byp", body_ctx(7))], None),
+    );
+    let eff = effective_presets(
+      "coder.gguf",
+      "/m/coder.gguf",
+      Some("qwen2"),
+      &store,
+      &catalog,
+    );
+    assert_eq!(eff.presets.get("byp").unwrap().params.ctx, Some(7));
   }
 
   #[test]
@@ -485,7 +548,7 @@ mod tests {
       block(&[("other-model", body_ctx(1))], None),
     );
     store.insert("llama".into(), block(&[("other-arch", body_ctx(2))], None));
-    let eff = effective_presets("/m/a.gguf", Some("qwen2"), &store, &catalog);
+    let eff = effective_presets("a.gguf", "/m/a.gguf", Some("qwen2"), &store, &catalog);
     assert!(
       eff.presets.is_empty(),
       "no presets apply to this model/arch"

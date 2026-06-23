@@ -1469,11 +1469,21 @@ impl App {
       })
       .collect();
     let path_str = path.display().to_string();
-    let arch = rows
-      .iter()
-      .find(|r| r.path == path_str)
-      .and_then(|r| r.arch.clone());
-    let eff = effective_presets(&path_str, arch.as_deref(), &self.config_presets, &rows);
+    let row = rows.iter().find(|r| r.path == path_str);
+    let name = row.map(|r| r.name()).unwrap_or_else(|| {
+      path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path_str.clone())
+    });
+    let arch = row.and_then(|r| r.arch.clone());
+    let eff = effective_presets(
+      &name,
+      &path_str,
+      arch.as_deref(),
+      &self.config_presets,
+      &rows,
+    );
     let choices: Vec<PresetChoice> = eff
       .presets
       .iter()
