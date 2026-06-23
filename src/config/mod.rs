@@ -7,6 +7,7 @@
 //! 4. Built-in defaults
 
 pub mod loader;
+pub mod presets_writer;
 pub mod writer;
 
 pub use loader::{

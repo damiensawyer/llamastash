@@ -48,6 +48,8 @@ pub enum WriteError {
   Serialise(String),
   #[error("config parse current contents at {}: {error}", path.display())]
   ParseCurrent { path: PathBuf, error: String },
+  #[error("config presets patch: {0}")]
+  Patch(String),
 }
 
 /// Recursive merge of `additions` into `current`. Mapping keys present

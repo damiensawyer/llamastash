@@ -207,6 +207,18 @@ hyper = { version = "1", default-features = false, features = [
 # `tokio::net::TcpStream`.
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 http-body-util = "0.1"
+# Comment- and format-preserving YAML patching for the config `presets:`
+# block (config-presets-per-model plan, Unit 1). `serde_yaml` is
+# comment-blind (re-serialises the whole file), so preset save/delete go
+# through `yamlpath` (route to a node) + `yamlpatch` (surgically patch
+# only that node) — every other comment and bit of formatting survives.
+# Both are MIT, from zizmorcore/zizmor, battle-tested inside the zizmor
+# linter. `yaml_serde` is yamlpatch's value type; pulled to the top level
+# so the presets writer can build `Op` payloads via `yaml_serde::to_value`.
+# Pinned to exact patch versions (the three crates release in lockstep).
+yamlpath = "=1.26.1"
+yamlpatch = "=1.26.1"
+yaml_serde = "0.10"
 
 # Windows-only Win32 surface for the Unit 6 process-supervision backend
 # (`src/util/process_control.rs`): Job Objects for kill-on-job-close
