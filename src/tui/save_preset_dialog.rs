@@ -99,6 +99,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, dialog: &SavePresetDialog, pale
       Style::default().fg(tone).add_modifier(Modifier::BOLD),
     )))
     .border(tone)
+    .padding(ratatui::widgets::Padding::horizontal(1))
     .build();
   let inner = block.inner(rect);
   frame.render_widget(block, rect);

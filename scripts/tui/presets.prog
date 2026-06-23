@@ -1,0 +1,50 @@
+comment: config-presets-per-model — TUI preset cycle row + Ctrl+P save dialog.
+comment: Requires an isolated daemon whose config.yaml has a `presets:` block
+comment: for the focused model (see scripts/tui/README.md). The model card must
+comment: resolve at least one preset for the row to appear.
+wait: 4
+snap: boot
+expect: Models
+
+comment: --- open the launch picker on the focused model (opens on the default preset)
+key: enter
+settle
+snap: picker
+expect: Launch settings
+expect: preset
+iexpect: default
+
+comment: --- cycle the preset row right: default -> auto (clears preset-seeded knobs)
+key: right
+settle
+snap: cycle-auto
+expect: auto
+
+comment: --- Ctrl+P opens the save-preset dialog (name entry stage)
+key: ctrl-p
+settle
+snap: save-dialog
+iexpect: save preset
+iexpect: name this preset
+
+comment: --- type a name and save
+type: harness-preset
+settle
+key: enter
+settle
+snap: saved
+iexpect: saved preset
+
+comment: --- Ctrl+P again with an existing name -> overwrite confirm stage
+key: ctrl-p
+settle
+type: harness-preset
+key: enter
+settle
+snap: overwrite
+iexpect: already exists
+iexpect: overwrite
+
+comment: --- cancel out cleanly
+key: esc
+settle
