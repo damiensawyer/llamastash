@@ -650,7 +650,18 @@ async fn model_key_and_effective(
   let rows = catalog_rows(ctx).await;
   let path_str = model_path.display().to_string();
   let (key, arch) = match rows.iter().find(|r| r.path == path_str) {
-    Some(r) => (r.name(), r.arch.clone()),
+    Some(r) => {
+      let name = r.name();
+      // Two models sharing a basename must be keyed by path, not name, so
+      // their presets don't collide (read side enforces the same rule).
+      let shared = rows
+        .iter()
+        .filter(|o| o.name().eq_ignore_ascii_case(&name))
+        .count()
+        > 1;
+      let key = if shared { path_str.clone() } else { name };
+      (key, r.arch.clone())
+    }
     None => (
       path_basename(model_path),
       resolve_model_id_and_arch(model_path)

@@ -36,12 +36,15 @@ pub fn migrate_state_presets_to_config(
   // Durable persistence needs a config file; without one (tests) we keep
   // state.presets so nothing is lost on the next, real boot.
   let mut all_persisted = config_path.is_some();
+  // Config wins only over keys that were *already* in the config — not over
+  // a key this pass created. Two `state.json` entries that share a basename
+  // (the same filename in two dirs) merge their preset *names* into one key
+  // rather than dropping the second model's presets entirely.
+  let preexisting: std::collections::BTreeSet<String> = config_presets.keys().cloned().collect();
 
   for entry in &state.presets {
     let key = entry.id.display_name();
-    // Config wins: a key already present (hand-authored or migrated earlier
-    // this pass) is never clobbered.
-    if config_presets.contains_key(&key) {
+    if preexisting.contains(&key) {
       continue;
     }
     for np in entry.presets.iter() {
@@ -141,6 +144,30 @@ mod tests {
       cfg.presets["b.gguf"].entries["p2"].knobs.ctx,
       Some(KnobValue::Set(4096))
     );
+    std::fs::remove_dir_all(path.parent().unwrap()).ok();
+  }
+
+  #[test]
+  fn two_state_entries_sharing_a_basename_merge_their_names() {
+    // The same filename in two dirs, each with its own preset: both names
+    // must survive (merged into one basename key), not silently dropped.
+    let path = temp_config("dup-basename");
+    let mut state = DaemonState::default();
+    state
+      .presets
+      .push(entry(gguf_id("/a/model.gguf"), &[preset("p_a", 1)]));
+    state
+      .presets
+      .push(entry(gguf_id("/b/model.gguf"), &[preset("p_b", 2)]));
+    let mut config_presets = BTreeMap::new();
+    let n = migrate_state_presets_to_config(&mut state, &mut config_presets, Some(&path));
+    assert_eq!(n, 2, "both presets migrated");
+    let entries = &config_presets["model.gguf"].entries;
+    assert!(
+      entries.contains_key("p_a") && entries.contains_key("p_b"),
+      "both names kept"
+    );
+    assert!(state.presets.is_empty());
     std::fs::remove_dir_all(path.parent().unwrap()).ok();
   }
 

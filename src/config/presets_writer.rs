@@ -27,7 +27,7 @@ use std::path::Path;
 use serde::Serialize;
 use serde_yaml::Value as YamlValue;
 use yamlpatch::{apply_yaml_patches, Op, Patch};
-use yamlpath::{Component, Document, Route};
+use yamlpath::{Component, Document, FeatureKind, Route};
 
 use crate::config::writer::{preflight, WriteError};
 
@@ -87,8 +87,16 @@ pub fn remove_preset(config_path: &Path, model_key: &str, name: &str) -> Result<
   let model_only_entries = model_node
     .and_then(YamlValue::as_mapping)
     .is_some_and(|m| m.len() == 1);
+  // When that prune would empty the whole `presets:` map, drop the
+  // top-level key too rather than leaving a degenerate `presets:` (null).
+  let presets_only_model = current
+    .get(PRESETS_KEY)
+    .and_then(YamlValue::as_mapping)
+    .is_some_and(|m| m.len() == 1);
 
-  let route = if last_entry && model_only_entries {
+  let route = if last_entry && model_only_entries && presets_only_model {
+    key_route(&[PRESETS_KEY])
+  } else if last_entry && model_only_entries {
     key_route(&[PRESETS_KEY, model_key])
   } else if last_entry {
     key_route(&[PRESETS_KEY, model_key, ENTRIES_KEY])
@@ -97,6 +105,11 @@ pub fn remove_preset(config_path: &Path, model_key: &str, name: &str) -> Result<
   };
 
   let doc = Document::new(source.clone()).map_err(|e| WriteError::Patch(e.to_string()))?;
+  // `yamlpatch` Op::Remove on a flow-style container wipes its siblings;
+  // refuse rather than silently destroying hand-authored entries.
+  if !is_block_mapping(&doc, &key_route(&[PRESETS_KEY, model_key, ENTRIES_KEY])) {
+    return Err(flow_err(ENTRIES_KEY));
+  }
   let patched = apply_yaml_patches(
     &doc,
     std::slice::from_ref(&Patch {
@@ -117,9 +130,13 @@ fn splice_upsert(
   name: &str,
   flow: &str,
 ) -> Result<String, WriteError> {
+  // Keys are quoted when a bare token wouldn't be a plain string.
+  let mk = yaml_key(model_key);
+  let nk = yaml_key(name);
+
   if source.trim().is_empty() {
     return Ok(format!(
-      "presets:\n{m}{model_key}:\n{e}entries:\n{n}{name}: {flow}\n",
+      "presets:\n{m}{mk}:\n{e}entries:\n{n}{nk}: {flow}\n",
       m = pad(STEP),
       e = pad(STEP * 2),
       n = pad(STEP * 3),
@@ -138,22 +155,36 @@ fn splice_upsert(
   let e_route = key_route(&[PRESETS_KEY, model_key, ENTRIES_KEY]);
   let entry_route = key_route(&[PRESETS_KEY, model_key, ENTRIES_KEY, name]);
 
-  let entries_is_block = entries
+  let entries_is_nonempty = entries
     .and_then(YamlValue::as_mapping)
     .is_some_and(|m| !m.is_empty());
+
+  // Block-style only. A hand-authored flow / scalar container on the edit
+  // path would be corrupted by a block insert; refuse cleanly instead.
+  // (An empty `entries: {}` is the one exception — repaired by the replace
+  // path below — so it isn't guarded here.)
+  if presets.is_some() && !is_block_mapping(&doc, &p_route) {
+    return Err(flow_err(PRESETS_KEY));
+  }
+  if model.is_some() && !is_block_mapping(&doc, &m_route) {
+    return Err(flow_err(model_key));
+  }
+  if entries_is_nonempty && !is_block_mapping(&doc, &e_route) {
+    return Err(flow_err(ENTRIES_KEY));
+  }
 
   if entry_exists {
     // Replace just the value span; key, indentation, and any trailing
     // comment on the line survive untouched.
     let span = value_span(&doc, &entry_route)?;
     Ok(replace_span(source, span, flow))
-  } else if entries_is_block {
+  } else if entries_is_nonempty {
     let indent = child_indent(&doc, &e_route).unwrap_or(STEP * 3);
     let at = append_point(source, &doc, &e_route, last_key(entries))?;
     Ok(insert_at(
       source,
       at,
-      &format!("{}{name}: {flow}", pad(indent)),
+      &format!("{}{nk}: {flow}", pad(indent)),
     ))
   } else if entries.is_some() {
     // Degenerate `entries:` (null / empty / flow) — replace the whole
@@ -162,13 +193,13 @@ fn splice_upsert(
       .query_pretty(&e_route)
       .map_err(|e| WriteError::Patch(e.to_string()))?;
     let indent = f.location.point_span.0 .1;
-    let block = format!("{ENTRIES_KEY}:\n{}{name}: {flow}", pad(indent + STEP));
+    let block = format!("{ENTRIES_KEY}:\n{}{nk}: {flow}", pad(indent + STEP));
     Ok(replace_span(source, f.location.byte_span, &block))
   } else if model.is_some() {
     let indent = key_column(&doc, &m_route).unwrap_or(STEP);
     let at = append_point(source, &doc, &m_route, last_key(model))?;
     let block = format!(
-      "{e}entries:\n{n}{name}: {flow}",
+      "{e}entries:\n{n}{nk}: {flow}",
       e = pad(indent + STEP),
       n = pad(indent + STEP * 2),
     );
@@ -177,7 +208,7 @@ fn splice_upsert(
     let indent = child_indent(&doc, &p_route).unwrap_or(STEP);
     let at = append_point(source, &doc, &p_route, last_key(presets))?;
     let block = format!(
-      "{m}{model_key}:\n{e}entries:\n{n}{name}: {flow}",
+      "{m}{mk}:\n{e}entries:\n{n}{nk}: {flow}",
       m = pad(indent),
       e = pad(indent + STEP),
       n = pad(indent + STEP * 2),
@@ -186,13 +217,60 @@ fn splice_upsert(
   } else {
     // `presets:` key absent entirely → append the block at end of file.
     let block = format!(
-      "presets:\n{m}{model_key}:\n{e}entries:\n{n}{name}: {flow}",
+      "presets:\n{m}{mk}:\n{e}entries:\n{n}{nk}: {flow}",
       m = pad(STEP),
       e = pad(STEP * 2),
       n = pad(STEP * 3),
     );
     Ok(insert_at(source, source.len(), &block))
   }
+}
+
+/// Render `key` as a YAML mapping key, quoting it when a bare token would
+/// parse as a non-string scalar (pure digits, `true`/`null`/…) or carries
+/// YAML-special characters. Without this, a preset named `12345` or `true`
+/// would round-trip as an int/bool key, so a later update wouldn't match it
+/// by string and would append a duplicate key (corrupting the file).
+fn yaml_key(key: &str) -> String {
+  if is_safe_plain_key(key) {
+    key.to_string()
+  } else {
+    // JSON string syntax is valid YAML double-quoted scalar syntax.
+    serde_json::to_string(key).unwrap_or_else(|_| format!("{key:?}"))
+  }
+}
+
+fn is_safe_plain_key(key: &str) -> bool {
+  let mut chars = key.chars();
+  let first_ok = chars
+    .next()
+    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+  let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+  if !(first_ok && rest_ok) {
+    return false;
+  }
+  // Reject YAML boolean / null keywords that would parse as non-strings.
+  !matches!(
+    key.to_ascii_lowercase().as_str(),
+    "true" | "false" | "null" | "yes" | "no" | "on" | "off" | "y" | "n"
+  )
+}
+
+/// True when the node at `route` is a **block** mapping. The writer only
+/// edits block style; a hand-authored flow container (`{ … }`), a scalar,
+/// or a sequence at a route we'd splice into would be corrupted by a block
+/// insert or a `yamlpatch` remove, so callers refuse those.
+fn is_block_mapping(doc: &Document, route: &Route<'_>) -> bool {
+  matches!(
+    doc.query_exact(route).ok().flatten().map(|f| f.kind()),
+    Some(FeatureKind::BlockMapping)
+  )
+}
+
+fn flow_err(key: &str) -> WriteError {
+  WriteError::Patch(format!(
+    "config presets `{key}` uses flow / non-block style; edit it by hand or convert it to block style before saving presets there"
+  ))
 }
 
 fn key_route(keys: &[&str]) -> Route<'static> {
@@ -741,6 +819,77 @@ presets:
     assert_eq!(ctx_of(&yaml, "a", "p1"), Some(1024));
     assert_eq!(ctx_of(&yaml, "a", "p3"), Some(4096));
     assert_eq!(ctx_of(&yaml, "b", "p2"), Some(2048));
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn numeric_and_keyword_preset_names_are_quoted_and_update_in_place() {
+    // A name that bare-parses as a non-string scalar (digits, `true`)
+    // must be quoted so a second save UPDATES it rather than appending a
+    // duplicate key (which would make the file unparseable).
+    let dir = temp_dir("tautology");
+    let path = dir.join("config.yaml");
+    for name in ["12345", "true", "null"] {
+      upsert_preset(&path, "m", name, &body(&[("ctx", 1.into())])).unwrap();
+      upsert_preset(&path, "m", name, &body(&[("ctx", 2.into())])).unwrap();
+      // Re-reads cleanly (no duplicate key) and reflects the update.
+      let yaml: YamlValue = serde_yaml::from_str(&read(&path)).unwrap();
+      let entries = entries_of(&yaml, "m");
+      let got = entries
+        .get(name)
+        .unwrap_or_else(|| panic!("{name} present"));
+      assert_eq!(
+        got.get("ctx").and_then(YamlValue::as_u64),
+        Some(2),
+        "{name} updated in place"
+      );
+      assert!(
+        read(&path).contains(&format!("\"{name}\":")),
+        "{name} written quoted"
+      );
+      remove_preset(&path, "m", name).unwrap();
+    }
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn refuses_to_add_into_a_flow_style_entries_block() {
+    // A hand-authored flow container must not be block-spliced (that
+    // produces invalid YAML). Refuse cleanly; leave the file untouched.
+    let dir = temp_dir("flow-add");
+    let path = dir.join("config.yaml");
+    let original = "presets:\n  qwen2: { entries: { balanced: { ctx: 16384 } } }\n";
+    fs::write(&path, original).unwrap();
+    let err = upsert_preset(&path, "qwen2", "fast", &body(&[("ctx", 4096.into())])).unwrap_err();
+    assert!(matches!(err, WriteError::Patch(_)));
+    assert_eq!(read(&path), original, "file untouched on refusal");
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn refuses_to_delete_from_a_flow_style_entries_block() {
+    // Op::Remove on a flow mapping wipes siblings — refuse instead.
+    let dir = temp_dir("flow-del");
+    let path = dir.join("config.yaml");
+    let original =
+      "presets:\n  qwen2: { entries: { balanced: { ctx: 16384 }, fast: { ctx: 4096 } } }\n";
+    fs::write(&path, original).unwrap();
+    let err = remove_preset(&path, "qwen2", "fast").unwrap_err();
+    assert!(matches!(err, WriteError::Patch(_)));
+    assert_eq!(read(&path), original, "siblings untouched on refusal");
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn refuses_to_add_entries_under_a_scalar_model_value() {
+    // A model key whose value is a scalar can't carry a block `entries:`.
+    let dir = temp_dir("scalar-model");
+    let path = dir.join("config.yaml");
+    let original = "presets:\n  m: somescalar\n";
+    fs::write(&path, original).unwrap();
+    let err = upsert_preset(&path, "m", "p", &body(&[("ctx", 1.into())])).unwrap_err();
+    assert!(matches!(err, WriteError::Patch(_)));
+    assert_eq!(read(&path), original, "file untouched on refusal");
     fs::remove_dir_all(&dir).ok();
   }
 

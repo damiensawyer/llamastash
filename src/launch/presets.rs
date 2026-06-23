@@ -224,10 +224,18 @@ pub fn effective_presets(
       }
     }
   }
-  // Per-model layer (higher precedence) — a key naming this model by its
-  // display name or canonical path. Overwrites colliding names.
+  // Per-model layer (higher precedence) — a key naming this model. The
+  // canonical path is always unique; the display name is only honored when
+  // it isn't shared by another discovered model (otherwise two models with
+  // the same basename would leak each other's presets — such models must be
+  // keyed by path).
+  let name_shared = catalog
+    .iter()
+    .filter(|r| r.name().eq_ignore_ascii_case(model_name))
+    .count()
+    > 1;
   for (key, block) in store {
-    if key.eq_ignore_ascii_case(model_name) || key == model_path {
+    if key == model_path || (!name_shared && key.eq_ignore_ascii_case(model_name)) {
       merge_block(&mut merged, block, model_path);
       model_default = model_default.or_else(|| block.default.clone());
     }
@@ -379,6 +387,29 @@ mod tests {
   }
 
   #[test]
+  fn reasoning_and_mode_normalize_to_off_on_round_trip() {
+    // `reasoning: false` and `mode: chat` are the inert defaults: they
+    // round-trip to "absent" (no reasoning, chat mode) rather than being
+    // re-emitted. This pins the normalization so it's intentional, not a
+    // silent surprise. Behaviorally identical — both collapse to "off".
+    let body = PresetBody {
+      mode: Some(LaunchMode::Chat),
+      knobs: TypedKnobs {
+        reasoning: Some(KnobValue::Set(false)),
+        ..TypedKnobs::default()
+      },
+      extras: None,
+    };
+    let np = materialize_preset("p", &body, PathBuf::from("/m/a.gguf"));
+    assert!(!np.params.reasoning);
+    assert_eq!(np.params.mode, LaunchMode::Chat);
+    // Capture drops the inert defaults (reasoning false / chat mode).
+    let back = preset_body_from_launch_params(&np.params);
+    assert_eq!(back.mode, None);
+    assert_eq!(back.knobs.reasoning, None);
+  }
+
+  #[test]
   fn materialize_keeps_auto_ctx_in_the_knob() {
     let body = PresetBody {
       mode: None,
@@ -516,6 +547,48 @@ mod tests {
     assert_eq!(eff.presets.len(), 1);
     assert_eq!(eff.presets.get("p").unwrap().params.ctx, Some(42));
     assert_eq!(eff.default.as_deref(), Some("p"));
+  }
+
+  #[test]
+  fn shared_basename_keys_by_path_not_name_no_cross_leak() {
+    // Two models share a basename. A name-key must NOT leak across them;
+    // only a path key resolves to its model.
+    let catalog = vec![
+      catalog_row("/a/model.gguf", "qwen2"),
+      catalog_row("/b/model.gguf", "qwen2"),
+    ];
+    let mut store = BTreeMap::new();
+    store.insert(
+      "model.gguf".to_string(),
+      block(&[("shared-name", body_ctx(1))], None),
+    );
+    store.insert(
+      "/a/model.gguf".to_string(),
+      block(&[("a-only", body_ctx(2))], None),
+    );
+    // Model A resolves its path key, not the ambiguous name key.
+    let eff_a = effective_presets(
+      "model.gguf",
+      "/a/model.gguf",
+      Some("qwen2"),
+      &store,
+      &catalog,
+    );
+    let names_a: Vec<_> = eff_a.presets.iter().map(|p| p.name.clone()).collect();
+    assert_eq!(
+      names_a,
+      vec!["a-only"],
+      "name key skipped (ambiguous); path key applies"
+    );
+    // Model B resolves neither (the name key is ambiguous, no path key for it).
+    let eff_b = effective_presets(
+      "model.gguf",
+      "/b/model.gguf",
+      Some("qwen2"),
+      &store,
+      &catalog,
+    );
+    assert!(eff_b.presets.is_empty(), "no leak of A's presets to B");
   }
 
   #[test]
