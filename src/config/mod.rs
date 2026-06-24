@@ -9,6 +9,7 @@
 pub mod loader;
 pub mod presets_writer;
 pub mod writer;
+pub mod yaml_edit;
 
 pub use loader::{
   config_path, config_path_from, load_config, load_config_from_path, validate_scan_settings,

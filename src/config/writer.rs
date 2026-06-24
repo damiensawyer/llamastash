@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use yaml_serde::Value;
 
+use super::yaml_edit;
 pub use crate::util::config_patch::{DiffEntry, DiffKind};
 
 /// Outcome of a successful merge-and-write. `diff` is the set of keys
@@ -156,37 +157,75 @@ pub fn preflight(path: &Path) -> Result<(), WriteError> {
 /// Merge `additions` into the YAML at `path`, write the result
 /// atomically. Returns the structural diff between the old and new
 /// contents. Creates the parent dir if missing. Mode 0600 on Unix.
+///
+/// The write is **comment-safe**: each changed leaf is spliced into the
+/// original file text via the shared [`yaml_edit`] primitive, so the user's
+/// hand-written comments and formatting survive (the old whole-file
+/// re-serialise stripped them on every run).
 pub fn merge_and_write(path: &Path, additions: Value) -> Result<WriteOutcome, WriteError> {
   preflight(path)?;
-  let current = read_or_default(path)?;
+  // Read the source text once — comments live here and must survive. The
+  // parsed `current` drives merge/diff; the original text is what we splice.
+  let source = yaml_edit::read_source(path)?;
+  let current = if source.trim().is_empty() {
+    Value::Mapping(yaml_serde::Mapping::new())
+  } else {
+    yaml_serde::from_str(&source).map_err(|e| WriteError::ParseCurrent {
+      path: path.to_path_buf(),
+      error: e.to_string(),
+    })?
+  };
   let merged = merge(current.clone(), additions);
   let diff_rows = diff(&current, &merged);
-  let body = yaml_serde::to_string(&merged).map_err(|e| WriteError::Serialise(e.to_string()))?;
-  if let Some(parent) = path.parent() {
-    std::fs::create_dir_all(parent).map_err(|e| WriteError::Io {
-      path: parent.to_path_buf(),
-      error: e.to_string(),
-    })?;
+
+  // Splice each changed leaf into the original text rather than
+  // re-serialising `merged`. Untouched keys stay byte-for-byte.
+  let mut new_source = source;
+  for (segments, value) in collect_leaf_writes(&current, &merged) {
+    let token = yaml_edit::render_value(&value)?;
+    let segs: Vec<&str> = segments.iter().map(String::as_str).collect();
+    new_source = yaml_edit::upsert(&new_source, &segs, &token)?;
   }
-  // Atomic write — `tempfile + fsync + 0o600 + rename` lives in the
-  // shared `util::atomic_write` helper so this site, the daemon
-  // state store, and the init snapshot writer stay in lockstep.
-  let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-  let written = crate::util::atomic_write::write_secure(
-    &dir,
-    "config.yaml.tmp.",
-    path,
-    body.as_bytes(),
-    Some(0o600),
-  )
-  .map_err(|e| WriteError::Io {
-    path: path.to_path_buf(),
-    error: e.to_string(),
-  })?;
+  yaml_edit::write_config(path, &new_source)?;
   Ok(WriteOutcome {
     diff: diff_rows,
-    written_bytes: written,
+    written_bytes: new_source.len() as u64,
   })
+}
+
+/// Collect the scalar / sequence leaves of `after` that differ from
+/// `before`, each with its full key path. Recurses into mappings so a fresh
+/// block is written leaf-by-leaf in block style (not one inline-flow blob
+/// that a later write couldn't append to); a sequence — or the `{auto: true}`
+/// knob sentinel, which round-trips identically as a one-key block — is a
+/// leaf value. Drives the comment-safe splice in [`merge_and_write`].
+fn collect_leaf_writes(before: &Value, after: &Value) -> Vec<(Vec<String>, Value)> {
+  let mut out = Vec::new();
+  walk_writes(&mut Vec::new(), Some(before), after, &mut out);
+  out
+}
+
+fn walk_writes(
+  prefix: &mut Vec<String>,
+  before: Option<&Value>,
+  after: &Value,
+  out: &mut Vec<(Vec<String>, Value)>,
+) {
+  let Value::Mapping(a) = after else { return };
+  let before_map = before.and_then(Value::as_mapping);
+  for (k, v_after) in a {
+    let v_before = before_map.and_then(|m| m.get(k));
+    if v_before == Some(v_after) {
+      continue; // unchanged leaf / subtree
+    }
+    prefix.push(k.as_str().unwrap_or("?").to_string());
+    if matches!(v_after, Value::Mapping(_)) {
+      walk_writes(prefix, v_before, v_after, out);
+    } else {
+      out.push((prefix.clone(), v_after.clone()));
+    }
+    prefix.pop();
+  }
 }
 
 /// Read the YAML at `path`, returning an empty mapping when the file
@@ -389,6 +428,69 @@ arch_defaults:
     assert!(body.contains("theme: latte"));
     assert!(body.contains("parallel: 8"));
     assert!(body.contains("n_gpu_layers: 99"));
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn merge_and_write_preserves_comments() {
+    // The whole point of the yaml_edit rewrite: a wizard / cli write must
+    // not strip the user's hand-written comments.
+    let dir = temp_dir("comments");
+    let target = dir.join("config.yaml");
+    fs::write(
+      &target,
+      "# my hand-written config\ntheme: latte  # I like this one\n",
+    )
+    .unwrap();
+    merge_and_write(&target, yaml("llama_server_path: /opt/llama-server\n")).expect("write");
+    let body = fs::read_to_string(&target).unwrap();
+    assert!(
+      body.contains("# my hand-written config"),
+      "header comment survives"
+    );
+    assert!(
+      body.contains("theme: latte  # I like this one"),
+      "inline comment survives"
+    );
+    let y: Value = yaml_serde::from_str(&body).unwrap();
+    assert_eq!(
+      y.get("llama_server_path").and_then(Value::as_str),
+      Some("/opt/llama-server")
+    );
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn merge_and_write_adds_nested_key_into_commented_block() {
+    // `proxy.api_key` (the cli write) lands under an existing, commented
+    // `proxy:` block without disturbing its other keys / comments.
+    let dir = temp_dir("nested-comments");
+    let target = dir.join("config.yaml");
+    fs::write(
+      &target,
+      "proxy:\n  port: 11500  # pinned away from ollama\n",
+    )
+    .unwrap();
+    let additions = yaml("proxy:\n  api_key: sekret\n");
+    merge_and_write(&target, additions).expect("write");
+    let body = fs::read_to_string(&target).unwrap();
+    assert!(
+      body.contains("port: 11500  # pinned away from ollama"),
+      "sibling + comment kept"
+    );
+    let y: Value = yaml_serde::from_str(&body).unwrap();
+    assert_eq!(
+      y.get("proxy")
+        .and_then(|p| p.get("api_key"))
+        .and_then(Value::as_str),
+      Some("sekret")
+    );
+    assert_eq!(
+      y.get("proxy")
+        .and_then(|p| p.get("port"))
+        .and_then(Value::as_u64),
+      Some(11500)
+    );
     fs::remove_dir_all(&dir).ok();
   }
 }
