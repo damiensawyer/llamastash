@@ -921,14 +921,15 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
     Action::DeleteModel => apply_delete_model(app),
     Action::CancelDownload => apply_cancel_download(app),
     Action::SavePreset => {
-      // Only a running model has live launch settings worth pinning; a
-      // non-running row has nothing concrete to capture yet.
-      if app.focused_managed().is_some() {
-        app.open_save_preset_dialog();
-      } else if app.focused_path().is_some() {
-        app.show_toast("preset save needs a running model — launch it first");
-      } else {
+      // Settings pane always saves (a running model's live knobs, or the
+      // about-to-launch form). The Models list only saves from a running
+      // row — an idle row there has no concrete settings to pin yet.
+      if app.focused_path().is_none() {
         app.show_toast("no model focused — nothing to save");
+      } else if app.focus == Focus::List && app.focused_managed().is_none() {
+        app.show_toast("open Settings to save launch params, or pick a running model");
+      } else {
+        app.open_save_preset_dialog();
       }
     }
     Action::EnterEdit => {
@@ -2926,26 +2927,27 @@ mod tests {
   }
 
   #[test]
-  fn ctrl_p_on_non_running_model_toasts_instead_of_opening_dialog() {
-    // Only a running model has live launch settings to capture; Ctrl+P on
-    // an idle row must toast, not open the save dialog.
+  fn ctrl_p_on_idle_models_row_toasts_not_opens() {
+    // Models pane (Focus::List) on an idle row has no live settings to
+    // capture — Ctrl+P toasts, pointing the user at the Settings pane.
     let mut app = App::new(Default::default());
     app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
     app.go_top();
+    assert_eq!(app.focus, Focus::List);
     pump_input(&mut app, key(KeyCode::Char('p'), KeyModifiers::CONTROL));
     assert!(
       app.save_preset_dialog.is_none(),
-      "non-running model must not open the save dialog"
+      "idle Models row must not open the save dialog"
     );
     let toast = app.toast_message().unwrap_or("");
     assert!(
-      toast.contains("running model"),
-      "expected running-model toast, got `{toast}`"
+      toast.contains("Settings") || toast.contains("running model"),
+      "expected a guidance toast, got `{toast}`"
     );
   }
 
   #[test]
-  fn ctrl_p_on_running_model_opens_save_dialog() {
+  fn ctrl_p_on_running_models_row_opens_save_dialog() {
     let mut app = App::new(Default::default());
     app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
     app.managed = vec![ready_managed_for_events("/m/qwen.gguf", 41100)];
@@ -2953,7 +2955,23 @@ mod tests {
     pump_input(&mut app, key(KeyCode::Char('p'), KeyModifiers::CONTROL));
     assert!(
       app.save_preset_dialog.is_some(),
-      "running model opens the save dialog on Ctrl+P"
+      "running Models row opens the save dialog on Ctrl+P"
+    );
+  }
+
+  #[test]
+  fn ctrl_p_in_settings_pane_opens_for_idle_model() {
+    // Settings pane always allows a save — an idle model's about-to-launch
+    // form is captured via the default picker.
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    app.go_top();
+    app.focus = Focus::RightPane;
+    app.right_tab = crate::tui::tabs::RightTab::Settings;
+    pump_input(&mut app, key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    assert!(
+      app.save_preset_dialog.is_some(),
+      "Settings pane opens the save dialog even for an idle model"
     );
   }
 

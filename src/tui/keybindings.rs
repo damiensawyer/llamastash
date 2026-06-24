@@ -264,10 +264,11 @@ pub enum Action {
   /// queue — a second `Ctrl+X` cancels whichever pull was promoted
   /// next. No-op (toast) when no pull is active.
   CancelDownload,
-  /// `Ctrl+P` — save a running model's live launch knobs to `config.yaml`
-  /// as a named preset. Opens the name-entry dialog. Toast (no dialog) when
-  /// the focused model isn't running, since only a live launch has
-  /// concrete settings to capture.
+  /// `Ctrl+P` — save the launch settings in view to `config.yaml` as a
+  /// named preset, opening the name-entry dialog. Always available in the
+  /// Settings pane (the about-to-launch form, or a running model's live
+  /// knobs); in the Models list it only fires on a running row (idle rows
+  /// toast, since there's no concrete config to capture there yet).
   SavePreset,
   /// Jump focus to the Logs tab in the right pane. No-op (with a
   /// toast) when the focused model isn't running, since Logs is

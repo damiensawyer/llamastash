@@ -257,6 +257,14 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<crate::tui::hint_picker::Ranke
           20,
           app.hint_with(Focus::RightPane, Action::ToggleAutoScroll, "stop"),
         );
+        // Save the live knobs as a preset — ranked above the yank trio so
+        // it survives width pressure longer (the user asked for `Ctrl+P` to
+        // outrank `↑↓` / `p`).
+        push(
+          &mut chips,
+          35,
+          app.hint_with(Focus::RightPane, Action::SavePreset, "save preset"),
+        );
         push(&mut chips, 40, app.hint(Focus::RightPane, Action::YankPath));
         push(&mut chips, 50, app.hint(Focus::RightPane, Action::YankUrl));
         push(&mut chips, 60, app.hint(Focus::RightPane, Action::YankCurl));
@@ -320,6 +328,13 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<crate::tui::hint_picker::Ranke
             app.hint_with(Focus::RightPane, Action::EnterEdit, "edit"),
           );
         }
+        // Save the form as a preset — ranked above `↑↓:cycle fields` (40)
+        // and `p:path` (60) so it survives width pressure longer.
+        push(
+          &mut chips,
+          35,
+          app.hint_with(Focus::RightPane, Action::SavePreset, "save preset"),
+        );
         if let (Some(down), Some(up)) = (
           app.hint_with(Focus::RightPane, Action::MoveDown, "cycle fields"),
           app.hint_with(Focus::RightPane, Action::MoveUp, "cycle fields"),
@@ -858,7 +873,7 @@ mod tests {
     // advanced + cycle + path — no u/c, since the URL belongs to
     // the running instance, not whatever duplicate the user is
     // staging.
-    use crate::tui::keybindings::Focus;
+    use crate::tui::keybindings::{Focus, CTRL_PREFIX};
     let mut app = App::new(AppOptions::default());
     app.models = vec![fake_model()];
     app.managed = vec![ready_managed("qwen", None, None)];
@@ -867,12 +882,14 @@ mod tests {
     app.right_tab = RightTab::Settings;
     // Read-only view: no picker open, managed launch present.
     // `e:edit for launch` leads — it's the new explicit gate that
-    // replaces the old auto-stage-on-arrow behaviour.
+    // replaces the old auto-stage-on-arrow behaviour. `Ctrl+P:save preset`
+    // sits above the yank trio (ranked to survive width pressure longer).
     assert_eq!(
       chip_texts(&app),
       vec![
         "e:edit for launch".to_string(),
         "s:stop".to_string(),
+        format!("{CTRL_PREFIX}p:save preset"),
         "p:path".to_string(),
         "u:url".to_string(),
         "c:curl".to_string(),
@@ -880,16 +897,44 @@ mod tests {
     );
     // Open the picker — the user is now editing a staged launch.
     // Chips switch to launch+cycle. u/c are intentionally omitted
-    // on the editable form.
+    // on the editable form. Save-preset stays available.
     use crate::tui::keybindings::ENTER_LABEL;
     app.open_launch_picker();
     let chips = chip_texts(&app);
     assert!(chips.contains(&format!("{ENTER_LABEL}:launch")));
+    assert!(chips.contains(&format!("{CTRL_PREFIX}p:save preset")));
     assert!(chips.contains(&"↑↓:cycle fields".to_string()));
     assert!(chips.contains(&"←→:cycle value".to_string()));
     assert!(chips.contains(&"p:path".to_string()));
     assert!(!chips.iter().any(|c| c.contains("u:url")));
     assert!(!chips.iter().any(|c| c.contains("c:curl")));
+  }
+
+  #[test]
+  fn settings_save_preset_chip_outranks_cycle_and_path() {
+    // The `Ctrl+P:save preset` chip must survive width pressure longer
+    // than `↑↓:cycle fields` and `p:path` — i.e. a strictly lower rank.
+    use crate::tui::keybindings::Focus;
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake_model()];
+    app.list_cursor = 2;
+    app.focus = Focus::RightPane;
+    app.right_tab = RightTab::Settings;
+    app.open_launch_picker();
+    let chips = bottom_hint_chips(&app);
+    let rank_of = |needle: &str| {
+      chips
+        .iter()
+        .find(|c| c.text.contains(needle))
+        .unwrap_or_else(|| panic!("{needle} chip present: {chips:?}"))
+        .rank
+    };
+    let save = rank_of("save preset");
+    assert!(
+      save < rank_of("cycle fields"),
+      "save preset must outrank ↑↓:cycle fields"
+    );
+    assert!(save < rank_of("path"), "save preset must outrank p:path");
   }
 
   #[test]

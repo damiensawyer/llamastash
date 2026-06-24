@@ -1621,23 +1621,44 @@ impl App {
     self.right_tab = RightTab::Settings;
   }
 
-  /// Open the `Ctrl+P` save-preset dialog for the focused model. Only a
-  /// **running** model can be saved — its live dispatched knobs + advanced
-  /// `--` tail (from the `status` row) are the settings worth pinning, with
-  /// auto / inherited markers intact. No-op when the focused model isn't
-  /// running; the caller toasts instead.
+  /// Open the `Ctrl+P` save-preset dialog for the focused model. Captures
+  /// the launch settings in view: a running model's live dispatched knobs +
+  /// advanced `--` tail (from the `status` row), else the open launch
+  /// picker's user knobs (an about-to-launch config staged in Settings),
+  /// else a freshly-built default picker. Auto / inherited markers ride
+  /// through untouched. The caller gates *when* this opens (running-row
+  /// only in the Models pane; always in the Settings pane).
   pub fn open_save_preset_dialog(&mut self) {
     let Some(path) = self.focused_path() else {
       return;
     };
-    let Some(m) = self.focused_managed() else {
-      return;
-    };
-    let knobs = m.knobs.clone();
-    let extras = m.extras.clone();
     let model_name = self
       .display_label_for(&path)
       .unwrap_or_else(|| crate::util::paths::path_basename(&path));
+
+    // Capture knobs + extras from whichever surface is in view.
+    let (knobs, extras) = if let Some(m) = self.focused_managed() {
+      // Running model: the live dispatched knobs and advanced `--` tail.
+      (m.knobs.clone(), m.extras.clone())
+    } else if let Some(p) = &self.launch_picker {
+      (
+        p.user_knobs.clone(),
+        p.extras
+          .iter()
+          .map(|s| s.to_string_lossy().into_owned())
+          .collect(),
+      )
+    } else if let Some(p) = self.build_default_picker() {
+      (
+        p.user_knobs.clone(),
+        p.extras
+          .iter()
+          .map(|s| s.to_string_lossy().into_owned())
+          .collect(),
+      )
+    } else {
+      return;
+    };
 
     let (existing, arch_shadow) = self.existing_preset_names(&path);
     self.save_preset_dialog = Some(crate::tui::save_preset_dialog::SavePresetDialog::open(
