@@ -559,8 +559,10 @@ keybindings: {}
 #
 # Each top-level key is classified against your discovered models when a
 # preset is resolved:
-#   • names a model (by file basename, or full path)  → applies to that
-#     model only (a "per-model" preset);
+#   • names a model — by file basename, or full path — → a "per-model"
+#     preset. A basename key applies to EVERY discovered model with that
+#     filename (the same GGUF cached in two roots shares one preset set);
+#     a full-path key pins to that one file.
 #   • otherwise read as a GGUF `general.architecture` → applies to every
 #     model of that arch (an "arch" preset, hand-authored only).
 # A model's effective set is its per-model entries ∪ its arch entries;
@@ -571,10 +573,11 @@ keybindings: {}
 # …) plus an optional `mode` (chat | embedding | rerank) and an `extras`
 # argv tail. Apply one with `llamastash start <model> --preset <name>`.
 #
-# `default:` names the entry the TUI's preset cycle opens on. It is
-# hand-edited only (there is no set-default command) and is ignored if it
-# names an entry that doesn't exist. The CLI never auto-applies it — a
-# plain `start` with no `--preset` launches with pure auto-fit defaults.
+# `default:` is one stop in the TUI's preset cycle (which itself opens on
+# `last used`, not on `default`). It is hand-edited only (there is no
+# set-default command) and is ignored if it names an entry that doesn't
+# exist. The CLI never auto-applies it — a plain `start` with no `--preset`
+# launches with pure auto-fit defaults.
 #
 # Changes the app writes are live immediately; hand-edits here need a
 # `llamastash daemon restart` to be picked up.

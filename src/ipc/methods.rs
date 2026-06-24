@@ -652,19 +652,12 @@ async fn model_key_arch_rows(
 ) -> (String, Option<String>, Vec<CatalogRow>) {
   let rows = catalog_rows(ctx).await;
   let path_str = model_path.display().to_string();
+  // Always key by basename. When two discovered models share a basename
+  // (the same GGUF cached in two roots), they intentionally share one preset
+  // set — the read side (`effective_presets`) applies a basename key to every
+  // model with that name.
   let (key, arch) = match rows.iter().find(|r| r.path == path_str) {
-    Some(r) => {
-      let name = r.name();
-      // Two models sharing a basename must be keyed by path, not name, so
-      // their presets don't collide (read side enforces the same rule).
-      let shared = rows
-        .iter()
-        .filter(|o| o.name().eq_ignore_ascii_case(&name))
-        .count()
-        > 1;
-      let key = if shared { path_str } else { name };
-      (key, r.arch.clone())
-    }
+    Some(r) => (r.name(), r.arch.clone()),
     None => (
       crate::util::paths::path_basename(model_path),
       resolve_model_id_and_arch(model_path)

@@ -151,7 +151,9 @@ pub enum KeyClass {
   /// Matches no discovered model — read as a GGUF `general.architecture`
   /// id that applies to every model of that arch.
   Arch,
-  /// Names more than one discovered model — skipped (caller may warn).
+  /// Names more than one discovered model (a shared basename). Read as a
+  /// per-model key applying to all of them — never as an arch id. Only used
+  /// to keep such a key out of the arch layer.
   Ambiguous,
 }
 
@@ -224,18 +226,14 @@ pub fn effective_presets(
       }
     }
   }
-  // Per-model layer (higher precedence) — a key naming this model. The
-  // canonical path is always unique; the display name is only honored when
-  // it isn't shared by another discovered model (otherwise two models with
-  // the same basename would leak each other's presets — such models must be
-  // keyed by path).
-  let name_shared = catalog
-    .iter()
-    .filter(|r| r.name().eq_ignore_ascii_case(model_name))
-    .count()
-    > 1;
+  // Per-model layer (higher precedence) — a key naming this model, by full
+  // path or by basename. A basename key applies to *every* discovered model
+  // with that basename: a filename collision in practice means the same GGUF
+  // cached in two roots (e.g. the HF cache and the LM Studio cache), so they
+  // intentionally share one preset set rather than being disambiguated by
+  // path.
   for (key, block) in store {
-    if key == model_path || (!name_shared && key.eq_ignore_ascii_case(model_name)) {
+    if key == model_path || key.eq_ignore_ascii_case(model_name) {
       merge_block(&mut merged, block, model_path);
       model_default = model_default.or_else(|| block.default.clone());
     }
@@ -550,9 +548,10 @@ mod tests {
   }
 
   #[test]
-  fn shared_basename_keys_by_path_not_name_no_cross_leak() {
-    // Two models share a basename. A name-key must NOT leak across them;
-    // only a path key resolves to its model.
+  fn shared_basename_key_applies_to_every_model_with_that_name() {
+    // Two models share a basename (the same GGUF cached in two roots). A
+    // basename key applies to BOTH — they intentionally share one preset
+    // set. A path key still pins to its specific model on top.
     let catalog = vec![
       catalog_row("/a/model.gguf", "qwen2"),
       catalog_row("/b/model.gguf", "qwen2"),
@@ -566,7 +565,7 @@ mod tests {
       "/a/model.gguf".to_string(),
       block(&[("a-only", body_ctx(2))], None),
     );
-    // Model A resolves its path key, not the ambiguous name key.
+    // Model A: the basename key applies, plus its own path key.
     let eff_a = effective_presets(
       "model.gguf",
       "/a/model.gguf",
@@ -577,10 +576,10 @@ mod tests {
     let names_a: Vec<_> = eff_a.presets.iter().map(|p| p.name.clone()).collect();
     assert_eq!(
       names_a,
-      vec!["a-only"],
-      "name key skipped (ambiguous); path key applies"
+      vec!["a-only", "shared-name"],
+      "basename key + A's own path key both apply"
     );
-    // Model B resolves neither (the name key is ambiguous, no path key for it).
+    // Model B: the basename key applies (shared); it has no path key.
     let eff_b = effective_presets(
       "model.gguf",
       "/b/model.gguf",
@@ -588,7 +587,12 @@ mod tests {
       &store,
       &catalog,
     );
-    assert!(eff_b.presets.is_empty(), "no leak of A's presets to B");
+    let names_b: Vec<_> = eff_b.presets.iter().map(|p| p.name.clone()).collect();
+    assert_eq!(
+      names_b,
+      vec!["shared-name"],
+      "basename key shared with B too"
+    );
   }
 
   #[test]
