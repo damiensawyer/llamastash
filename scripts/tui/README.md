@@ -94,6 +94,13 @@ discovered model — point `LLAMASTASH_STATE_DIR` / `LLAMASTASH_CONFIG` at a tem
 dir and run the harness against it. (Seed a `presets:` block for the focused
 model if you also want to exercise the named-preset stops.)
 
+`scripts/tui/seed_demo_models.py <dir>` provides that discovered model without
+downloading real weights: it writes a curated `qwen2` / `llama` / `gemma2` trio
+(or custom specs) as header-only GGUFs, sparse-sized so the Size column reads in
+GB. Point `LLAMASTASH_MODEL_PATHS` at the seeded dir with `LLAMASTASH_NO_SCAN=1`
+so the catalog lists only those, never the user's real library. See the script's
+docstring for the spec format.
+
 ### Reworking a recorded cast
 
 Two helpers consume a recorded cast (both handle v2 and v3):
