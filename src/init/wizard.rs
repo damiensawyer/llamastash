@@ -713,6 +713,11 @@ async fn run_install_step(
       }
     }
     InstallChoice::CustomPath(p) => {
+      if emit_progress {
+        if let Some(hint) = crate::init::install::custom_path::server_name_hint(&p) {
+          eprintln!("{}", colors::warning(&hint));
+        }
+      }
       let sp = prompts::StepProgress::start_if(
         emit_progress,
         format!("Adopting llama-server binary at {}", p.display()),

@@ -23,6 +23,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Fixed
 
+- `init`'s "point at an existing binary" path now adopts a system-package-manager llama.cpp. It used to refuse any symlink whose target was owned by another UID — including the root-owned binaries every distro ships in `/usr/bin` — so a `/usr/bin/llama-server` symlink dead-ended. It now resolves the symlink and accepts a target owned by you or root (foreign-UID targets and group/world-writable dirs are still refused), and warns when the chosen file isn't a server binary (e.g. `llama-cli`). (#45)
 - Config writes no longer strip your comments. The init wizard and `daemon` config persistence (proxy key, server path) used to re-serialise the whole `config.yaml`, discarding hand-written comments; every `config.yaml` write now goes through one comment-preserving path (the same one presets already used). Internally drops the archived `serde_yaml` for the maintained `yaml_serde` fork.
 - A `config.yaml` symlinked into a dotfiles repo no longer errors on write. Config writes now follow the link to its target and update that (the link survives), instead of refusing. `state.json` keeps its non-following behavior.
 - Proxy `/api/show` now preserves a model's embedding/rerank mode hint (it previously dropped it on the resolver path, so an auto-started embedding model could be composed as chat), and `/api/ps` no longer lists the internal Lemonade umbrella process as a model. Both surfaces now share one catalog projection / index with the rest of the proxy.
